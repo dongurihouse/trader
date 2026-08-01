@@ -1,0 +1,16 @@
+# trader — execution
+broker: sim                  # sim | manual | api   (manual is the live default; see design §9 A3)
+
+live_orders: false           # api broker interlock 1 of 2; interlock 2 is env TRADER_LIVE=1.
+                             # Flipping this is a Dev decision recorded in git.
+
+fills:
+  entry: market_next_open
+  stop_wins_ties: true
+  commission: 0.0            # broker charges none on these symbols (measured, carried from dt)
+
+# One-way slippage in basis points by symbol-era (ported verbatim from dt backtest/replay.py).
+# A missing symbol-month is an error, never a silent default.
+slippage_bps:
+  SNXX: {2026-02: 25, 2026-03: 25, 2026-04: 20, 2026-05: 15, 2026-06: 15, 2026-07: 5, 2026-08: 5}
+  SNDQ: {2026-02: 30, 2026-03: 30, 2026-04: 30, 2026-05: 30, 2026-06: 20, 2026-07: 8, 2026-08: 8}

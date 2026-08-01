@@ -1,0 +1,20 @@
+# trader — identity and market scope
+data_root: data
+timezone: America/New_York
+
+primary_symbol: SNDK
+# Signals are computed on primary_symbol; positions are expressed on these instruments.
+instrument_map:
+  long: SNXX
+  short: SNDQ
+
+# Full symbol universe kept in the bar store (context symbols included).
+symbols: [SNDK, SNXX, SNDQ, MU, SPY, QQQ, SOXX]
+
+session:
+  premarket_from: "07:00"   # local (timezone above)
+  rth_open: "09:30"
+  rth_close: "16:00"
+
+live:
+  cycle_minutes: 5          # fetch/process cadence in paper and live modes

@@ -1,0 +1,26 @@
+# trader — creator roster and global gates
+#
+# STRUCTURE IS NORMATIVE; VALUES MARKED PORT ARE FILLED IN WAVE 1-C by porting from
+# the dt sources (/Users/xup/dh/dt/rules/rules.yaml v1.6 and /Users/xup/dh/dt/rules/algos.yaml
+# roster v1.2). Do not invent thresholds: every number must come from those files.
+#
+# gates apply to all creators (evaluated inside the creators component before an
+# intent is emitted); each roster entry is one creator instance.
+
+rules_version: PORT          # carry dt's version string forward, e.g. "v1.6-trader"
+
+gates: PORT                  # dt: gate-in-play (threshold 1.0 since v1.6), veto-entry-cutoff
+
+roster:
+  # dt emitting setups -> status: emitting
+  - {id: orb5,                factory: builtin, params: PORT, status: emitting}
+  - {id: gap_play,            factory: builtin, params: PORT, status: emitting}
+  - {id: lateday_momentum,    factory: builtin, params: PORT, status: emitting}
+  # dt probe setups -> status: probe (shadow book only)
+  - {id: opening_momentum,    factory: builtin, params: PORT, status: probe}
+  - {id: day_extreme_reversal, factory: builtin, params: PORT, status: probe}
+  - {id: first_pullback,      factory: builtin, params: PORT, status: probe}
+  - {id: prior_level_breakout, factory: builtin, params: PORT, status: probe}
+  - {id: range_compression,   factory: builtin, params: PORT, status: probe}
+  # daytrader playbooks: port later as research-status creators (not in Wave 1 scope);
+  # they were at "no promotion" status in the predecessor and enter, if ever, as probes.
