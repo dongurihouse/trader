@@ -8,6 +8,7 @@ from .intents import Intent
 from .market import MarketCalendar, MarketData
 from .orders import Fill, OrderTicket, PortfolioState, PositionState, Rejection
 from .risk import RiskEngine
+from .serde import append_jsonl, read_jsonl, record_from_json, record_to_json
 from .telemetry import (
     AlgoErrorEvent,
     AlgoMetrics,
@@ -31,6 +32,7 @@ __all__ = [
     "AlgoMetrics",
     "AlgoSpec",
     "AlgoStatus",
+    "append_jsonl",
     "Bar",
     "Broker",
     "BrokerNotConfigured",
@@ -50,6 +52,9 @@ __all__ = [
     "PortfolioState",
     "PositionClosedEvent",
     "PositionState",
+    "read_jsonl",
+    "record_from_json",
+    "record_to_json",
     "Rejection",
     "RejectionEvent",
     "RiskEngine",
