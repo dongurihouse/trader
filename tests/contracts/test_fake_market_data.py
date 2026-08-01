@@ -60,10 +60,16 @@ def _multi_day_frame() -> pd.DataFrame:
     )
 
 
-def test_package_reexports_only_fake_market_data() -> None:
+def test_package_reexports_all_testing_helpers() -> None:
     package = importlib.import_module("trader.contracts.testing")
 
-    assert package.__all__ == ["FakeMarketData"]
+    assert package.__all__ == [
+        "CollectingTelemetry",
+        "FakeBroker",
+        "FakeClock",
+        "FakeMarketData",
+        "synthetic_day",
+    ]
     assert package.FakeMarketData.__name__ == "FakeMarketData"
 
 
