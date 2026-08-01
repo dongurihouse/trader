@@ -13,7 +13,7 @@ import importlib
 import sys
 
 
-_COMPONENTS = ("provider", "runtime", "creators", "execution", "console")
+_COMPONENTS = ("provider", "algos", "execution", "console")
 
 
 def _build_parser() -> argparse.ArgumentParser:
