@@ -1,0 +1,18 @@
+# trader — risk and sizing (ported semantics from dt engine/risk.py + engine/core.py rails)
+account:
+  equity: 10000
+  capital_fraction: 1.0
+  day_slots: 2               # position = equity * capital_fraction / day_slots, floored to shares
+
+rails:
+  max_entries_per_day: 2     # aligned to day_slots (dt carried 3 vs 2 as an open Dev item;
+                             # new default aligns them — Dev-adjustable here)
+  one_position_at_a_time: true
+  no_hedge: true             # never hold SNXX and SNDQ simultaneously; hedging = exiting
+  mute_after_consecutive_stops: 2
+  mute_after_cumulative_day_r: -2.0
+  reversal_cooldown_minutes: 10
+
+drawdown_stop:
+  # Portfolio-level auto-stop for the session; null disables.
+  max_session_drawdown_r: null
