@@ -10,6 +10,7 @@ import time
 from urllib.parse import parse_qs, urlparse
 
 from trader.console.config import ConsoleConfig
+from trader.console.dashboard import render_dashboard_html
 from trader.console.sessions import list_sessions, resolve_session_dir
 from trader.console.telemetry_feed import read_new_lines
 
@@ -54,12 +55,27 @@ class _ConsoleRequestHandler(BaseHTTPRequestHandler):
             self._stream_events(session_dir / "telemetry.jsonl")
             return
 
+        if parsed.path == "/":
+            self._send_html(200, render_dashboard_html())
+            return
+
         self._send_json(404, {"error": f"route {parsed.path!r} not found"})
 
     def _send_json(self, status: int, payload: dict) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+
+    def _send_html(self, status: int, document: str) -> None:
+        body = document.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         try:
