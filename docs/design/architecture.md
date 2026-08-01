@@ -51,6 +51,7 @@ trader/
     risk.yaml               # equity, slots, rails, mutes
     execution.yaml          # broker selection, fill model, slippage/commission, live interlock
     console.yaml            # host/port
+    calendar.yaml           # static ex-ante market calendar (generated in Wave 1-A)
   src/trader/
     contracts/              # Wave 0. Types, protocols, serde, errors, testing fakes + fixtures
     provider/               # Wave 1-A
@@ -123,7 +124,6 @@ data/
   events/earnings.json
   events/options/*.json                   # implied-move captures (manual procedure)
   news/raw/<YYYY-MM-DD>.jsonl             # optional archive; carries no measured signal
-  calendar/market.yaml
   sessions/<session_id>/                  # session_id = <mode>-<YYYYMMDD>-<HHMMSS>
     telemetry.jsonl
     state.json
@@ -221,6 +221,8 @@ correctness comes from the PIT rules in §4.
    `docs/archive/{dt,daytrader,win}/`, plus each old repo's `git log --stat` exported to
    a text file there (the old histories have no remotes; this is their surviving record).
 3. Removal: only after Wave 4 verification (integration green, console live against a
-   real session, migration checksums verified) and an explicit final Dev confirmation in
+   real session, migration checksums verified), a side-by-side dt-vs-trader backtest
+   comparison over the same bars reviewed by the Dev — the Dev judges whether trader is
+   at least somewhat better (Dev directive 2026-08-01) — and an explicit final Dev confirmation in
    chat, the three directories `/Users/xup/dh/win`, `/Users/xup/dh/dt`,
    `/Users/xup/dh/daytrader` are deleted. Nothing is deleted before that point.
