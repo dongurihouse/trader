@@ -1,7 +1,7 @@
 # trader — build plan
 
 Waves of small Codex tasks. A wave's tasks run inside one component agent sequentially;
-the five Wave 1 components run in parallel, one agent + one worktree each. Read
+the four Wave 1 components run in parallel, one agent + one worktree each. Read
 [architecture.md](../design/architecture.md) and [contracts.md](../design/contracts.md)
 first; contracts are normative.
 
@@ -35,7 +35,7 @@ first; contracts are normative.
   thin argparse dispatcher that lazily imports `trader.<component>.cli` modules and
   calls their `register(subparsers)` if present (components own their subcommands; no
   shared-file conflicts). Smoke test: `trader --help` exits 0 with no components present.
-- T0.2 `trader.contracts` core per contracts.md: types, errors, clock, market, creator,
+- T0.2 `trader.contracts` core per contracts.md: types, errors, clock, market, algo,
   intents, orders, broker, risk. Tests: construction, frozen-ness, literal fields.
 - T0.3 telemetry records + serde. Tests: round-trip `from(to(x)) == x` for every record
   type; JSONL append/read; ISO-8601 Z timestamps.
@@ -44,10 +44,12 @@ first; contracts are normative.
   `FakeBroker`, `make_fixtures` module; generate and commit `tests/fixtures/`. Tests:
   same-seed determinism, `FakeMarketData` raises `LookaheadError` on future asof.
 
-## Wave 1 — five components in parallel (after Wave 0 merges)
+## Wave 1 — four components in parallel (after Wave 0 merges)
 
 Each agent branches from main, builds only its own package + tests, and may import only
-`trader.contracts`. Port sources are cited per task; port semantics, not file layout.
+`trader.contracts` (execution additionally composes provider and algos at runtime, but
+its unit tests use contract fakes). Port sources are cited per task; port semantics,
+not file layout.
 
 ### 1-A provider (branch `comp-provider`)
 
@@ -72,66 +74,66 @@ Each agent branches from main, builds only its own package + tests, and may impo
   `/Users/xup/dh/dt/datalayer/mcp_relay.py`; unit-test command construction only — the
   relay needs interactive MCP auth), `trader ingest`, `trader validate`.
 
-### 1-B runtime (branch `comp-runtime`)
+### 1-B algos (branch `comp-algos`)
 
-- B1 config loading: all six YAMLs -> typed objects; `config_sha256` over the resolved
-  bundle; unknown keys are errors.
-- B2 clocks: `BacktestClock` (synthetic, `sleep_until` advances instantly), `LiveClock`
-  (wall time, injectable sleep — port the injection pattern from
-  `/Users/xup/dh/dt/live_run.py` `run(sleep=..., now=...)`).
-- B3 session runner per architecture §5 against contract fakes; session directory +
-  telemetry JSONL writer (line-flushed). In backtest mode every telemetry envelope `ts`
-  is clock time (bar time), never wall time — determinism gate depends on it. Tests:
-  scripted fake creator/broker produce an exact expected telemetry sequence.
-- B4 `trader run`: mode selection, session id `<mode>-<YYYYMMDD>-<HHMMSS>`, paper/live
-  cadence loop (`cycle_minutes`), Ctrl-C -> force-flat + `session_end` before exit.
-
-### 1-C creators (branch `comp-creators`)
-
-- C1 rules grammar evaluator ported from `/Users/xup/dh/dt/engine/rules.py`
+- B1 rules grammar evaluator ported from `/Users/xup/dh/dt/engine/rules.py`
   (source/operator/value, `all:` groups, roles gate/veto/direction/confirmation,
   `applies_to`/`except` scoping). Fresh minimal tests per operator and role.
-- C2 declarative setup -> `Creator` adapter ported from
+- B2 declarative setup -> `Algo` adapter ported from
   `/Users/xup/dh/dt/engine/algo_executor.py`: phases, minute windows, `one_shot`,
-  triggers, ordered sides, named bracket formulas.
-- C3 fill `config/creators.yaml`: replace every PORT marker with values ported from
+  triggers, ordered sides, named bracket formulas. Algos stay pure: MarketData in,
+  intents out, nothing else.
+- B3 fill `config/algos.yaml`: replace every PORT marker with values ported from
   `/Users/xup/dh/dt/rules/rules.yaml` (v1.6) and `/Users/xup/dh/dt/rules/algos.yaml`
   (roster v1.2) — every number must trace to those files, none invented. Per-setup
   smoke test: each setup fires on a crafted synthetic day.
-- C4 bracket construction: entry/stop/target formulas and SNDK->ETF price translation
+- B4 bracket construction: entry/stop/target formulas and SNDK->ETF price translation
   ported from the bracket parts of `/Users/xup/dh/dt/engine/risk.py`; intents carry
   instrument-scale levels per contracts.
 
-### 1-D execution (branch `comp-execution`)
+### 1-C execution — the orchestrator (branch `comp-execution`)
 
-- D1 risk engine: slot sizing (`equity * capital_fraction / day_slots`, floor to whole
+- X1 config loading: all six YAMLs -> typed objects; `config_sha256` over the resolved
+  bundle; unknown keys are errors.
+- X2 clocks: `BacktestClock` (synthetic, `sleep_until` advances instantly), `LiveClock`
+  (wall time, injectable sleep — port the injection pattern from
+  `/Users/xup/dh/dt/live_run.py` `run(sleep=..., now=...)`).
+- X3 risk engine: slot sizing (`equity * capital_fraction / day_slots`, floor to whole
   shares, reject over-slot rather than trim) + rails per risk.yaml (entries/day,
   one-position, no-hedge, mutes, reversal cooldown). Port:
   `/Users/xup/dh/dt/engine/risk.py`, rails in `/Users/xup/dh/dt/engine/core.py`.
   Tests: extreme and invalid intents are rejected deterministically, each rail alone.
-- D2 sim broker: next-open entry fills, stop/target monitoring (stop wins ties; open
+- X4 sim broker: next-open entry fills, stop/target monitoring (stop wins ties; open
   beyond a level fills at open), era slippage table from execution.yaml (missing
   symbol-month raises), EOD force-flat. Port fill semantics:
   `/Users/xup/dh/dt/engine/core.py` entry at 204-216, exits at 417-450; slippage:
   `/Users/xup/dh/dt/backtest/replay.py` 83-98.
-- D3 books + metrics: real and shadow portfolios, R-multiple accounting
+- X5 books + metrics: real and shadow portfolios, R-multiple accounting
   (post-slippage numerator, pre-slippage denominator — convention documented at
-  `/Users/xup/dh/dt/backtest/replay.py` 7-25), `CreatorMetrics` computation per book.
-- D4 manual broker (live default: boxed terminal ticket render — port
+  `/Users/xup/dh/dt/backtest/replay.py` 7-25), `AlgoMetrics` computation per book.
+- X6 manual broker (live default: boxed terminal ticket render — port
   `/Users/xup/dh/dt/live_run.py` `render_entry`/`_box` — plus `trader fills record` to
   log Dev-confirmed fills) and api broker stub (raises `BrokerNotConfigured` unless
   `live_orders: true` AND env `TRADER_LIVE=1` AND an adapter is wired — there is none).
+- X7 session runner per architecture §5 against contract fakes; session directory +
+  telemetry JSONL writer (line-flushed). In backtest mode every telemetry envelope `ts`
+  is clock time (bar time), never wall time. Tests: scripted fake algo/broker produce
+  an exact expected telemetry sequence.
+- X8 `trader run`: mode selection, session id `<mode>-<YYYYMMDD>-<HHMMSS>`, paper/live
+  cadence loop (`cycle_minutes`), Ctrl-C -> force-flat + `session_end` before exit.
+  Composition: build real MarketData from provider, algos from roster factories —
+  behind an import boundary so X1-X7 unit tests never need siblings installed.
 
-### 1-E console (branch `comp-console`)
+### 1-D console (branch `comp-console`)
 
 - E1 SSE server on stdlib `http.server`: `/events` tails a session's telemetry.jsonl
   (offset polling), `/sessions` lists session dirs, config from console.yaml,
   localhost only. Tests: ephemeral port, fixture telemetry, assert SSE frames.
-- E2 dashboard page: one self-contained HTML+JS file, no external assets: creator
+- E2 dashboard page: one self-contained HTML+JS file, no external assets: algo
   leaderboard (must show `n_real`, `n_shadow`, and the shadow-caveat text per
   architecture §7), cum-R sparkline (canvas), open positions, intents feed, error
   panel, mode badge. Tests: page serves 200 and contains the required elements.
-- E3 post-session report: telemetry -> markdown (per-creator metrics incl. shadow
+- E3 post-session report: telemetry -> markdown (per-algo metrics incl. shadow
   caveat, session summary, rejections by rule) as `trader report <session>`; golden
   test on fixture telemetry. Metric shapes reference:
   `/Users/xup/dh/dt/backtest/evaluate.py`.

@@ -13,12 +13,12 @@ src/trader/contracts/
   types.py         # core dataclasses and aliases
   clock.py         # Clock protocol
   market.py        # MarketData protocol, MarketCalendar
-  creator.py       # Creator protocol, CreatorSpec
+  algo.py          # Algo protocol, AlgoSpec
   intents.py       # Intent
   orders.py        # OrderTicket, Fill, Rejection, PositionState, PortfolioState
   broker.py        # Broker protocol
   risk.py          # RiskEngine protocol
-  telemetry.py     # event records, TelemetryWriter protocol, CreatorMetrics
+  telemetry.py     # event records, TelemetryWriter protocol, AlgoMetrics
   serde.py         # to_jsonl / from_jsonl for every record type
   errors.py        # LookaheadError, ContractViolation, BrokerNotConfigured
   testing/         # fakes + synthetic fixture generator (§Testing)
@@ -28,7 +28,7 @@ src/trader/contracts/
 
 - `Mode = Literal["backtest", "paper", "live"]`
 - `Side = Literal["long", "short"]`
-- `CreatorStatus = Literal["emitting", "probe", "disabled"]`
+- `AlgoStatus = Literal["emitting", "probe", "disabled"]`
 - `@dataclass(frozen=True) Bar`: `symbol: str`, `ts: datetime` (bar open time),
   `open: float`, `high: float`, `low: float`, `close: float`, `volume: float`.
   A bar covers [ts, ts+1min) and is complete (visible) once ts+1min <= asof.
@@ -73,7 +73,7 @@ class MarketData(Protocol):
 
 | field | type | notes |
 |---|---|---|
-| `creator_id` | str | roster id |
+| `algo_id` | str | roster id |
 | `ts` | datetime | the completed bar that produced it |
 | `action` | `Literal["open", "close"]` | |
 | `side` | `Side \| None` | required for open, None for close |
@@ -88,14 +88,14 @@ class MarketData(Protocol):
 
 ## orders.py
 
-- `@dataclass(frozen=True) OrderTicket`: `ticket_id: str`, `creator_id`, `intent_ts`,
+- `@dataclass(frozen=True) OrderTicket`: `ticket_id: str`, `algo_id`, `intent_ts`,
   `instrument`, `side`, `shares: int`, `entry: "market_next_open"`, `stop`, `target`,
   `risk: dict` (slot index, dollars at risk, equity snapshot), `created_ts`.
 - `@dataclass(frozen=True) Fill`: `ticket_id`, `ts`, `price: float`, `shares: int`,
   `kind: Literal["entry","stop","target","reversal","eod"]`, `book: Literal["real","shadow"]`.
 - `@dataclass(frozen=True) Rejection`: `intent: Intent`, `rule: str`, `detail: str`.
 - `@dataclass PositionState`: `instrument`, `side`, `shares`, `entry_price`,
-  `entry_ts`, `stop`, `target`, `creator_id`.
+  `entry_ts`, `stop`, `target`, `algo_id`.
 - `@dataclass PortfolioState`: `cash: float`, `equity: float`,
   `positions: list[PositionState]`, `entries_today: int`, `realized_r_today: float`,
   `muted_until: datetime | None`.
@@ -117,19 +117,22 @@ class RiskEngine(Protocol):
 PIT rule 4. The `api` broker grade must raise `BrokerNotConfigured` from `submit` unless
 config `live_orders: true` AND environment `TRADER_LIVE=1` AND an adapter is wired.
 
-## creator.py
+## algo.py
 
 ```python
-class Creator(Protocol):
+class Algo(Protocol):
     @property
     def id(self) -> str: ...
     def warmup(self, day: date, data: MarketData) -> None: ...
     def on_bar(self, asof: datetime, data: MarketData) -> list[Intent]: ...
 ```
 
-`@dataclass CreatorSpec` (one roster entry, parsed from `config/creators.yaml`):
+`@dataclass AlgoSpec` (one roster entry, parsed from `config/algos.yaml`):
 `id: str`, `factory: str` ("module:Class" or builtin name), `params: dict`,
-`status: CreatorStatus`.
+`status: AlgoStatus`.
+
+An `Algo` is pure strategy: it may call only the `MarketData` it is handed, holds no
+file/network/clock access, and communicates exclusively by returning intents.
 
 ## telemetry.py
 
@@ -144,9 +147,9 @@ Every record is a flat JSON object with common envelope fields
 | `rejection` | intent fields + `rule`, `detail` |
 | `ticket` | full OrderTicket fields |
 | `fill` | full Fill fields |
-| `position_closed` | `creator_id`, `instrument`, `r_multiple`, `book`, `exit_kind` |
-| `metrics` | one CreatorMetrics object |
-| `creator_error` | `creator_id`, `error`, `traceback` |
+| `position_closed` | `algo_id`, `instrument`, `r_multiple`, `book`, `exit_kind` |
+| `metrics` | one AlgoMetrics object |
+| `algo_error` | `algo_id`, `error`, `traceback` |
 | `session_end` | `bars_processed`, `real_trades`, `shadow_trades`, `final_equity` |
 
 ```python
@@ -154,7 +157,7 @@ class TelemetryWriter(Protocol):
     def emit(self, record: dict) -> None: ...   # append one JSONL line, flushed
 ```
 
-`@dataclass CreatorMetrics`: `creator_id`, `status`, `n_real: int`, `n_shadow: int`,
+`@dataclass AlgoMetrics`: `algo_id`, `status`, `n_real: int`, `n_shadow: int`,
 `wins: int`, `win_rate: float | None`, `mean_r: float | None`,
 `expectancy_r: float | None`, `profit_factor: float | None`,
 `max_drawdown_r: float | None`, `cum_r: float`, `updated_ts`.

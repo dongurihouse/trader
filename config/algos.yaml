@@ -1,11 +1,11 @@
-# trader — creator roster and global gates
+# trader — algo roster and global gates
 #
-# STRUCTURE IS NORMATIVE; VALUES MARKED PORT ARE FILLED IN WAVE 1-C by porting from
+# STRUCTURE IS NORMATIVE; VALUES MARKED PORT ARE FILLED IN WAVE 1-B by porting from
 # the dt sources (/Users/xup/dh/dt/rules/rules.yaml v1.6 and /Users/xup/dh/dt/rules/algos.yaml
 # roster v1.2). Do not invent thresholds: every number must come from those files.
 #
-# gates apply to all creators (evaluated inside the creators component before an
-# intent is emitted); each roster entry is one creator instance.
+# gates apply to all algos (evaluated inside the algos component before an intent is
+# emitted); each roster entry is one algo instance, loaded by the execution orchestrator.
 
 rules_version: PORT          # carry dt's version string forward, e.g. "v1.6-trader"
 
@@ -22,5 +22,5 @@ roster:
   - {id: first_pullback,      factory: builtin, params: PORT, status: probe}
   - {id: prior_level_breakout, factory: builtin, params: PORT, status: probe}
   - {id: range_compression,   factory: builtin, params: PORT, status: probe}
-  # daytrader playbooks: port later as research-status creators (not in Wave 1 scope);
-  # they were at "no promotion" status in the predecessor and enter, if ever, as probes.
+  # daytrader playbooks: not in the initial roster; if they ever enter, they enter as
+  # status: probe (they were at "no promotion" in the predecessor).
