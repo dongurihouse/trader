@@ -10,6 +10,7 @@ import pandas as pd
 
 from trader.contracts.errors import LookaheadError
 from trader.contracts.market import MarketCalendar
+from trader.provider.calendar import load_calendar
 from trader.provider.store import read_1d, read_1m_day
 
 
@@ -30,8 +31,13 @@ def _empty_bar_frame() -> pd.DataFrame:
 
 
 class ProviderMarketData:
-    def __init__(self, data_root: Path) -> None:
+    def __init__(
+        self, data_root: Path, *, calendar_path: Path | None = None
+    ) -> None:
         self._data_root = Path(data_root)
+        self._calendar = (
+            load_calendar(calendar_path) if calendar_path is not None else None
+        )
 
     def _latest_1m_completion(self, symbol: str) -> datetime | None:
         symbol_dir = self._data_root / "bars" / "1m" / symbol
@@ -99,7 +105,9 @@ class ProviderMarketData:
         return eligible.tail(lookback_days).copy(deep=True)
 
     def calendar(self) -> MarketCalendar:
-        raise NotImplementedError("wired by a later provider task")
+        if self._calendar is None:
+            raise NotImplementedError("wired by a later provider task")
+        return self._calendar
 
     def signal(
         self,
