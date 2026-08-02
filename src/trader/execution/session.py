@@ -12,7 +12,7 @@ from pathlib import Path
 from trader.contracts import append_jsonl
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import traceback
 from typing import Literal
 
@@ -90,6 +90,12 @@ def _intent_fields(intent: Intent) -> dict:
         "reason": intent.reason,
         "meta": intent.meta,
     }
+
+
+def _datetime_to_json(value: datetime) -> str:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("telemetry timestamps must be timezone-aware")
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 class SessionRunner:
@@ -180,6 +186,24 @@ class SessionRunner:
         for closed in self._real_book.take_closed_trades():
             self._emit_closed_trade(closed, "real", asof)
 
+        declined_tickets = self._broker.take_declined_tickets()  # type: ignore[attr-defined]
+        for ticket_id, reason in declined_tickets.items():
+            self._real_entry_in_flight = False
+            discarded = self._real_book.forget_unfilled_tickets([ticket_id])
+            ticket = discarded.get(ticket_id)
+            if ticket is None:
+                continue
+            self._telemetry.emit(
+                {
+                    "ev": "ticket_declined",
+                    "ts": _datetime_to_json(asof),
+                    "session": self._session_id,
+                    "ticket_id": ticket.ticket_id,
+                    "algo_id": ticket.algo_id,
+                    "reason": reason,
+                }
+            )
+
         shadow_fills = self._shadow_book.on_bar(asof, self._market_data)
         for fill in shadow_fills:
             self._emit_fill(fill, tag=self._shadow_book.fill_tag(fill))
@@ -254,6 +278,9 @@ class SessionRunner:
         self._bars_processed += 1
 
     def end_session(self, asof: datetime) -> SessionSummary:
+        self._broker.cancel_open("session end")
+        self._real_book.forget_unfilled_tickets()
+        self._real_entry_in_flight = False
         # force_flat is an expected extension implemented by every concrete
         # broker accepted by SessionRunner (SimBroker, ManualBroker, ApiBroker).
         real_fills = self._broker.force_flat(  # type: ignore[attr-defined]

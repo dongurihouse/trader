@@ -83,6 +83,29 @@ def test_register_parses_fills_record_arguments_and_attaches_handler() -> None:
     assert args.ts is None
 
 
+def test_register_parses_cancel_record_without_price_or_shares() -> None:
+    args = _parser().parse_args(
+        [
+            "fills",
+            "record",
+            "--session",
+            "s1",
+            "--ticket",
+            "t1",
+            "--kind",
+            "cancel",
+        ]
+    )
+
+    assert callable(args.func)
+    assert args.session == "s1"
+    assert args.ticket_id == "t1"
+    assert args.price is None
+    assert args.shares is None
+    assert args.kind == "cancel"
+    assert args.ts is None
+
+
 def test_fills_record_handler_loads_default_config_and_appends_fill(
     configured_working_directory: Path,
     capsys: pytest.CaptureFixture[str],
@@ -126,6 +149,67 @@ def test_fills_record_handler_loads_default_config_and_appends_fill(
         }
     ]
     assert "recorded" in capsys.readouterr().out.lower()
+
+
+def test_fills_record_handler_appends_cancel_without_fill_fields(
+    configured_working_directory: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    args = _parser().parse_args(
+        [
+            "fills",
+            "record",
+            "--session",
+            "s1",
+            "--ticket",
+            "t1",
+            "--kind",
+            "cancel",
+            "--ts",
+            "2026-08-01T19:15:00Z",
+        ]
+    )
+
+    result = args.func(args)
+
+    assert result is None
+    fill_path = (
+        configured_working_directory
+        / "sessions"
+        / "s1"
+        / "manual_fills.jsonl"
+    )
+    records = [json.loads(line) for line in fill_path.read_text().splitlines()]
+    assert records == [
+        {
+            "ticket_id": "t1",
+            "kind": "cancel",
+            "ts": "2026-08-01T19:15:00Z",
+        }
+    ]
+    assert "cancel" in capsys.readouterr().out.lower()
+
+
+def test_fills_record_handler_rejects_fill_without_price_or_shares(
+    configured_working_directory: Path,
+) -> None:
+    args = _parser().parse_args(
+        [
+            "fills",
+            "record",
+            "--session",
+            "s1",
+            "--ticket",
+            "t1",
+            "--kind",
+            "entry",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        args.func(args)
+
+    assert exc_info.value.code == 2
 
 
 def test_fills_without_record_prints_usage_and_returns_nonzero(

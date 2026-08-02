@@ -205,6 +205,9 @@ class SimBroker:
         del reason
         self._pending.clear()
 
+    def take_declined_tickets(self) -> dict[str, str]:
+        return {}
+
     def force_flat(self, asof: datetime, data: MarketData) -> list[Fill]:
         """Close every priceable position at the current bar's close."""
         fills: list[Fill] = []

@@ -8,7 +8,7 @@ from pathlib import Path
 from trader.execution.config import load_config
 
 
-_FILL_KINDS = ("entry", "stop", "target", "reversal", "eod")
+_FILL_KINDS = ("entry", "stop", "target", "reversal", "eod", "cancel")
 
 
 def _parse_timestamp(value: str) -> datetime:
@@ -32,12 +32,22 @@ def _handle_fills_record(args) -> None:
     resolved = load_config()
     state_dir = Path(resolved.trader.data_root) / "sessions" / args.session
     ts = _parse_timestamp(args.ts) if args.ts is not None else None
+    if args.kind == "cancel":
+        if args.price is not None or args.shares is not None:
+            args._record_parser.error(
+                "--price and --shares must not be used with --kind cancel"
+            )
+    elif args.price is None or args.shares is None:
+        args._record_parser.error(
+            "--price and --shares are required unless --kind cancel"
+        )
+
     record_fill(
         state_dir,
         ticket_id=args.ticket_id,
+        kind=args.kind,
         price=args.price,
         shares=args.shares,
-        kind=args.kind,
         ts=ts,
     )
     print(
@@ -55,11 +65,11 @@ def _register_fills(subparsers) -> None:
     record_parser = fills_subparsers.add_parser("record")
     record_parser.add_argument("--session", required=True)
     record_parser.add_argument("--ticket", required=True, dest="ticket_id")
-    record_parser.add_argument("--price", required=True, type=float)
-    record_parser.add_argument("--shares", required=True, type=int)
+    record_parser.add_argument("--price", default=None, type=float)
+    record_parser.add_argument("--shares", default=None, type=int)
     record_parser.add_argument("--kind", required=True, choices=_FILL_KINDS)
     record_parser.add_argument("--ts", default=None)
-    record_parser.set_defaults(func=_handle_fills_record)
+    record_parser.set_defaults(func=_handle_fills_record, _record_parser=record_parser)
 
 
 def _register_run(subparsers) -> None:

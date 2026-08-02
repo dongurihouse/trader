@@ -200,6 +200,12 @@ def test_record_fill_appends_exact_jsonl_shape_and_normalizes_timestamp(
         kind="stop",
         ts=datetime(2026, 7, 1, 14, 0, tzinfo=timezone.utc),
     )
+    record_fill(
+        state_dir,
+        ticket_id="ticket-3",
+        kind="cancel",
+        ts=datetime(2026, 7, 1, 14, 5, tzinfo=timezone.utc),
+    )
 
     records = [
         json.loads(line)
@@ -219,6 +225,11 @@ def test_record_fill_appends_exact_jsonl_shape_and_normalizes_timestamp(
             "shares": 3,
             "kind": "stop",
             "ts": "2026-07-01T14:00:00Z",
+        },
+        {
+            "ticket_id": "ticket-3",
+            "kind": "cancel",
+            "ts": "2026-07-01T14:05:00Z",
         },
     ]
 
@@ -286,6 +297,42 @@ def test_new_recorded_fill_is_returned_once_and_starts_position_monitoring(
         )
     ]
     assert second == []
+
+
+def test_cancel_record_declines_awaiting_ticket_once_without_later_notices(
+    tmp_path: Path,
+) -> None:
+    asof = BAR_START + timedelta(minutes=1)
+    output: list[str] = []
+    broker = ManualBroker(tmp_path, out=output.append, style=Style(False))
+    broker.submit(_ticket())
+    output.clear()
+    record_fill(
+        tmp_path,
+        ticket_id="ticket-1",
+        kind="cancel",
+        ts=asof,
+    )
+
+    first = broker.on_bar(
+        asof,
+        _data((BAR_START, 100.0, 104.0, 94.0, 99.0)),
+    )
+    first_declines = broker.take_declined_tickets()
+    second = broker.on_bar(
+        asof + timedelta(minutes=1),
+        _data(
+            (BAR_START, 100.0, 104.0, 94.0, 99.0),
+            (BAR_START + timedelta(minutes=1), 100.0, 104.0, 94.0, 99.0),
+        ),
+    )
+    second_declines = broker.take_declined_tickets()
+
+    assert first == []
+    assert second == []
+    assert first_declines == {"ticket-1": "manual cancel"}
+    assert second_declines == {}
+    assert output == []
 
 
 def test_open_position_stays_quiet_inside_bracket_then_notices_stop_once(

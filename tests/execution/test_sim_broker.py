@@ -423,6 +423,7 @@ def test_cancel_open_discards_pending_entry() -> None:
     broker.cancel_open("test")
 
     assert broker.on_bar(asof, data) == []
+    assert broker.take_declined_tickets() == {}
 
 
 def test_cancel_open_keeps_filled_position_under_exit_monitoring() -> None:

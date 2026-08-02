@@ -66,4 +66,5 @@ def test_non_submit_methods_remain_inert_without_api_wiring() -> None:
 
     assert broker.on_bar(asof, unused_data) == []
     broker.cancel_open("operator requested")
+    assert broker.take_declined_tickets() == {}
     assert broker.force_flat(asof, unused_data) == []

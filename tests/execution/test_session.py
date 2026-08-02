@@ -13,6 +13,7 @@ import pandas as pd
 import pytest
 
 from trader.contracts import (
+    Broker,
     AlgoStatus,
     Intent,
     MarketData,
@@ -23,7 +24,8 @@ from trader.contracts import (
 )
 from trader.contracts.testing import CollectingTelemetry, FakeMarketData
 from trader.execution.book import RealBook, ShadowBook
-from trader.execution.broker import SimBroker
+from trader.execution.broker import ManualBroker, SimBroker
+from trader.execution.broker.manual import Style, record_fill
 from trader.execution.config import (
     AccountConfig,
     DrawdownStopConfig,
@@ -119,7 +121,7 @@ def _frame(
     )
 
 
-def _risk_config() -> RiskConfig:
+def _risk_config(*, max_entries_per_day: int = 10) -> RiskConfig:
     return RiskConfig(
         account=AccountConfig(
             equity=10_000.0,
@@ -127,7 +129,7 @@ def _risk_config() -> RiskConfig:
             day_slots=2,
         ),
         rails=RailsConfig(
-            max_entries_per_day=10,
+            max_entries_per_day=max_entries_per_day,
             one_position_at_a_time=True,
             no_hedge=True,
             mute_after_consecutive_stops=10,
@@ -158,8 +160,10 @@ def _runner(
     roster: list[RosterEntry],
     risk: RiskEngine | None = None,
     slippage_bps: float = 0.0,
+    risk_config: RiskConfig | None = None,
+    broker: Broker | None = None,
 ) -> tuple[SessionRunner, RealBook, ShadowBook]:
-    risk_config = _risk_config()
+    risk_config = _risk_config() if risk_config is None else risk_config
     execution_config = _execution_config(slippage_bps=slippage_bps)
     real_book = RealBook(risk_config)
     shadow_book = ShadowBook(execution_config)
@@ -167,7 +171,7 @@ def _runner(
         session_id="backtest-20260701-scripted",
         mode="backtest",
         market_data=data,
-        broker=SimBroker(execution_config),
+        broker=SimBroker(execution_config) if broker is None else broker,
         risk=risk if risk is not None else RiskRails(risk_config),
         real_book=real_book,
         shadow_book=shadow_book,
@@ -375,7 +379,6 @@ def test_start_day_drops_pending_entry_and_resets_in_flight_guard() -> None:
         {
             "SNXX": _frame(
                 (BAR_START, 100.0, 101.0, 99.0, 100.0),
-                (BAR_START + timedelta(minutes=1), 100.0, 101.0, 99.0, 100.0),
                 (next_day_start, 100.0, 101.0, 99.0, 100.0),
                 (next_day_start + timedelta(minutes=1), 100.0, 101.0, 99.0, 100.0),
             )
@@ -403,7 +406,7 @@ def test_start_day_drops_pending_entry_and_resets_in_flight_guard() -> None:
 
     runner.start_day(BAR_START.date())
     runner.process_bar(first_intent_ts)
-    assert real_book.state.entries_today == 1
+    assert real_book.state.entries_today == 0
 
     runner.start_day(next_day_start.date())
     assert real_book.state.entries_today == 0
@@ -425,6 +428,175 @@ def test_start_day_drops_pending_entry_and_resets_in_flight_guard() -> None:
         ("active", next_day_start.date()),
     ]
     assert disabled.on_bar_calls == []
+
+
+def test_last_bar_pending_ticket_does_not_consume_slot_or_block_next_day() -> None:
+    first_intent_ts = BAR_START + timedelta(minutes=1)
+    next_day_start = BAR_START + timedelta(days=1)
+    second_intent_ts = next_day_start + timedelta(minutes=1)
+    second_fill_ts = second_intent_ts + timedelta(minutes=1)
+    data = FakeMarketData(
+        {
+            "SNXX": _frame(
+                (BAR_START, 100.0, 101.0, 99.0, 100.0),
+                (next_day_start, 100.0, 101.0, 99.0, 100.0),
+                (next_day_start + timedelta(minutes=1), 100.0, 101.0, 99.0, 100.0),
+            )
+        }
+    )
+    first = ScriptedAlgo(
+        "first",
+        {first_intent_ts: [_intent("first", first_intent_ts)]},
+    )
+    second = ScriptedAlgo(
+        "second",
+        {second_intent_ts: [_intent("second", second_intent_ts)]},
+    )
+    telemetry = CollectingTelemetry()
+    runner, real_book, _shadow_book = _runner(
+        data=data,
+        telemetry=telemetry,
+        roster=[
+            RosterEntry(first, "emitting"),
+            RosterEntry(second, "emitting"),
+        ],
+        risk_config=_risk_config(max_entries_per_day=1),
+    )
+
+    runner.start_day(BAR_START.date())
+    runner.process_bar(first_intent_ts)
+    assert real_book.state.entries_today == 0
+
+    runner.start_day(next_day_start.date())
+    runner.process_bar(second_intent_ts)
+    runner.process_bar(second_fill_ts)
+
+    ticket_algos = [
+        record["algo_id"] for record in telemetry.records if record["ev"] == "ticket"
+    ]
+    rejections = [
+        record for record in telemetry.records if record["ev"] == "rejection"
+    ]
+    real_fills = [
+        record
+        for record in telemetry.records
+        if record["ev"] == "fill" and record["book"] == "real"
+    ]
+    assert ticket_algos == ["first", "second"]
+    assert rejections == []
+    assert [
+        (record["ticket_id"].startswith("second-"), record["kind"])
+        for record in real_fills
+    ] == [(True, "entry")]
+    assert real_book.state.entries_today == 1
+
+
+def test_end_session_discards_pending_real_ticket_and_clears_in_flight() -> None:
+    intent_ts = BAR_START + timedelta(minutes=1)
+    data = FakeMarketData(
+        {
+            "SNXX": _frame(
+                (BAR_START, 100.0, 101.0, 99.0, 100.0),
+            )
+        }
+    )
+    algo = ScriptedAlgo(
+        "pending-at-close",
+        {intent_ts: [_intent("pending-at-close", intent_ts)]},
+    )
+    telemetry = CollectingTelemetry()
+    runner, real_book, _shadow_book = _runner(
+        data=data,
+        telemetry=telemetry,
+        roster=[RosterEntry(algo, "emitting")],
+        risk_config=_risk_config(max_entries_per_day=1),
+    )
+
+    runner.start_day(BAR_START.date())
+    runner.process_bar(intent_ts)
+    assert real_book.state.entries_today == 0
+
+    summary = runner.end_session(intent_ts)
+
+    assert summary.real_trades == 0
+    assert not any(record["ev"] == "fill" for record in telemetry.records)
+    assert real_book.state.entries_today == 0
+    assert real_book.state.positions == []
+    assert real_book.forget_unfilled_tickets() == {}
+    assert runner._real_entry_in_flight is False
+
+
+def test_manual_decline_clears_in_flight_discards_ticket_and_emits_telemetry(
+    tmp_path: Path,
+) -> None:
+    first_intent_ts = BAR_START + timedelta(minutes=1)
+    decline_ts = first_intent_ts + timedelta(minutes=1)
+    data = FakeMarketData(
+        {
+            "SNXX": _frame(
+                (BAR_START, 100.0, 101.0, 99.0, 100.0),
+                (BAR_START + timedelta(minutes=1), 100.0, 101.0, 99.0, 100.0),
+            )
+        }
+    )
+    declined = ScriptedAlgo(
+        "declined",
+        {first_intent_ts: [_intent("declined", first_intent_ts)]},
+    )
+    replacement = ScriptedAlgo(
+        "replacement",
+        {decline_ts: [_intent("replacement", decline_ts)]},
+    )
+    telemetry = CollectingTelemetry()
+    broker = ManualBroker(tmp_path, out=lambda _message: None, style=Style(False))
+    runner, real_book, _shadow_book = _runner(
+        data=data,
+        telemetry=telemetry,
+        roster=[
+            RosterEntry(declined, "emitting"),
+            RosterEntry(replacement, "emitting"),
+        ],
+        broker=broker,
+    )
+
+    runner.start_day(BAR_START.date())
+    runner.process_bar(first_intent_ts)
+    first_ticket_id = next(
+        record["ticket_id"]
+        for record in telemetry.records
+        if record["ev"] == "ticket"
+    )
+    record_fill(
+        tmp_path,
+        ticket_id=first_ticket_id,
+        kind="cancel",
+        ts=decline_ts,
+    )
+    runner.process_bar(decline_ts)
+
+    declined_records = [
+        record for record in telemetry.records if record["ev"] == "ticket_declined"
+    ]
+    ticket_algos = [
+        record["algo_id"] for record in telemetry.records if record["ev"] == "ticket"
+    ]
+    rejections = [
+        record for record in telemetry.records if record["ev"] == "rejection"
+    ]
+    assert declined_records == [
+        {
+            "ev": "ticket_declined",
+            "ts": "2026-07-01T13:32:00Z",
+            "session": "backtest-20260701-scripted",
+            "ticket_id": first_ticket_id,
+            "algo_id": "declined",
+            "reason": "manual cancel",
+        }
+    ]
+    assert ticket_algos == ["declined", "replacement"]
+    assert rejections == []
+    assert real_book.state.entries_today == 0
+    assert real_book.forget_unfilled_tickets([first_ticket_id]) == {}
 
 
 def test_end_session_force_flats_real_position_and_emits_final_metrics() -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal, cast
@@ -94,12 +95,21 @@ class RealBook:
 
     def register_ticket(self, ticket: OrderTicket) -> None:
         self._tickets[ticket.ticket_id] = ticket
-        # dt consumed its `entries` slot at fill/promotion time. This book
-        # consumes it earlier, at ticket acceptance, so tickets still in
-        # flight cannot exceed max_entries_per_day. Closing the separate
-        # one-position/no-hedge in-flight gap, if any, belongs to X7's
-        # session loop and is intentionally not solved here.
-        self._state.entries_today += 1
+
+    def forget_unfilled_tickets(
+        self,
+        ticket_ids: Iterable[str] | None = None,
+    ) -> dict[str, OrderTicket]:
+        """Discard accepted tickets that never became open positions."""
+        candidates = list(self._tickets) if ticket_ids is None else list(ticket_ids)
+        discarded: dict[str, OrderTicket] = {}
+        for ticket_id in candidates:
+            if ticket_id in self._positions_by_ticket:
+                continue
+            ticket = self._tickets.pop(ticket_id, None)
+            if ticket is not None:
+                discarded[ticket_id] = ticket
+        return discarded
 
     def apply_fills(self, fills: list[Fill], data: MarketData) -> None:
         for fill in fills:
@@ -127,6 +137,7 @@ class RealBook:
             instrument=ticket.instrument,
             entry_fill_ts=fill.ts,
         )
+        self._state.entries_today += 1
 
     def _apply_exit(self, fill: Fill, data: MarketData) -> None:
         position = self._positions_by_ticket[fill.ticket_id]

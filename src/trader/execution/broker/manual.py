@@ -18,7 +18,8 @@ from trader.contracts import Fill, MarketData, OrderTicket, append_jsonl
 from .sim import check_exit
 
 
-FillKind = Literal["entry", "stop", "target", "reversal", "eod"]
+FilledKind = Literal["entry", "stop", "target", "reversal", "eod"]
+FillKind = Literal["entry", "stop", "target", "reversal", "eod", "cancel"]
 ExitNoticeKind = Literal["stop", "target", "eod"]
 
 
@@ -184,6 +185,7 @@ class ManualBroker:
         self._fill_offset = 0
         self._awaiting: dict[str, OrderTicket] = {}
         self._confirmed: dict[str, _ConfirmedPosition] = {}
+        self._declined: dict[str, str] = {}
 
     def _emit(self, rendered: str) -> None:
         self._out(self._style.bell + rendered)
@@ -209,12 +211,19 @@ class ManualBroker:
                     break
 
                 payload = json.loads(line)
+                if payload["kind"] == "cancel":
+                    ticket_id = payload["ticket_id"]
+                    if self._awaiting.pop(ticket_id, None) is not None:
+                        self._declined[ticket_id] = "manual cancel"
+                    self._fill_offset = handle.tell()
+                    continue
+
                 fill = Fill(
                     ticket_id=payload["ticket_id"],
                     ts=_parse_timestamp(payload["ts"]),
                     price=payload["price"],
                     shares=payload["shares"],
-                    kind=payload["kind"],
+                    kind=cast(FilledKind, payload["kind"]),
                     book="real",
                 )
                 fills.append(fill)
@@ -271,6 +280,11 @@ class ManualBroker:
         del reason
         self._awaiting.clear()
 
+    def take_declined_tickets(self) -> dict[str, str]:
+        declined = self._declined
+        self._declined = {}
+        return declined
+
     def force_flat(self, asof: datetime, data: MarketData) -> list[Fill]:
         del asof, data
         for position in self._confirmed.values():
@@ -289,23 +303,31 @@ def record_fill(
     state_dir: Path,
     *,
     ticket_id: str,
-    price: float,
-    shares: int,
     kind: FillKind,
+    price: float | None = None,
+    shares: int | None = None,
     ts: datetime | None = None,
 ) -> None:
     """Append one operator-confirmed real fill to a session's manual fill log."""
 
     fill_ts = datetime.now(timezone.utc) if ts is None else ts
+    record: dict[str, object] = {
+        "ticket_id": ticket_id,
+        "kind": kind,
+        "ts": _iso_z(fill_ts),
+    }
+    if kind == "cancel":
+        if price is not None or shares is not None:
+            raise ValueError("cancel records must not include price or shares")
+    else:
+        if price is None or shares is None:
+            raise ValueError("price and shares are required for fill records")
+        record["price"] = price
+        record["shares"] = shares
+
     append_jsonl(
         Path(state_dir) / "manual_fills.jsonl",
-        {
-            "ticket_id": ticket_id,
-            "price": price,
-            "shares": shares,
-            "kind": kind,
-            "ts": _iso_z(fill_ts),
-        },
+        record,
     )
 
 

@@ -42,6 +42,9 @@ class ApiBroker:
     def cancel_open(self, reason: str) -> None:
         del reason
 
+    def take_declined_tickets(self) -> dict[str, str]:
+        return {}
+
     def force_flat(self, asof: datetime, data: MarketData) -> list[Fill]:
         del asof, data
         return []

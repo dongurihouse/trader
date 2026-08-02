@@ -197,24 +197,25 @@ def test_real_book_starts_with_one_stable_empty_portfolio() -> None:
     assert book.state.muted_until is None
 
 
-def test_register_ticket_consumes_one_daily_entry_without_opening_position() -> None:
+def test_register_ticket_records_pending_ticket_without_consuming_daily_entry() -> None:
     book = RealBook(_risk_config())
 
     book.register_ticket(_ticket("ticket-a"))
-    assert book.state.entries_today == 1
+    assert book.state.entries_today == 0
     assert book.state.positions == []
 
     book.register_ticket(_ticket("ticket-b"))
-    assert book.state.entries_today == 2
+    assert book.state.entries_today == 0
     assert book.state.positions == []
 
 
-def test_entry_fill_builds_position_from_ticket_and_slipped_fill() -> None:
+def test_entry_fill_consumes_daily_entry_and_builds_position_from_ticket() -> None:
     book = RealBook(_risk_config())
     ticket = _ticket(shares=17, stop=94.0, target=108.0)
     entry_ts = BAR_START + timedelta(minutes=1)
     data = _data_for_raw_opens(100.0)
     book.register_ticket(ticket)
+    assert book.state.entries_today == 0
 
     book.apply_fills(
         [
@@ -230,6 +231,7 @@ def test_entry_fill_builds_position_from_ticket_and_slipped_fill() -> None:
         data,
     )
 
+    assert book.state.entries_today == 1
     assert book.state.positions == [
         PositionState(
             instrument="SNXX",
@@ -242,6 +244,48 @@ def test_entry_fill_builds_position_from_ticket_and_slipped_fill() -> None:
             algo_id="breakout",
         )
     ]
+
+
+def test_forget_unfilled_tickets_discards_only_tickets_without_positions() -> None:
+    book = RealBook(_risk_config())
+    filled = _ticket("filled")
+    pending = _ticket("pending")
+    entry_ts = BAR_START + timedelta(minutes=1)
+    data = _data_for_raw_opens(100.0)
+    book.register_ticket(filled)
+    book.register_ticket(pending)
+    book.apply_fills(
+        [
+            Fill(
+                ticket_id=filled.ticket_id,
+                ts=entry_ts,
+                price=100.25,
+                shares=filled.shares,
+                kind="entry",
+                book="real",
+            )
+        ],
+        data,
+    )
+
+    discarded = book.forget_unfilled_tickets()
+
+    assert list(discarded) == ["pending"]
+    assert discarded["pending"] == pending
+    book.apply_fills(
+        [
+            Fill(
+                ticket_id=filled.ticket_id,
+                ts=entry_ts + timedelta(minutes=1),
+                price=104.75,
+                shares=filled.shares,
+                kind="target",
+                book="real",
+            )
+        ],
+        data,
+    )
+    assert book.state.positions == []
 
 
 def test_target_exit_resolves_r_removes_position_and_drains_closed_trade() -> None:
