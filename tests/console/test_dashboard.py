@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from trader.console.config import ConsoleConfig, load_console_config
-from trader.console.dashboard import SHADOW_CAVEAT_TEXT
+from trader.console.dashboard import SHADOW_CAVEAT_TEXT, render_dashboard_html
 from trader.console.server import ConsoleServer, run_server
 
 
@@ -67,6 +67,33 @@ def test_root_serves_self_contained_dashboard(running_server: ConsoleServer) -> 
         'id="positions"',
         'id="intents"',
         'id="errors"',
+    ):
+        assert required_markup in body
+
+    assert '<link rel="stylesheet"' not in body
+    assert "<script src=" not in body
+
+
+def test_dashboard_html_contains_console_v2_live_additions() -> None:
+    body = render_dashboard_html()
+
+    for href in (
+        'href="/"',
+        'href="/workbench/provider"',
+        'href="/workbench/algos"',
+        'href="/workbench/execution"',
+        'href="/results"',
+    ):
+        assert href in body
+
+    for required_markup in (
+        'id="raw-log"',
+        'class="raw-log-lines"',
+        'class="raw-log-line"',
+        'id="connection-status"',
+        "pollIdleSessions",
+        "appendRawLogLine",
+        "JSON.stringify(record)",
     ):
         assert required_markup in body
 

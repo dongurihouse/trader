@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from trader.console.nav import render_nav_html
+from trader.console.styles import BASE_CSS
+
 
 SHADOW_CAVEAT_TEXT = (
     "Shadow metrics simulate every probe-algo intent and every risk-rejected "
@@ -20,45 +23,7 @@ _DASHBOARD_HTML = """<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>trader.console</title>
   <style>
-    :root {
-      color-scheme: dark;
-      --bg: #0b1015;
-      --panel: #121a22;
-      --panel-edge: #263441;
-      --text: #e4edf4;
-      --muted: #8fa3b2;
-      --accent: #61d6a9;
-      --danger: #ff7b79;
-      --warning: #f0c36c;
-    }
-
-    * { box-sizing: border-box; }
-
-    body {
-      margin: 0;
-      background: var(--bg);
-      color: var(--text);
-      font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
-        "Liberation Mono", "Courier New", monospace;
-    }
-
-    main {
-      width: min(1500px, 100%);
-      margin: 0 auto;
-      padding: 24px;
-    }
-
-    header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 16px;
-      margin-bottom: 18px;
-    }
-
-    h1, h2 { margin: 0; }
-    h1 { font-size: 22px; letter-spacing: 0.02em; }
-    h2 { margin-bottom: 12px; font-size: 15px; color: var(--accent); }
+__BASE_CSS__
 
     #mode-badge {
       min-width: 52px;
@@ -70,41 +35,27 @@ _DASHBOARD_HTML = """<!doctype html>
       text-transform: uppercase;
     }
 
+    #connection-status {
+      min-width: 116px;
+      color: var(--warning);
+      text-align: right;
+    }
+
+    #connection-status:empty {
+      display: none;
+    }
+
+    .header-status {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
     .grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 16px;
     }
-
-    .panel {
-      min-width: 0;
-      padding: 16px;
-      border: 1px solid var(--panel-edge);
-      border-radius: 8px;
-      background: var(--panel);
-    }
-
-    .wide { grid-column: 1 / -1; }
-    .table-wrap { overflow-x: auto; }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-variant-numeric: tabular-nums;
-    }
-
-    th, td {
-      padding: 8px 10px;
-      border-bottom: 1px solid var(--panel-edge);
-      text-align: right;
-      white-space: nowrap;
-    }
-
-    th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) {
-      text-align: left;
-    }
-
-    th { color: var(--muted); font-size: 12px; font-weight: 600; }
 
     #shadow-caveat {
       margin: 12px 0 0;
@@ -121,13 +72,31 @@ _DASHBOARD_HTML = """<!doctype html>
       background: #0d141a;
     }
 
-    .empty { color: var(--muted); }
     .feed-line, .position-line { padding: 7px 0; border-bottom: 1px solid var(--panel-edge); }
     .rejection, .error-line { color: var(--danger); }
     .position-line strong { color: var(--warning); }
 
+    .raw-log-lines {
+      height: 280px;
+      overflow-y: auto;
+      border: 1px solid var(--panel-edge);
+      background: #0d141a;
+      padding: 10px;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .raw-log-line {
+      padding: 3px 0;
+      border-bottom: 1px solid rgba(38, 52, 65, 0.55);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
     @media (max-width: 840px) {
       main { padding: 14px; }
+      header { align-items: flex-start; flex-direction: column; }
+      .header-status { align-self: stretch; justify-content: space-between; }
       .grid { grid-template-columns: 1fr; }
       .wide { grid-column: auto; }
     }
@@ -137,8 +106,13 @@ _DASHBOARD_HTML = """<!doctype html>
   <main>
     <header>
       <h1>trader.console</h1>
-      <span id="mode-badge"></span>
+      <div class="header-status">
+        <span id="mode-badge"></span>
+        <span id="connection-status" aria-live="polite"></span>
+      </div>
     </header>
+
+    __NAV_HTML__
 
     <div class="grid">
       <section class="panel wide" aria-labelledby="leaderboard-heading">
@@ -184,6 +158,13 @@ _DASHBOARD_HTML = """<!doctype html>
         <h2 id="errors-heading">Algo errors</h2>
         <div id="errors"><p class="empty">No algo errors.</p></div>
       </section>
+
+      <section class="panel wide" aria-labelledby="raw-log-heading">
+        <h2 id="raw-log-heading">Raw log</h2>
+        <div id="raw-log" class="raw-log-lines">
+          <p class="empty">Waiting for telemetry.</p>
+        </div>
+      </section>
     </div>
   </main>
 
@@ -196,6 +177,8 @@ _DASHBOARD_HTML = """<!doctype html>
       const positionsPanel = document.getElementById("positions");
       const intentsPanel = document.getElementById("intents");
       const errorsPanel = document.getElementById("errors");
+      const rawLogPanel = document.getElementById("raw-log");
+      const connectionStatus = document.getElementById("connection-status");
       const sparkline = document.getElementById("cum-r-sparkline");
 
       const roster = new Map();
@@ -203,6 +186,9 @@ _DASHBOARD_HTML = """<!doctype html>
       const tickets = new Map();
       const openPositions = new Map();
       const realCumR = [];
+      const searchParams = new URLSearchParams(window.location.search);
+      let eventSource = null;
+      let idlePollTimer = null;
 
       function escapeHtml(value) {
         const node = document.createElement("span");
@@ -274,6 +260,17 @@ _DASHBOARD_HTML = """<!doctype html>
         line.textContent = text;
         panel.prepend(line);
         while (panel.children.length > 50) panel.lastElementChild.remove();
+      }
+
+      function appendRawLogLine(record) {
+        const placeholder = rawLogPanel.querySelector(".empty");
+        if (placeholder) placeholder.remove();
+        rawLogPanel.insertAdjacentHTML("beforeend", '<div class="raw-log-line"></div>');
+        rawLogPanel.lastElementChild.textContent = JSON.stringify(record);
+        while (rawLogPanel.children.length > 1000) {
+          rawLogPanel.firstElementChild.remove();
+        }
+        rawLogPanel.scrollTop = rawLogPanel.scrollHeight;
       }
 
       function renderIntent(record) {
@@ -389,6 +386,52 @@ _DASHBOARD_HTML = """<!doctype html>
         leaderboardBody.innerHTML =
           `<tr><td class="empty" colspan="10">${escapeHtml(message)}</td></tr>`;
         positionsPanel.innerHTML = `<p class="empty">${escapeHtml(message)}</p>`;
+        rawLogPanel.innerHTML = `<p class="empty">${escapeHtml(message)}</p>`;
+      }
+
+      function setConnectionStatus(message) {
+        connectionStatus.textContent = message;
+      }
+
+      function pickSessionId(sessions) {
+        return searchParams.has("session")
+          ? searchParams.get("session")
+          : sessions[sessions.length - 1];
+      }
+
+      function stopIdlePolling() {
+        if (idlePollTimer != null) {
+          window.clearInterval(idlePollTimer);
+          idlePollTimer = null;
+        }
+      }
+
+      function pollIdleSessions() {
+        if (idlePollTimer != null || eventSource != null) return;
+        idlePollTimer = window.setInterval(followSession, 2000);
+      }
+
+      function openSession(sessionId) {
+        if (eventSource != null) eventSource.close();
+        eventSource = new EventSource(
+          '/events?session=' + encodeURIComponent(sessionId)
+        );
+        setConnectionStatus("connecting...");
+        eventSource.onopen = () => {
+          setConnectionStatus("");
+        };
+        eventSource.onerror = () => {
+          setConnectionStatus("reconnecting...");
+        };
+        eventSource.onmessage = (event) => {
+          try {
+            const record = JSON.parse(event.data);
+            appendRawLogLine(record);
+            handleEvent(record);
+          } catch (error) {
+            console.error("invalid telemetry event", error);
+          }
+        };
       }
 
       async function followSession() {
@@ -399,26 +442,18 @@ _DASHBOARD_HTML = """<!doctype html>
           const sessions = payload.sessions || [];
 
           if (sessions.length === 0) {
-            showNoSessions("no sessions yet");
+            showNoSessions("waiting for a session");
+            setConnectionStatus("waiting for session");
+            pollIdleSessions();
             return;
           }
 
-          const searchParams = new URLSearchParams(window.location.search);
-          const sessionId = searchParams.has("session")
-            ? searchParams.get("session")
-            : sessions[sessions.length - 1];
-          const source = new EventSource(
-            '/events?session=' + encodeURIComponent(sessionId)
-          );
-          source.onmessage = (event) => {
-            try {
-              handleEvent(JSON.parse(event.data));
-            } catch (error) {
-              console.error("invalid telemetry event", error);
-            }
-          };
+          stopIdlePolling();
+          openSession(pickSessionId(sessions));
         } catch (error) {
           showNoSessions("unable to load sessions");
+          setConnectionStatus("unable to load sessions");
+          pollIdleSessions();
           console.error(error);
         }
       }
@@ -435,4 +470,8 @@ _DASHBOARD_HTML = """<!doctype html>
 
 def render_dashboard_html() -> str:
     """Return the complete dashboard document ready for an HTTP response."""
-    return _DASHBOARD_HTML.replace("__SHADOW_CAVEAT_TEXT__", SHADOW_CAVEAT_TEXT)
+    return (
+        _DASHBOARD_HTML.replace("__BASE_CSS__", BASE_CSS)
+        .replace("__NAV_HTML__", render_nav_html("/"))
+        .replace("__SHADOW_CAVEAT_TEXT__", SHADOW_CAVEAT_TEXT)
+    )
