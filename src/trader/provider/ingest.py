@@ -189,23 +189,36 @@ def is_bad_tick(
     return bad_tick_fields(prospective_frame, fraction)[position]
 
 
-def _quarantine_incoming(
+def _quarantine_day(
     symbol: str,
     day: date,
     existing: pd.DataFrame | None,
     incoming: pd.DataFrame,
     bad_tick_neighbor_fraction: float,
-) -> tuple[pd.DataFrame, list[dict]]:
-    """Remove anomalous incoming rows while leaving existing store rows intact."""
+) -> tuple[pd.DataFrame, list[dict], dict | None]:
+    """Classify a merged day and return the frame that is safe to store."""
     prospective = _merge_frames(existing, incoming)
-    incoming_timestamps = set(incoming.index)
+    fields = bad_tick_fields(prospective, bad_tick_neighbor_fraction)
+    flagged_count = sum(field is not None for field in fields)
+    flagged_fraction = flagged_count / len(prospective)
+    if flagged_fraction > 0.5:
+        return (
+            prospective,
+            [],
+            {
+                "symbol": symbol,
+                "day": day,
+                "reason": (
+                    "bad-tick classifier flagged more than half the day's bars "
+                    f"-- {flagged_count} of {len(prospective)} positions"
+                ),
+            },
+        )
+
     quarantined_timestamps: list[pd.Timestamp] = []
     quarantined: list[dict] = []
-    fields = bad_tick_fields(prospective, bad_tick_neighbor_fraction)
 
     for position, timestamp in enumerate(prospective.index):
-        if timestamp not in incoming_timestamps:
-            continue
         offending_field = fields[position]
         if offending_field is None:
             continue
@@ -223,8 +236,8 @@ def _quarantine_incoming(
             }
         )
 
-    surviving = incoming.drop(index=quarantined_timestamps)
-    return surviving, quarantined
+    surviving = prospective.drop(index=quarantined_timestamps)
+    return surviving, quarantined, None
 
 
 def _day_return(frame: pd.DataFrame) -> float:
@@ -329,16 +342,16 @@ def ingest_file(
             summary["days"].add(day)
 
     quarantined: list[dict] = []
+    validation_errors: list[dict] = []
     for (symbol, day), incoming in incoming_by_day.items():
         existing = store.read_1m_day(data_root, symbol, day)
-        surviving, day_quarantine = _quarantine_incoming(
+        merged, day_quarantine, validation_error = _quarantine_day(
             symbol,
             day,
             existing,
             incoming,
             bad_tick_neighbor_fraction,
         )
-        merged = _merge_frames(existing, surviving)
         store.write_1m_day(data_root, symbol, day, merged)
         daily_bar = _daily_bar(day, merged)
         if daily_bar is not None:
@@ -349,6 +362,8 @@ def ingest_file(
                 _merge_frames(existing_daily, daily_bar),
             )
         quarantined.extend(day_quarantine)
+        if validation_error is not None:
+            validation_errors.append(validation_error)
 
     touched = set(incoming_by_day)
     result_summary = {
@@ -360,6 +375,7 @@ def ingest_file(
         for symbol, summary in summaries.items()
     }
     result_summary["quarantined"] = quarantined
+    result_summary["validation_errors"] = validation_errors
     result_summary["etf_warnings"] = _etf_warnings(
         data_root,
         touched,
@@ -384,6 +400,7 @@ def ingest_all(
     """Ingest all nested JSON dumps in sorted path order and aggregate results."""
     aggregate: dict[str, dict] = {}
     quarantined: list[dict] = []
+    validation_errors: list[dict] = []
     warnings: list[dict] = []
 
     for path in sorted(Path(raw_root).rglob("*.json")):
@@ -397,10 +414,15 @@ def ingest_all(
             underlying_symbol=underlying_symbol,
         )
         quarantined.extend(file_summary["quarantined"])
+        validation_errors.extend(file_summary["validation_errors"])
         warnings.extend(file_summary["etf_warnings"])
 
         for symbol, summary in file_summary.items():
-            if symbol in {"quarantined", "etf_warnings"}:
+            if symbol in {
+                "quarantined",
+                "validation_errors",
+                "etf_warnings",
+            }:
                 continue
             symbol_aggregate = aggregate.setdefault(
                 symbol,
@@ -423,6 +445,7 @@ def ingest_all(
             "max_date": days[-1] if days else None,
         }
     result["quarantined"] = quarantined
+    result["validation_errors"] = validation_errors
     result["etf_warnings"] = warnings
     return result
 

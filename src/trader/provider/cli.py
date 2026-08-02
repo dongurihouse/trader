@@ -61,7 +61,9 @@ def handle_ingest(args: argparse.Namespace) -> int:
         etf_tolerance=args.etf_tolerance,
         bad_tick_neighbor_fraction=args.bad_tick_neighbor_fraction,
     )
-    for symbol in sorted(summary.keys() - {"quarantined", "etf_warnings"}):
+    for symbol in sorted(
+        summary.keys() - {"quarantined", "validation_errors", "etf_warnings"}
+    ):
         symbol_summary = summary[symbol]
         print(
             f"{symbol}: bars={symbol_summary['bars']} "
@@ -70,6 +72,7 @@ def handle_ingest(args: argparse.Namespace) -> int:
             f"max_date={symbol_summary['max_date']}"
         )
     print(f"quarantined={len(summary['quarantined'])}")
+    print(f"validation_errors={len(summary['validation_errors'])}")
     print(f"etf_warnings={len(summary['etf_warnings'])}")
     return 0
 

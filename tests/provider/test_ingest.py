@@ -726,7 +726,7 @@ def test_ingest_file_revised_rows_win_duplicate_timestamps(tmp_path) -> None:
     }
 
 
-def test_quarantine_uses_stored_neighbors_and_preserves_prior_revision(
+def test_revision_of_existing_bar_is_retroactively_quarantined_not_reverted(
     tmp_path,
 ) -> None:
     day = date(2026, 7, 3)
@@ -767,15 +767,26 @@ def test_quarantine_uses_stored_neighbors_and_preserves_prior_revision(
     summary = ingest_file(path, tmp_path)
 
     assert summary["SNDK"]["bars"] == 1
-    assert summary["quarantined"][0]["timestamp"] == pd.Timestamp(
-        "2026-07-03T13:31:00Z"
-    )
+    assert summary["quarantined"] == [
+        {
+            "timestamp": pd.Timestamp("2026-07-03T13:31:00Z"),
+            "symbol": "SNDK",
+            "day": day,
+            "field": "high",
+            "value": 180.0,
+        }
+    ]
     stored = read_1m_day(tmp_path, "SNDK", day)
     assert stored is not None
-    assert_frame_equal(stored, existing.astype("float64"))
+    assert list(stored.index) == [
+        pd.Timestamp("2026-07-03T13:30:00Z"),
+        pd.Timestamp("2026-07-03T13:32:00Z"),
+    ]
 
 
-def test_ingest_file_does_not_requarantine_preexisting_bad_tick(tmp_path) -> None:
+def test_ingest_file_retroactively_quarantines_preexisting_bad_tick(
+    tmp_path,
+) -> None:
     day = date(2026, 7, 4)
     existing = pd.DataFrame(
         {
@@ -814,13 +825,27 @@ def test_ingest_file_does_not_requarantine_preexisting_bad_tick(tmp_path) -> Non
 
     summary = ingest_file(path, tmp_path)
 
-    assert summary["quarantined"] == []
+    assert summary["quarantined"] == [
+        {
+            "timestamp": pd.Timestamp("2026-07-04T13:31:00Z"),
+            "symbol": "SNDK",
+            "day": day,
+            "field": "high",
+            "value": 180.0,
+        }
+    ]
     stored = read_1m_day(tmp_path, "SNDK", day)
     assert stored is not None
-    assert stored.loc[pd.Timestamp("2026-07-04T13:31:00Z"), "h"] == 180.0
+    assert list(stored.index) == [
+        pd.Timestamp("2026-07-04T13:30:00Z"),
+        pd.Timestamp("2026-07-04T13:32:00Z"),
+        pd.Timestamp("2026-07-04T13:33:00Z"),
+    ]
 
 
-def test_ingest_file_quarantines_bad_ticks_at_day_edges(tmp_path) -> None:
+def test_ingest_file_aborts_quarantine_when_more_than_half_day_is_flagged(
+    tmp_path,
+) -> None:
     path = tmp_path / "low-and-edges.json"
     _write_dump(
         path,
@@ -856,32 +881,254 @@ def test_ingest_file_quarantines_bad_ticks_at_day_edges(tmp_path) -> None:
 
     summary = ingest_file(path, tmp_path)
 
-    assert summary["quarantined"] == [
+    assert summary["quarantined"] == []
+    assert summary["validation_errors"] == [
         {
-            "timestamp": pd.Timestamp("2026-07-07T13:30:00Z"),
             "symbol": "SNDK",
             "day": date(2026, 7, 7),
-            "field": "high",
-            "value": 180.0,
-        },
-        {
-            "timestamp": pd.Timestamp("2026-07-07T13:31:00Z"),
-            "symbol": "SNDK",
-            "day": date(2026, 7, 7),
-            "field": "low",
-            "value": 40.0,
-        },
-        {
-            "timestamp": pd.Timestamp("2026-07-07T13:32:00Z"),
-            "symbol": "SNDK",
-            "day": date(2026, 7, 7),
-            "field": "low",
-            "value": 40.0,
+            "reason": (
+                "bad-tick classifier flagged more than half the day's bars "
+                "-- 3 of 3 positions"
+            ),
         },
     ]
     stored = read_1m_day(tmp_path, "SNDK", date(2026, 7, 7))
     assert stored is not None
-    assert stored.empty
+    assert list(stored.index) == [
+        pd.Timestamp("2026-07-07T13:30:00Z"),
+        pd.Timestamp("2026-07-07T13:31:00Z"),
+        pd.Timestamp("2026-07-07T13:32:00Z"),
+    ]
+    assert stored["h"].tolist() == [180.0, 101.0, 102.0]
+    assert stored["l"].tolist() == [99.0, 40.0, 40.0]
+
+
+def test_ingest_file_quarantines_multiple_positions_including_both_day_edges(
+    tmp_path,
+) -> None:
+    path = tmp_path / "bad-ticks-under-safety-valve.json"
+    day = date(2026, 7, 24)
+    bars = [
+        _bar(
+            "2026-07-24T13:30:00Z",
+            open_price=100.0,
+            close_price=100.0,
+            high_price=180.0,
+            low_price=99.0,
+        ),
+        _bar(
+            "2026-07-24T13:31:00Z",
+            open_price=100.2,
+            close_price=100.2,
+            high_price=100.7,
+            low_price=99.7,
+        ),
+        _bar(
+            "2026-07-24T13:32:00Z",
+            open_price=100.1,
+            close_price=100.1,
+            high_price=100.6,
+            low_price=99.6,
+        ),
+        _bar(
+            "2026-07-24T13:33:00Z",
+            open_price=100.3,
+            close_price=100.3,
+            high_price=100.8,
+            low_price=99.8,
+        ),
+        _bar(
+            "2026-07-24T13:34:00Z",
+            open_price=100.5,
+            close_price=100.5,
+            high_price=101.0,
+            low_price=40.0,
+        ),
+        _bar(
+            "2026-07-24T13:35:00Z",
+            open_price=100.4,
+            close_price=100.4,
+            high_price=100.9,
+            low_price=99.9,
+        ),
+        _bar(
+            "2026-07-24T13:36:00Z",
+            open_price=100.2,
+            close_price=100.2,
+            high_price=100.7,
+            low_price=99.7,
+        ),
+        _bar(
+            "2026-07-24T13:37:00Z",
+            open_price=101.0,
+            close_price=101.0,
+            high_price=102.0,
+            low_price=40.0,
+        ),
+    ]
+    _write_dump(path, [_result("SNDK", bars)])
+
+    summary = ingest_file(path, tmp_path, bad_tick_neighbor_fraction=0.05)
+
+    assert summary["quarantined"] == [
+        {
+            "timestamp": pd.Timestamp("2026-07-24T13:30:00Z"),
+            "symbol": "SNDK",
+            "day": day,
+            "field": "high",
+            "value": 180.0,
+        },
+        {
+            "timestamp": pd.Timestamp("2026-07-24T13:34:00Z"),
+            "symbol": "SNDK",
+            "day": day,
+            "field": "low",
+            "value": 40.0,
+        },
+        {
+            "timestamp": pd.Timestamp("2026-07-24T13:37:00Z"),
+            "symbol": "SNDK",
+            "day": day,
+            "field": "low",
+            "value": 40.0,
+        },
+    ]
+    assert summary["validation_errors"] == []
+    stored = read_1m_day(tmp_path, "SNDK", day)
+    assert stored is not None
+    assert list(stored.index) == [
+        pd.Timestamp("2026-07-24T13:31:00Z"),
+        pd.Timestamp("2026-07-24T13:32:00Z"),
+        pd.Timestamp("2026-07-24T13:33:00Z"),
+        pd.Timestamp("2026-07-24T13:35:00Z"),
+        pd.Timestamp("2026-07-24T13:36:00Z"),
+    ]
+
+
+def test_later_batch_retroactively_quarantines_stored_run_and_recomputes_daily(
+    tmp_path,
+) -> None:
+    data_root = tmp_path / "store"
+    day = date(2026, 7, 25)
+    first_path = tmp_path / "batch-1.json"
+    _write_dump(
+        first_path,
+        [
+            _result(
+                "SNDK",
+                [
+                    _bar(
+                        "2026-07-25T13:30:00Z",
+                        open_price=180.0,
+                        close_price=180.0,
+                        high_price=180.5,
+                        low_price=179.5,
+                    ),
+                    _bar(
+                        "2026-07-25T13:31:00Z",
+                        open_price=180.1,
+                        close_price=180.1,
+                        high_price=180.6,
+                        low_price=179.6,
+                    ),
+                ],
+            )
+        ],
+    )
+
+    first_summary = ingest_file(
+        first_path,
+        data_root,
+        bad_tick_neighbor_fraction=0.05,
+    )
+
+    assert first_summary["quarantined"] == []
+    after_first = read_1m_day(data_root, "SNDK", day)
+    assert after_first is not None
+    assert list(after_first.index) == [
+        pd.Timestamp("2026-07-25T13:30:00Z"),
+        pd.Timestamp("2026-07-25T13:31:00Z"),
+    ]
+
+    second_path = tmp_path / "batch-2.json"
+    _write_dump(
+        second_path,
+        [
+            _result(
+                "SNDK",
+                [
+                    _bar(
+                        "2026-07-25T13:32:00Z",
+                        open_price=100.3,
+                        close_price=100.3,
+                        high_price=100.8,
+                        low_price=99.8,
+                    ),
+                    _bar(
+                        "2026-07-25T13:33:00Z",
+                        open_price=100.1,
+                        close_price=100.1,
+                        high_price=100.6,
+                        low_price=99.6,
+                    ),
+                    _bar(
+                        "2026-07-25T13:34:00Z",
+                        open_price=100.2,
+                        close_price=100.2,
+                        high_price=100.7,
+                        low_price=99.7,
+                    ),
+                    _bar(
+                        "2026-07-25T13:35:00Z",
+                        open_price=100.0,
+                        close_price=100.0,
+                        high_price=100.5,
+                        low_price=99.5,
+                    ),
+                ],
+            )
+        ],
+    )
+
+    second_summary = ingest_file(
+        second_path,
+        data_root,
+        bad_tick_neighbor_fraction=0.05,
+    )
+
+    assert second_summary["quarantined"] == [
+        {
+            "timestamp": pd.Timestamp("2026-07-25T13:30:00Z"),
+            "symbol": "SNDK",
+            "day": day,
+            "field": "high",
+            "value": 180.5,
+        },
+        {
+            "timestamp": pd.Timestamp("2026-07-25T13:31:00Z"),
+            "symbol": "SNDK",
+            "day": day,
+            "field": "high",
+            "value": 180.6,
+        },
+    ]
+    stored = read_1m_day(data_root, "SNDK", day)
+    assert stored is not None
+    assert list(stored.index) == [
+        pd.Timestamp("2026-07-25T13:32:00Z"),
+        pd.Timestamp("2026-07-25T13:33:00Z"),
+        pd.Timestamp("2026-07-25T13:34:00Z"),
+        pd.Timestamp("2026-07-25T13:35:00Z"),
+    ]
+    daily = read_1d(data_root, "SNDK")
+    assert daily is not None
+    assert daily.loc[pd.Timestamp("2026-07-25T00:00:00Z")].to_dict() == {
+        "o": 100.3,
+        "h": 100.8,
+        "l": 99.5,
+        "c": 100.0,
+        "v": 400.0,
+    }
 
 
 def test_ingest_file_counts_duplicate_vendor_rows_while_later_row_wins(
@@ -965,3 +1212,69 @@ def test_ingest_all_walks_nested_files_in_sorted_order_and_aggregates(tmp_path) 
     stored = read_1m_day(tmp_path / "store", "SNDK", date(2026, 7, 5))
     assert stored is not None
     assert stored.loc[pd.Timestamp("2026-07-05T13:30:00Z"), "c"] == 101.5
+
+
+def test_ingest_all_aggregates_validation_errors_without_treating_them_as_symbols(
+    tmp_path,
+) -> None:
+    raw_root = tmp_path / "raw"
+    day = date(2026, 7, 26)
+    _write_dump(
+        raw_root / "a" / "aborted-day.json",
+        [
+            _result(
+                "SNDK",
+                [
+                    _bar(
+                        "2026-07-26T13:30:00Z",
+                        open_price=100,
+                        close_price=100,
+                        high_price=180,
+                        low_price=99,
+                    ),
+                    _bar(
+                        "2026-07-26T13:31:00Z",
+                        open_price=100,
+                        close_price=100.5,
+                        high_price=101,
+                        low_price=40,
+                    ),
+                    _bar(
+                        "2026-07-26T13:32:00Z",
+                        open_price=100.5,
+                        close_price=101,
+                        high_price=102,
+                        low_price=40,
+                    ),
+                ],
+            )
+        ],
+    )
+    _write_dump(
+        raw_root / "z" / "normal-day.json",
+        [
+            _result(
+                "SNDK",
+                [
+                    _bar(
+                        "2026-07-27T13:30:00Z",
+                        open_price=101,
+                        close_price=101.5,
+                    )
+                ],
+            )
+        ],
+    )
+
+    summary = ingest_all(raw_root, tmp_path / "store")
+
+    assert summary["validation_errors"] == [
+        {
+            "symbol": "SNDK",
+            "day": day,
+            "reason": (
+                "bad-tick classifier flagged more than half the day's bars "
+                "-- 3 of 3 positions"
+            ),
+        }
+    ]
