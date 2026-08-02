@@ -356,6 +356,14 @@ def test_render_provider_workbench_html_is_self_contained() -> None:
     assert '<link rel="stylesheet"' not in body
     assert "<script src=" not in body
 
+    style_start = body.index("<style>")
+    style_end = body.index("</style>", style_start)
+    style = body[style_start:style_end]
+    assert ".field-group[hidden]" in style
+    hidden_rule_start = style.index(".field-group[hidden]")
+    hidden_rule_end = style.index("}", hidden_rule_start)
+    assert "display: none;" in style[hidden_rule_start:hidden_rule_end]
+
 
 def test_provider_api_route_serves_handle_query_end_to_end(tmp_path: Path) -> None:
     _seed_history(tmp_path)

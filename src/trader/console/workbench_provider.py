@@ -467,6 +467,10 @@ __BASE_CSS__
       gap: 10px;
     }
 
+    .field-group[hidden] {
+      display: none;
+    }
+
     label {
       display: grid;
       gap: 5px;
