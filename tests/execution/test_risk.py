@@ -232,6 +232,27 @@ def test_no_stop_rejects_missing_stop_with_present_stop_control() -> None:
     assert isinstance(control, OrderTicket)
 
 
+def test_no_target_rejects_missing_target_with_present_target_control() -> None:
+    engine = RiskRails(_risk_config())
+    rejected_intent = _intent(target=None)
+    control_intent = _intent(target=110.0)
+
+    rejected = engine.check_and_size(rejected_intent, _portfolio(), _data())
+    control = engine.check_and_size(control_intent, _portfolio(), _data())
+
+    _assert_rejection(rejected, rejected_intent, "no_target")
+    assert isinstance(control, OrderTicket)
+
+
+def test_no_stop_precedes_no_target_when_both_are_missing() -> None:
+    engine = RiskRails(_risk_config())
+    intent = _intent(stop=None, target=None)
+
+    rejected = engine.check_and_size(intent, _portfolio(), _data())
+
+    _assert_rejection(rejected, intent, "no_stop")
+
+
 def test_no_price_data_rejects_empty_visible_frame_with_visible_bar_control() -> None:
     engine = RiskRails(_risk_config())
     intent = _intent()

@@ -103,6 +103,13 @@ class RiskRails:
                 detail="open intents require a stop price",
             )
 
+        if intent.target is None:
+            return Rejection(
+                intent=intent,
+                rule="no_target",
+                detail="open intents require a target price",
+            )
+
         bars = data.bars_1m(
             intent.instrument,
             asof=intent.ts + timedelta(minutes=1),
