@@ -254,8 +254,17 @@ regardless of how large the move is or how much of the session it covers.
    statistic computed over the whole frame may decide any individual bar's fate.
 2. A run is quarantined only when all hold: (a) its length is at most
    `max_bad_run_bars`; (b) the reference level before it and the reference level after it
-   agree within `bad_tick_neighbor_fraction`; (c) the run itself deviates from that
-   agreed level beyond the same fraction, in both high and low.
+   agree within `bad_tick_neighbor_fraction`; (c) the run's BODY departs — at least one
+   open or close within the run deviates from that agreed level beyond the same fraction.
+2a. Wicks are never deleted (correction A9.1, 2026-08-02). A bar whose high or low
+   departs while BOTH its open and close stay within the fraction is a wick: retained,
+   and recorded as a validation error naming the bar. A one-minute extreme that the body
+   does not confirm may be a real volatile print, and rule 6 governs.
+   Rule 2's earlier wording required BOTH high and low to depart, which would have
+   passed the very incident this policy exists for: SNDK 2026-07-16 16:27Z printed
+   `o=1439.00 h=1615.00 l=1439.00 c=1615.00` against a 1432-1442 tape — a normal open
+   and low with a corrupt high and close. Any implementation must carry that exact bar
+   as a regression test.
 3. Day-frame edges: a run touching the first or last bar has a reference on one side
    only. It may still be quarantined, but only when the available reference side is
    strictly longer than the run — never when the run is the majority of the frame.
