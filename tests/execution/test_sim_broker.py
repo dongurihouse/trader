@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import pytest
 
-from trader.contracts import Fill, OrderTicket
+from trader.contracts import Fill, OrderTicket, Side
 from trader.contracts.testing import FakeMarketData
 from trader.execution.broker import (
     SimBroker,
@@ -64,6 +64,7 @@ def _ticket(
     ticket_id: str = "ticket-1",
     *,
     instrument: str = "SNXX",
+    side: Side = "long",
     shares: int = 10,
     stop: float = 95.0,
     target: float = 105.0,
@@ -74,7 +75,7 @@ def _ticket(
         algo_id="test-algo",
         intent_ts=created_ts,
         instrument=instrument,
-        side="long",
+        side=side,
         shares=shares,
         entry="market_next_open",
         stop=stop,
@@ -497,4 +498,64 @@ def test_concurrent_positions_exit_independently() -> None:
     ]
     assert [(fill.ticket_id, fill.kind) for fill in second_exit] == [
         ("ticket-b", "target")
+    ]
+
+
+def test_reversal_mark_waits_for_later_open_and_preempts_bracket_checks() -> None:
+    entry_asof = BAR_START + timedelta(minutes=1)
+    mark_asof = BAR_START + timedelta(minutes=2)
+    reversal_asof = BAR_START + timedelta(minutes=3)
+    later_asof = BAR_START + timedelta(minutes=4)
+    broker = SimBroker(_execution_config())
+    data = _data(
+        (BAR_START, 100.0, 101.0, 99.0, 100.0),
+        (BAR_START + timedelta(minutes=1), 100.0, 106.0, 94.0, 100.0),
+        (BAR_START + timedelta(minutes=2), 99.0, 110.0, 90.0, 99.0),
+        (BAR_START + timedelta(minutes=3), 100.0, 106.0, 94.0, 100.0),
+    )
+    broker.submit(_ticket(stop=95.0, target=105.0))
+    assert [fill.kind for fill in broker.on_bar(entry_asof, data)] == ["entry"]
+
+    broker.mark_reversal(mark_asof, "short")
+    broker.mark_reversal(mark_asof, "short")
+
+    assert broker.on_bar(mark_asof, data) == []
+    assert broker.on_bar(reversal_asof, data) == [
+        Fill(
+            ticket_id="ticket-1",
+            ts=reversal_asof,
+            price=98.7525,
+            shares=10,
+            kind="reversal",
+            book="real",
+        )
+    ]
+    assert broker.on_bar(later_asof, data) == []
+
+
+def test_reversal_mark_with_same_side_leaves_position_under_bracket_checks() -> None:
+    entry_asof = BAR_START + timedelta(minutes=1)
+    mark_asof = BAR_START + timedelta(minutes=2)
+    exit_asof = BAR_START + timedelta(minutes=3)
+    broker = SimBroker(_execution_config())
+    data = _data(
+        (BAR_START, 100.0, 101.0, 99.0, 100.0),
+        (BAR_START + timedelta(minutes=1), 100.0, 101.0, 99.0, 100.0),
+        (BAR_START + timedelta(minutes=2), 100.0, 106.0, 99.0, 105.0),
+    )
+    broker.submit(_ticket(stop=95.0, target=105.0))
+    broker.on_bar(entry_asof, data)
+
+    broker.mark_reversal(mark_asof, "long")
+
+    assert broker.on_bar(mark_asof, data) == []
+    assert broker.on_bar(exit_asof, data) == [
+        Fill(
+            ticket_id="ticket-1",
+            ts=exit_asof,
+            price=104.7375,
+            shares=10,
+            kind="target",
+            book="real",
+        )
     ]

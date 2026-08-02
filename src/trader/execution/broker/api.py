@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 import os
 
-from trader.contracts import BrokerNotConfigured, Fill, MarketData, OrderTicket
+from trader.contracts import BrokerNotConfigured, Fill, MarketData, OrderTicket, Side
 from trader.execution.config import ExecutionConfig
 
 
@@ -44,6 +44,9 @@ class ApiBroker:
 
     def take_declined_tickets(self) -> dict[str, str]:
         return {}
+
+    def mark_reversal(self, asof: datetime, trigger_side: Side) -> None:
+        del asof, trigger_side
 
     def force_flat(self, asof: datetime, data: MarketData) -> list[Fill]:
         del asof, data

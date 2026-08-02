@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Literal, cast
 from zoneinfo import ZoneInfo
 
-from trader.contracts import Fill, MarketData, OrderTicket
+from trader.contracts import Fill, MarketData, OrderTicket, Side
 from trader.execution.config import ExecutionConfig
 
 
@@ -21,9 +21,11 @@ class _PendingEntry:
 class _OpenPosition:
     ticket_id: str
     instrument: str
+    side: Side
     shares: int
     stop: float
     target: float
+    reversal_eligible_after: datetime | None = None
 
 
 def apply_slippage(
@@ -141,6 +143,7 @@ class SimBroker:
                 _OpenPosition(
                     ticket_id=ticket.ticket_id,
                     instrument=ticket.instrument,
+                    side=ticket.side,
                     shares=ticket.shares,
                     stop=cast(float, ticket.stop),
                     target=cast(float, ticket.target),
@@ -148,7 +151,35 @@ class SimBroker:
             )
 
         still_open: list[_OpenPosition] = []
+        unmarked_positions: list[_OpenPosition] = []
         for position in positions_to_check:
+            if position.reversal_eligible_after is None:
+                unmarked_positions.append(position)
+                continue
+
+            if asof <= position.reversal_eligible_after:
+                still_open.append(position)
+                continue
+
+            bars = data.bars_1m(
+                position.instrument,
+                asof=asof,
+                lookback_minutes=1,
+            )
+            if bars.empty:
+                still_open.append(position)
+                continue
+
+            fills.append(
+                self._exit_fill(
+                    position,
+                    asof=asof,
+                    raw_exit_price=float(bars.iloc[0]["o"]),
+                    exit_kind="reversal",
+                )
+            )
+
+        for position in unmarked_positions:
             bars = data.bars_1m(
                 position.instrument,
                 asof=asof,
@@ -177,23 +208,12 @@ class SimBroker:
             else:
                 exit_kind, raw_exit_price = exit_result
 
-            bps = slippage_bps_for(
-                self._execution_config,
-                position.instrument,
-                asof,
-                tz=self._timezone,
-            )
             fills.append(
-                Fill(
-                    ticket_id=position.ticket_id,
-                    ts=asof,
-                    price=round(
-                        apply_slippage(raw_exit_price, "sell", bps),
-                        4,
-                    ),
-                    shares=position.shares,
-                    kind=exit_kind,
-                    book="real",
+                self._exit_fill(
+                    position,
+                    asof=asof,
+                    raw_exit_price=raw_exit_price,
+                    exit_kind=exit_kind,
                 )
             )
 
@@ -207,6 +227,21 @@ class SimBroker:
 
     def take_declined_tickets(self) -> dict[str, str]:
         return {}
+
+    def mark_reversal(self, asof: datetime, trigger_side: Side) -> None:
+        """Schedule conflicting open positions to exit at a later bar's open."""
+        marked: list[_OpenPosition] = []
+        for position in self._positions:
+            if (
+                position.side != trigger_side
+                and position.reversal_eligible_after is None
+            ):
+                marked.append(
+                    replace(position, reversal_eligible_after=asof)
+                )
+                continue
+            marked.append(position)
+        self._positions = marked
 
     def force_flat(self, asof: datetime, data: MarketData) -> list[Fill]:
         """Close every priceable position at the current bar's close."""
@@ -223,28 +258,43 @@ class SimBroker:
                 continue
 
             raw_exit_price = float(bars.iloc[0]["c"])
-            bps = slippage_bps_for(
-                self._execution_config,
-                position.instrument,
-                asof,
-                tz=self._timezone,
-            )
             fills.append(
-                Fill(
-                    ticket_id=position.ticket_id,
-                    ts=asof,
-                    price=round(
-                        apply_slippage(raw_exit_price, "sell", bps),
-                        4,
-                    ),
-                    shares=position.shares,
-                    kind="eod",
-                    book="real",
+                self._exit_fill(
+                    position,
+                    asof=asof,
+                    raw_exit_price=raw_exit_price,
+                    exit_kind="eod",
                 )
             )
 
         self._positions = still_open
         return fills
+
+    def _exit_fill(
+        self,
+        position: _OpenPosition,
+        *,
+        asof: datetime,
+        raw_exit_price: float,
+        exit_kind: Literal["stop", "target", "reversal", "eod"],
+    ) -> Fill:
+        bps = slippage_bps_for(
+            self._execution_config,
+            position.instrument,
+            asof,
+            tz=self._timezone,
+        )
+        return Fill(
+            ticket_id=position.ticket_id,
+            ts=asof,
+            price=round(
+                apply_slippage(raw_exit_price, "sell", bps),
+                4,
+            ),
+            shares=position.shares,
+            kind=exit_kind,
+            book="real",
+        )
 
 
 __all__ = ["SimBroker", "apply_slippage", "check_exit", "slippage_bps_for"]

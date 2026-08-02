@@ -152,7 +152,7 @@ def test_enabled_style_wraps_rendered_ticket_in_ansi_color() -> None:
     assert rendered.endswith("\x1b[0m")
 
 
-@pytest.mark.parametrize("kind", ["stop", "target", "eod"])
+@pytest.mark.parametrize("kind", ["stop", "target", "reversal", "eod"])
 def test_exit_notice_is_explicitly_not_a_fill(kind: str) -> None:
     rendered = render_exit_notice(
         _ticket(),
@@ -465,6 +465,48 @@ def test_cancel_open_keeps_confirmed_position_under_monitoring(
 
     assert len(output) == 1
     assert "stop" in output[0].lower()
+
+
+def test_reversal_mark_prints_one_notice_on_next_bar_without_fill(
+    tmp_path: Path,
+) -> None:
+    entry_asof = BAR_START + timedelta(minutes=1)
+    mark_asof = BAR_START + timedelta(minutes=2)
+    notice_asof = BAR_START + timedelta(minutes=3)
+    later_asof = BAR_START + timedelta(minutes=4)
+    output: list[str] = []
+    broker = ManualBroker(tmp_path, out=output.append, style=Style(False))
+    broker.submit(_ticket())
+    _append_fill(tmp_path, ts=entry_asof)
+    broker.on_bar(
+        entry_asof,
+        _data((BAR_START, 100.0, 104.0, 96.0, 101.0)),
+    )
+    output.clear()
+
+    broker.mark_reversal(mark_asof, "short")
+    fills = broker.on_bar(
+        notice_asof,
+        _data(
+            (BAR_START, 100.0, 104.0, 96.0, 101.0),
+            (BAR_START + timedelta(minutes=1), 100.0, 104.0, 96.0, 101.0),
+            (BAR_START + timedelta(minutes=2), 100.0, 104.0, 96.0, 101.0),
+        ),
+    )
+    broker.on_bar(
+        later_asof,
+        _data(
+            (BAR_START, 100.0, 104.0, 96.0, 101.0),
+            (BAR_START + timedelta(minutes=1), 100.0, 104.0, 96.0, 101.0),
+            (BAR_START + timedelta(minutes=2), 100.0, 104.0, 96.0, 101.0),
+            (BAR_START + timedelta(minutes=3), 100.0, 104.0, 96.0, 101.0),
+        ),
+    )
+
+    assert fills == []
+    assert len(output) == 1
+    assert "reversal" in output[0].lower()
+    assert "NOT A FILL" in output[0]
 
 
 def test_force_flat_notices_every_confirmed_position_as_urgent_and_never_fills(

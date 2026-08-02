@@ -65,6 +65,7 @@ def test_non_submit_methods_remain_inert_without_api_wiring() -> None:
     unused_data = cast(MarketData, object())
 
     assert broker.on_bar(asof, unused_data) == []
+    broker.mark_reversal(asof, "short")
     broker.cancel_open("operator requested")
     assert broker.take_declined_tickets() == {}
     assert broker.force_flat(asof, unused_data) == []

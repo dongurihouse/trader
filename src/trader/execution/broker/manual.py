@@ -13,14 +13,14 @@ import textwrap
 from typing import Literal, cast
 from zoneinfo import ZoneInfo
 
-from trader.contracts import Fill, MarketData, OrderTicket, append_jsonl
+from trader.contracts import Fill, MarketData, OrderTicket, Side, append_jsonl
 
 from .sim import check_exit
 
 
 FilledKind = Literal["entry", "stop", "target", "reversal", "eod"]
 FillKind = Literal["entry", "stop", "target", "reversal", "eod", "cancel"]
-ExitNoticeKind = Literal["stop", "target", "eod"]
+ExitNoticeKind = Literal["stop", "target", "reversal", "eod"]
 
 
 @dataclass(frozen=True)
@@ -164,6 +164,8 @@ def render_exit_notice(
 class _ConfirmedPosition:
     ticket: OrderTicket
     notice_shown: bool = False
+    reversal_eligible_after: datetime | None = None
+    reversal_notice_shown: bool = False
 
 
 class ManualBroker:
@@ -242,6 +244,22 @@ class ManualBroker:
                 self._confirmed.pop(fill.ticket_id, None)
 
         for position in self._confirmed.values():
+            if (
+                position.reversal_eligible_after is not None
+                and asof > position.reversal_eligible_after
+                and not position.reversal_notice_shown
+            ):
+                self._emit(
+                    render_exit_notice(
+                        position.ticket,
+                        "reversal",
+                        style=self._style,
+                    )
+                )
+                position.reversal_notice_shown = True
+                position.notice_shown = True
+                continue
+
             if position.notice_shown:
                 continue
 
@@ -284,6 +302,15 @@ class ManualBroker:
         declined = self._declined
         self._declined = {}
         return declined
+
+    def mark_reversal(self, asof: datetime, trigger_side: Side) -> None:
+        for position in self._confirmed.values():
+            if (
+                position.ticket.side != trigger_side
+                and position.reversal_eligible_after is None
+                and not position.reversal_notice_shown
+            ):
+                position.reversal_eligible_after = asof
 
     def force_flat(self, asof: datetime, data: MarketData) -> list[Fill]:
         del asof, data

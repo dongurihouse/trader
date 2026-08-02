@@ -21,6 +21,7 @@ from trader.contracts import (
     PortfolioState,
     Rejection,
     RiskEngine,
+    Side,
 )
 from trader.contracts.testing import CollectingTelemetry, FakeMarketData
 from trader.execution.book import RealBook, ShadowBook
@@ -89,6 +90,7 @@ def _intent(
     algo_id: str,
     ts: datetime,
     *,
+    side: Side = "long",
     stop: float | None = 95.0,
     target: float | None = 105.0,
     meta: dict | None = None,
@@ -97,7 +99,7 @@ def _intent(
         algo_id=algo_id,
         ts=ts,
         action="open",
-        side="long",
+        side=side,
         signal_symbol="SNXX",
         instrument="SNXX",
         entry="market_next_open",
@@ -193,6 +195,24 @@ class _FailIfCalledRisk:
     ) -> OrderTicket | Rejection:
         del intent, portfolio, data
         raise AssertionError("gate-refused intents must bypass RiskRails")
+
+
+class _FailForAlgoRisk:
+    def __init__(self, blocked_algo_id: str) -> None:
+        self._blocked_algo_id = blocked_algo_id
+        self._delegate = RiskRails(_risk_config())
+
+    def check_and_size(
+        self,
+        intent: Intent,
+        portfolio: PortfolioState,
+        data: MarketData,
+    ) -> OrderTicket | Rejection:
+        if intent.algo_id == self._blocked_algo_id:
+            raise AssertionError(
+                f"{self._blocked_algo_id} intents must bypass RiskRails"
+            )
+        return self._delegate.check_and_size(intent, portfolio, data)
 
 
 def test_session_runner_executes_real_and_shadow_paths_in_exact_order() -> None:
@@ -942,6 +962,255 @@ def test_non_refused_emitting_intent_reaches_real_book(meta: dict) -> None:
     ]
     assert len(real_book.state.positions) == 1
     assert shadow_book.resolved_r_multiples("control") == []
+
+
+def test_opposite_emitting_intent_stays_rejected_but_exits_real_position_by_reversal() -> None:
+    long_intent_ts = BAR_START + timedelta(minutes=1)
+    long_entry_ts = BAR_START + timedelta(minutes=2)
+    reversal_intent_ts = BAR_START + timedelta(minutes=3)
+    reversal_exit_ts = BAR_START + timedelta(minutes=4)
+    data = FakeMarketData(
+        {
+            "SNXX": _frame(
+                (BAR_START, 100.0, 101.0, 99.0, 100.0),
+                (BAR_START + timedelta(minutes=1), 100.0, 101.0, 99.0, 100.0),
+                (BAR_START + timedelta(minutes=2), 100.0, 101.0, 99.0, 100.0),
+                (BAR_START + timedelta(minutes=3), 102.0, 110.0, 90.0, 102.0),
+            )
+        }
+    )
+    holder = ScriptedAlgo(
+        "holder",
+        {long_intent_ts: [_intent("holder", long_intent_ts)]},
+    )
+    reverser = ScriptedAlgo(
+        "reverser",
+        {
+            reversal_intent_ts: [
+                _intent(
+                    "reverser",
+                    reversal_intent_ts,
+                    side="short",
+                    meta={"case": "reverser"},
+                )
+            ]
+        },
+    )
+    telemetry = CollectingTelemetry()
+    runner, real_book, shadow_book = _runner(
+        data=data,
+        telemetry=telemetry,
+        roster=[
+            RosterEntry(holder, "emitting"),
+            RosterEntry(reverser, "emitting"),
+        ],
+    )
+
+    runner.start_day(BAR_START.date())
+    for asof in (
+        long_intent_ts,
+        long_entry_ts,
+        reversal_intent_ts,
+        reversal_exit_ts,
+    ):
+        runner.process_bar(asof)
+
+    rejections = [
+        record for record in telemetry.records if record["ev"] == "rejection"
+    ]
+    assert [(record["algo_id"], record["rule"]) for record in rejections] == [
+        ("reverser", "position_in_flight")
+    ]
+    shadow_fills = [
+        record
+        for record in telemetry.records
+        if record["ev"] == "fill" and record["book"] == "shadow"
+    ]
+    assert [(record["kind"], record["tag"]) for record in shadow_fills] == [
+        ("entry", "rejected"),
+        ("stop", "rejected"),
+    ]
+    real_fills = [
+        record
+        for record in telemetry.records
+        if record["ev"] == "fill" and record["book"] == "real"
+    ]
+    assert [(record["kind"], record["price"]) for record in real_fills] == [
+        ("entry", 100.0),
+        ("reversal", 102.0),
+    ]
+    real_closes = [
+        record
+        for record in telemetry.records
+        if record["ev"] == "position_closed" and record["book"] == "real"
+    ]
+    assert [(record["algo_id"], record["exit_kind"]) for record in real_closes] == [
+        ("holder", "reversal")
+    ]
+    assert real_book.state.positions == []
+    assert real_book.resolved_r_multiples("holder") == pytest.approx([0.4])
+    assert shadow_book.resolved_r_multiples("reverser") == pytest.approx([-1.0])
+
+
+def test_gate_refused_opposite_intent_still_arms_real_reversal() -> None:
+    long_intent_ts = BAR_START + timedelta(minutes=1)
+    long_entry_ts = BAR_START + timedelta(minutes=2)
+    reversal_intent_ts = BAR_START + timedelta(minutes=3)
+    reversal_exit_ts = BAR_START + timedelta(minutes=4)
+    data = FakeMarketData(
+        {
+            "SNXX": _frame(
+                (BAR_START, 100.0, 101.0, 99.0, 100.0),
+                (BAR_START + timedelta(minutes=1), 100.0, 101.0, 99.0, 100.0),
+                (BAR_START + timedelta(minutes=2), 100.0, 101.0, 99.0, 100.0),
+                (BAR_START + timedelta(minutes=3), 102.0, 110.0, 90.0, 102.0),
+            )
+        }
+    )
+    holder = ScriptedAlgo(
+        "gate-holder",
+        {long_intent_ts: [_intent("gate-holder", long_intent_ts)]},
+    )
+    reverser = ScriptedAlgo(
+        "gate-refused-reverser",
+        {
+            reversal_intent_ts: [
+                _intent(
+                    "gate-refused-reverser",
+                    reversal_intent_ts,
+                    side="short",
+                    meta={"case": "gate-refused", "gates_pass": False},
+                )
+            ]
+        },
+    )
+    telemetry = CollectingTelemetry()
+    runner, real_book, shadow_book = _runner(
+        data=data,
+        telemetry=telemetry,
+        roster=[
+            RosterEntry(holder, "emitting"),
+            RosterEntry(reverser, "emitting"),
+        ],
+        risk=_FailForAlgoRisk("gate-refused-reverser"),
+    )
+
+    runner.start_day(BAR_START.date())
+    for asof in (
+        long_intent_ts,
+        long_entry_ts,
+        reversal_intent_ts,
+        reversal_exit_ts,
+    ):
+        runner.process_bar(asof)
+
+    assert not any(record["ev"] == "rejection" for record in telemetry.records)
+    shadow_fills = [
+        record
+        for record in telemetry.records
+        if record["ev"] == "fill" and record["book"] == "shadow"
+    ]
+    assert [(record["kind"], record["tag"]) for record in shadow_fills] == [
+        ("entry", "gate_refused"),
+        ("stop", "gate_refused"),
+    ]
+    real_fills = [
+        record
+        for record in telemetry.records
+        if record["ev"] == "fill" and record["book"] == "real"
+    ]
+    assert [(record["kind"], record["price"]) for record in real_fills] == [
+        ("entry", 100.0),
+        ("reversal", 102.0),
+    ]
+    real_closes = [
+        record
+        for record in telemetry.records
+        if record["ev"] == "position_closed" and record["book"] == "real"
+    ]
+    assert [(record["algo_id"], record["exit_kind"]) for record in real_closes] == [
+        ("gate-holder", "reversal")
+    ]
+    assert real_book.state.positions == []
+    assert real_book.resolved_r_multiples("gate-holder") == pytest.approx([0.4])
+    assert shadow_book.resolved_r_multiples("gate-refused-reverser") == pytest.approx(
+        [-1.0]
+    )
+
+
+def test_probe_opposite_intent_does_not_trigger_real_reversal() -> None:
+    long_intent_ts = BAR_START + timedelta(minutes=1)
+    long_entry_ts = BAR_START + timedelta(minutes=2)
+    probe_intent_ts = BAR_START + timedelta(minutes=3)
+    later_ts = BAR_START + timedelta(minutes=4)
+    data = FakeMarketData(
+        {
+            "SNXX": _frame(
+                (BAR_START, 100.0, 101.0, 99.0, 100.0),
+                (BAR_START + timedelta(minutes=1), 100.0, 101.0, 99.0, 100.0),
+                (BAR_START + timedelta(minutes=2), 100.0, 101.0, 99.0, 100.0),
+                (BAR_START + timedelta(minutes=3), 100.0, 101.0, 99.0, 100.0),
+            )
+        }
+    )
+    holder = ScriptedAlgo(
+        "probe-holder",
+        {long_intent_ts: [_intent("probe-holder", long_intent_ts)]},
+    )
+    probe = ScriptedAlgo(
+        "probe-reverser",
+        {
+            probe_intent_ts: [
+                _intent(
+                    "probe-reverser",
+                    probe_intent_ts,
+                    side="short",
+                    meta={"case": "probe-reverser"},
+                )
+            ]
+        },
+    )
+    telemetry = CollectingTelemetry()
+    runner, real_book, shadow_book = _runner(
+        data=data,
+        telemetry=telemetry,
+        roster=[
+            RosterEntry(holder, "emitting"),
+            RosterEntry(probe, "probe"),
+        ],
+    )
+
+    runner.start_day(BAR_START.date())
+    for asof in (
+        long_intent_ts,
+        long_entry_ts,
+        probe_intent_ts,
+        later_ts,
+    ):
+        runner.process_bar(asof)
+
+    real_fills = [
+        record
+        for record in telemetry.records
+        if record["ev"] == "fill" and record["book"] == "real"
+    ]
+    assert [(record["kind"], record["price"]) for record in real_fills] == [
+        ("entry", 100.0)
+    ]
+    assert not any(
+        record["ev"] == "position_closed" and record["book"] == "real"
+        for record in telemetry.records
+    )
+    shadow_fills = [
+        record
+        for record in telemetry.records
+        if record["ev"] == "fill" and record["book"] == "shadow"
+    ]
+    assert [(record["kind"], record["tag"]) for record in shadow_fills] == [
+        ("entry", "probe")
+    ]
+    assert len(real_book.state.positions) == 1
+    assert shadow_book.resolved_r_multiples("probe-reverser") == []
 
 
 def test_end_session_force_flats_filled_shadow_episode() -> None:

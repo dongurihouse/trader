@@ -250,6 +250,20 @@ class SessionRunner:
                     # closing machinery for a path nothing currently exercises.
                     continue
 
+                real_positions = self._real_book.state.positions
+                if (
+                    entry.status != "probe"
+                    and intent.side is not None
+                    and any(
+                        position.side != intent.side
+                        for position in real_positions
+                    )
+                ):
+                    self._broker.mark_reversal(  # type: ignore[attr-defined]
+                        asof,
+                        intent.side,
+                    )
+
                 if intent.meta.get("gates_pass") is False:
                     self._open_shadow(intent, "gate_refused")
                     continue
