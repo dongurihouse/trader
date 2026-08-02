@@ -6,12 +6,23 @@ from datetime import date, datetime, timezone
 import http.client
 import json
 from pathlib import Path
+import re
+import shutil
+import subprocess
 
 import pandas as pd
+import pytest
 
+from trader.console.dashboard import render_dashboard_html
 from trader.console.config import ConsoleConfig
 from trader.console.results import build_results_payload, render_results_html
 from trader.console.server import ConsoleServer, run_server
+from trader.console.workbench_algos import render_algos_workbench_html
+from trader.console.workbench_execution import render_execution_workbench_html
+from trader.console.workbench_provider import render_provider_workbench_html
+
+
+_SCRIPT_RE = re.compile(r"<script>(.*?)</script>", re.DOTALL)
 
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:
@@ -184,6 +195,43 @@ def test_results_html_wires_session_picker_to_mutable_session_state() -> None:
     assert "state.candlesByDay.clear()" in body
     assert "state.markerHits = []" in body
     assert "history.replaceState" in body
+
+
+def test_results_data_thin_empty_warning_escapes_quotes_for_served_javascript() -> None:
+    body = render_results_html()
+    start = body.index("dataThinWarnings.innerHTML =")
+    end = body.index("return;", start)
+    warning_script = body[start:end]
+
+    assert "No data-thinness warnings were recorded" in warning_script
+    assert r'class=\"empty\"' in warning_script
+
+
+def test_console_page_inline_scripts_parse_with_node(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not available on PATH")
+
+    pages = {
+        "dashboard": render_dashboard_html(),
+        "results": render_results_html(),
+        "workbench-provider": render_provider_workbench_html(),
+        "workbench-algos": render_algos_workbench_html(config_dir=tmp_path),
+        "workbench-execution": render_execution_workbench_html(config_dir=tmp_path),
+    }
+    for page_name, body in pages.items():
+        scripts = _SCRIPT_RE.findall(body)
+        assert scripts, f"{page_name} has no inline scripts"
+        for index, script in enumerate(scripts):
+            script_path = tmp_path / f"{page_name}-{index}.js"
+            script_path.write_text(script, encoding="utf-8")
+            result = subprocess.run(
+                [node, "--check", str(script_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert result.returncode == 0, result.stderr
 
 
 def test_results_api_returns_built_payload_for_explicit_session(tmp_path: Path) -> None:

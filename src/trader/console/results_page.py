@@ -569,7 +569,7 @@ __BASE_CSS__
         const warnings = (state.payload && state.payload.data_thin_warnings) || [];
         if (!warnings.length) {
           dataThinWarnings.innerHTML =
-            "<p class=\"empty\">No data-thinness warnings were recorded in this session's telemetry.</p>";
+            "<p class=\\"empty\\">No data-thinness warnings were recorded in this session's telemetry.</p>";
           return;
         }
         const columns = ["symbol", "day", "count", "ts"];
