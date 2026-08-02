@@ -1,0 +1,10 @@
+timezone: America/New_York
+open_time: "09:30"
+close_time: "16:00"
+early_close_time: "13:00"
+start_date: "2026-01-01"
+end_date: "2026-01-31"
+holidays:
+  - "2026-01-01"
+  - "2026-01-19"
+early_closes: []

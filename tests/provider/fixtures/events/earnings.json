@@ -1,0 +1,30 @@
+{
+  "fetched_at": "2026-08-01",
+  "source": "synthetic provider test calendar",
+  "events": [
+    {
+      "symbol": "SNDK",
+      "date": "2026-08-05",
+      "timing": "pm",
+      "verified": true,
+      "eps_estimate": 3.5,
+      "eps_actual": null
+    },
+    {
+      "symbol": "MU",
+      "date": "2026-07-03",
+      "timing": "am",
+      "verified": true,
+      "eps_estimate": 2.0,
+      "eps_actual": 2.25
+    },
+    {
+      "symbol": "WDC",
+      "date": "2026-07-10",
+      "timing": "pm",
+      "verified": false,
+      "eps_estimate": 1.25,
+      "eps_actual": null
+    }
+  ]
+}
