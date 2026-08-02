@@ -1,5 +1,7 @@
 # trader — execution
-broker: sim                  # sim | manual | api   (manual is the live default; see design §9 A3)
+# backtest and paper always use the simulated broker regardless of this key.
+# For --mode live, set broker: manual or broker: api; broker: sim is rejected.
+broker: sim                  # sim | manual | api
 
 live_orders: false           # api broker interlock 1 of 2; interlock 2 is env TRADER_LIVE=1.
                              # Flipping this is a Dev decision recorded in git.

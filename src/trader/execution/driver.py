@@ -71,17 +71,25 @@ def select_clock(
 def select_broker(
     execution_config: ExecutionConfig,
     *,
+    mode: Mode,
     state_dir: Path,
     timezone: str,
 ) -> Broker:
-    """Build the broker named by the resolved execution configuration."""
-    broker_name = execution_config.broker
-    if broker_name == "sim":
+    """Build the mode-safe broker for this execution session."""
+    if mode in {"backtest", "paper"}:
         return SimBroker(execution_config, timezone=timezone)
+
+    broker_name = execution_config.broker
     if broker_name == "manual":
         return ManualBroker(state_dir, timezone=timezone)
     if broker_name == "api":
         return ApiBroker(execution_config)
+    if broker_name == "sim":
+        raise ContractViolation(
+            "config/execution.yaml: broker: sim cannot be used with --mode live "
+            "(sim would book simulated fills as real trades); set broker: manual "
+            "or broker: api"
+        )
     raise ContractViolation(f"unknown execution broker {broker_name!r}")
 
 
@@ -312,11 +320,16 @@ def run_session_command(args) -> int | None:
     )
     state_dir = Path(resolved.trader.data_root) / "sessions" / session_id
     telemetry = JsonlTelemetryWriter(state_dir / "telemetry.jsonl")
-    broker = select_broker(
-        resolved.execution,
-        state_dir=state_dir,
-        timezone=resolved.trader.timezone,
-    )
+    try:
+        broker = select_broker(
+            resolved.execution,
+            mode=mode,
+            state_dir=state_dir,
+            timezone=resolved.trader.timezone,
+        )
+    except ContractViolation as exc:
+        _print_run_error(str(exc))
+        return 2
     risk = RiskRails(resolved.risk)
     real_book = RealBook(resolved.risk)
     shadow_book = ShadowBook(resolved.execution)

@@ -12,7 +12,7 @@ import sys
 import pandas as pd
 import pytest
 
-from trader.contracts import Intent, LookaheadError, MarketData
+from trader.contracts import Intent, LookaheadError, MarketData, Mode
 from trader.contracts.errors import ContractViolation
 from trader.contracts.testing import CollectingTelemetry, FakeClock, FakeMarketData
 from trader.execution.book import RealBook, ShadowBook
@@ -252,20 +252,27 @@ def test_select_clock_builds_injected_live_clock(mode: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("broker_name", "broker_type"),
+    ("mode", "broker_name", "broker_type"),
     [
-        ("sim", SimBroker),
-        ("manual", ManualBroker),
-        ("api", ApiBroker),
+        ("backtest", "sim", SimBroker),
+        ("backtest", "manual", SimBroker),
+        ("backtest", "api", SimBroker),
+        ("paper", "sim", SimBroker),
+        ("paper", "manual", SimBroker),
+        ("paper", "api", SimBroker),
+        ("live", "manual", ManualBroker),
+        ("live", "api", ApiBroker),
     ],
 )
-def test_select_broker_dispatches_configured_implementation(
+def test_select_broker_dispatches_by_mode_and_live_broker_config(
+    mode: Mode,
     broker_name: str,
     broker_type: type,
     tmp_path: Path,
 ) -> None:
     broker = select_broker(
         _execution_config(broker=broker_name),
+        mode=mode,
         state_dir=tmp_path,
         timezone="America/New_York",
     )
@@ -273,12 +280,28 @@ def test_select_broker_dispatches_configured_implementation(
     assert isinstance(broker, broker_type)
 
 
-def test_select_broker_rejects_unknown_name(tmp_path: Path) -> None:
-    invalid = replace(_execution_config(), broker="carrier-pigeon")
+def test_select_broker_rejects_sim_for_live_mode(tmp_path: Path) -> None:
+    with pytest.raises(ContractViolation) as exc_info:
+        select_broker(
+            _execution_config(broker="sim"),
+            mode="live",
+            state_dir=tmp_path,
+            timezone="America/New_York",
+        )
 
-    with pytest.raises(ContractViolation, match="carrier-pigeon"):
+    message = str(exc_info.value)
+    assert "broker" in message
+    assert "sim" in message
+    assert "--mode live" in message
+
+
+def test_select_broker_rejects_unknown_live_name(tmp_path: Path) -> None:
+    invalid = replace(_execution_config(), broker="bogus")
+
+    with pytest.raises(ContractViolation, match="bogus"):
         select_broker(
             invalid,
+            mode="live",
             state_dir=tmp_path,
             timezone="America/New_York",
         )
@@ -548,6 +571,21 @@ def test_compose_algos_from_roster_wraps_unresolvable_factory() -> None:
         match=r"factory.*MissingAlgo.*could not be composed",
     ):
         compose_algos_from_roster(invalid_config)
+
+
+def test_run_session_command_rejects_live_sim_broker_cleanly(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    status = run_session_command(
+        argparse.Namespace(mode="live", start=None, end=None)
+    )
+
+    assert status == 2
+    captured = capsys.readouterr()
+    assert "trader run:" in captured.err
+    assert "broker" in captured.err
+    assert "sim" in captured.err
+    assert "--mode live" in captured.err
 
 
 def test_register_parses_run_arguments_and_attaches_session_handler() -> None:
