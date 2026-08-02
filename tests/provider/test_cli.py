@@ -219,6 +219,39 @@ def test_validate_handler_reports_findings_without_writing_store(
     assert {path: path.read_bytes() for path in stored_paths} == original_bytes
 
 
+def test_validate_handler_reports_bad_ticks_at_day_edges(tmp_path, capsys) -> None:
+    day = date(2026, 7, 1)
+    frame = pd.DataFrame(
+        {
+            "o": [100.0, 100.0, 100.5],
+            "h": [180.0, 101.0, 102.0],
+            "l": [99.0, 40.0, 40.0],
+            "c": [100.0, 100.5, 101.0],
+            "v": [100.0, 100.0, 100.0],
+        },
+        index=pd.DatetimeIndex(
+            [
+                "2026-07-01T13:30:00Z",
+                "2026-07-01T13:31:00Z",
+                "2026-07-01T13:32:00Z",
+            ],
+            name="t",
+        ),
+    )
+    write_1m_day(tmp_path, "SNDK", day, frame)
+
+    assert handle_validate(_validate_args(tmp_path)) == 1
+
+    assert capsys.readouterr().out.splitlines() == [
+        "2026-07-01 SNDK bad_tick "
+        "timestamp=2026-07-01T13:30:00+00:00 field=high value=180.0",
+        "2026-07-01 SNDK bad_tick "
+        "timestamp=2026-07-01T13:31:00+00:00 field=low value=40.0",
+        "2026-07-01 SNDK bad_tick "
+        "timestamp=2026-07-01T13:32:00+00:00 field=low value=40.0",
+    ]
+
+
 def test_fetch_handler_saves_validated_raw_payload_without_real_subprocess(
     tmp_path, monkeypatch, capsys
 ) -> None:

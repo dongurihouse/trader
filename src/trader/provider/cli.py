@@ -96,12 +96,11 @@ def handle_validate(args: argparse.Namespace) -> int:
             if frame is None or frame.empty:
                 continue
             ordered = frame.sort_index()
-            for position in range(1, len(ordered) - 1):
-                field = provider_ingest.is_bad_tick(
-                    ordered,
-                    position,
-                    args.bad_tick_neighbor_fraction,
-                )
+            fields = provider_ingest.bad_tick_fields(
+                ordered,
+                args.bad_tick_neighbor_fraction,
+            )
+            for position, field in enumerate(fields):
                 if field is None:
                     continue
                 column = "h" if field == "high" else "l"

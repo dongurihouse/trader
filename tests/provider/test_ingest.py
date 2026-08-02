@@ -136,6 +136,96 @@ def test_ingest_file_quarantines_bad_tick_and_accepts_matching_etf(tmp_path) -> 
     assert pd.Timestamp("2026-07-01T13:32:00Z") not in stored.index
 
 
+def test_ingest_file_quarantines_two_consecutive_bad_ticks(tmp_path) -> None:
+    path = tmp_path / "consecutive-bad-ticks.json"
+    data_root = tmp_path / "store"
+    _write_dump(
+        path,
+        [
+            _result(
+                "SNDK",
+                [
+                    _bar(
+                        "2026-07-14T13:30:00Z",
+                        open_price=100.0,
+                        close_price=100.0,
+                        high_price=100.5,
+                        low_price=99.5,
+                    ),
+                    _bar(
+                        "2026-07-14T13:31:00Z",
+                        open_price=100.2,
+                        close_price=100.2,
+                        high_price=100.7,
+                        low_price=99.7,
+                    ),
+                    _bar(
+                        "2026-07-14T13:32:00Z",
+                        open_price=180.0,
+                        close_price=180.0,
+                        high_price=180.5,
+                        low_price=179.5,
+                    ),
+                    _bar(
+                        "2026-07-14T13:33:00Z",
+                        open_price=180.1,
+                        close_price=180.1,
+                        high_price=180.6,
+                        low_price=179.6,
+                    ),
+                    _bar(
+                        "2026-07-14T13:34:00Z",
+                        open_price=100.3,
+                        close_price=100.3,
+                        high_price=100.8,
+                        low_price=99.8,
+                    ),
+                ],
+            )
+        ],
+    )
+
+    summary = ingest_file(path, data_root, bad_tick_neighbor_fraction=0.05)
+
+    assert summary["quarantined"] == [
+        {
+            "timestamp": pd.Timestamp("2026-07-14T13:32:00Z"),
+            "symbol": "SNDK",
+            "day": date(2026, 7, 14),
+            "field": "high",
+            "value": 180.5,
+        },
+        {
+            "timestamp": pd.Timestamp("2026-07-14T13:33:00Z"),
+            "symbol": "SNDK",
+            "day": date(2026, 7, 14),
+            "field": "high",
+            "value": 180.6,
+        },
+    ]
+    stored = read_1m_day(data_root, "SNDK", date(2026, 7, 14))
+    assert stored is not None
+    expected = pd.DataFrame(
+        {
+            "o": [100.0, 100.2, 100.3],
+            "h": [100.5, 100.7, 100.8],
+            "l": [99.5, 99.7, 99.8],
+            "c": [100.0, 100.2, 100.3],
+            "v": [100.0, 100.0, 100.0],
+        },
+        index=pd.DatetimeIndex(
+            [
+                "2026-07-14T13:30:00Z",
+                "2026-07-14T13:31:00Z",
+                "2026-07-14T13:34:00Z",
+            ],
+            name="t",
+        ),
+        dtype="float64",
+    )
+    assert_frame_equal(stored, expected)
+
+
 def test_ingest_file_writes_rth_daily_bars_for_every_touched_symbol(
     tmp_path,
 ) -> None:
@@ -433,7 +523,7 @@ def test_ingest_file_does_not_requarantine_preexisting_bad_tick(tmp_path) -> Non
     assert stored.loc[pd.Timestamp("2026-07-04T13:31:00Z"), "h"] == 180.0
 
 
-def test_ingest_file_quarantines_low_but_never_checks_day_edges(tmp_path) -> None:
+def test_ingest_file_quarantines_bad_ticks_at_day_edges(tmp_path) -> None:
     path = tmp_path / "low-and-edges.json"
     _write_dump(
         path,
@@ -471,19 +561,30 @@ def test_ingest_file_quarantines_low_but_never_checks_day_edges(tmp_path) -> Non
 
     assert summary["quarantined"] == [
         {
+            "timestamp": pd.Timestamp("2026-07-07T13:30:00Z"),
+            "symbol": "SNDK",
+            "day": date(2026, 7, 7),
+            "field": "high",
+            "value": 180.0,
+        },
+        {
             "timestamp": pd.Timestamp("2026-07-07T13:31:00Z"),
             "symbol": "SNDK",
             "day": date(2026, 7, 7),
             "field": "low",
             "value": 40.0,
-        }
+        },
+        {
+            "timestamp": pd.Timestamp("2026-07-07T13:32:00Z"),
+            "symbol": "SNDK",
+            "day": date(2026, 7, 7),
+            "field": "low",
+            "value": 40.0,
+        },
     ]
     stored = read_1m_day(tmp_path, "SNDK", date(2026, 7, 7))
     assert stored is not None
-    assert list(stored.index) == [
-        pd.Timestamp("2026-07-07T13:30:00Z"),
-        pd.Timestamp("2026-07-07T13:32:00Z"),
-    ]
+    assert stored.empty
 
 
 def test_ingest_file_counts_duplicate_vendor_rows_while_later_row_wins(

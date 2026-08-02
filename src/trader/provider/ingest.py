@@ -6,6 +6,7 @@ from datetime import date
 import json
 import math
 from pathlib import Path
+from statistics import median
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -93,33 +94,101 @@ def _daily_bar(day: date, minute_bars: pd.DataFrame) -> pd.DataFrame | None:
     )
 
 
+def _deviates(value: float, reference: float, fraction: float) -> bool:
+    if reference == 0.0:
+        return value != 0.0
+    return abs(value - reference) / abs(reference) > fraction
+
+
+def _interior_references(
+    frame: pd.DataFrame,
+    position: int,
+) -> tuple[float, float]:
+    left = median(
+        float(value)
+        for value in frame.iloc[max(0, position - 2) : position]["c"]
+    )
+    right = median(
+        float(value)
+        for value in frame.iloc[position + 1 : position + 3]["c"]
+    )
+    return float(left), float(right)
+
+
+def _bad_price_field(
+    row: pd.Series,
+    references: tuple[float, ...],
+    fraction: float,
+) -> str | None:
+    high = float(row["h"])
+    if all(_deviates(high, reference, fraction) for reference in references):
+        return "high"
+
+    low = float(row["l"])
+    if all(_deviates(low, reference, fraction) for reference in references):
+        return "low"
+    return None
+
+
+def bad_tick_fields(
+    prospective_frame: pd.DataFrame,
+    fraction: float,
+) -> list[str | None]:
+    """Classify anomalous high/low fields across one ordered trading day."""
+    frame = prospective_frame
+    size = len(frame)
+    fields: list[str | None] = [None] * size
+    if size < 3:
+        return fields
+
+    # Edges use closes as references, so track close trust separately from a
+    # row's reportable high/low finding (a bad low does not taint a good close).
+    bad_closes: set[int] = set()
+    for position in range(1, size - 1):
+        references = _interior_references(frame, position)
+        row = frame.iloc[position]
+        fields[position] = _bad_price_field(row, references, fraction)
+        close = float(row["c"])
+        if all(
+            _deviates(close, reference, fraction) for reference in references
+        ):
+            bad_closes.add(position)
+
+    edge_searches = (
+        (0, range(1, size)),
+        (size - 1, range(size - 2, -1, -1)),
+    )
+    for edge_position, candidates in edge_searches:
+        # Skip close outliers found by the interior pass, then require a second
+        # inward close to corroborate the reference before checking the edge.
+        trustworthy = [
+            position for position in candidates if position not in bad_closes
+        ]
+        if len(trustworthy) < 2:
+            continue
+
+        reference = float(frame.iloc[trustworthy[0]]["c"])
+        corroborating_close = float(frame.iloc[trustworthy[1]]["c"])
+        if _deviates(reference, corroborating_close, fraction):
+            continue
+        fields[edge_position] = _bad_price_field(
+            frame.iloc[edge_position],
+            (reference,),
+            fraction,
+        )
+
+    return fields
+
+
 def is_bad_tick(
     prospective_frame: pd.DataFrame,
     position: int,
     fraction: float,
 ) -> str | None:
-    """Return the anomalous price field at an interior bar, if any."""
-    if position <= 0 or position >= len(prospective_frame) - 1:
+    """Return one position's result from the per-day bad-tick classifier."""
+    if position < 0 or position >= len(prospective_frame):
         return None
-
-    row = prospective_frame.iloc[position]
-    previous_close = float(prospective_frame.iloc[position - 1]["c"])
-    next_close = float(prospective_frame.iloc[position + 1]["c"])
-
-    high = float(row["h"])
-    if (
-        abs(high - previous_close) / previous_close > fraction
-        and abs(high - next_close) / next_close > fraction
-    ):
-        return "high"
-
-    low = float(row["l"])
-    if (
-        abs(low - previous_close) / previous_close > fraction
-        and abs(low - next_close) / next_close > fraction
-    ):
-        return "low"
-    return None
+    return bad_tick_fields(prospective_frame, fraction)[position]
 
 
 def _quarantine_incoming(
@@ -134,15 +203,12 @@ def _quarantine_incoming(
     incoming_timestamps = set(incoming.index)
     quarantined_timestamps: list[pd.Timestamp] = []
     quarantined: list[dict] = []
+    fields = bad_tick_fields(prospective, bad_tick_neighbor_fraction)
 
     for position, timestamp in enumerate(prospective.index):
         if timestamp not in incoming_timestamps:
             continue
-        offending_field = is_bad_tick(
-            prospective,
-            position,
-            bad_tick_neighbor_fraction,
-        )
+        offending_field = fields[position]
         if offending_field is None:
             continue
 
@@ -364,6 +430,7 @@ def ingest_all(
 
 
 __all__ = [
+    "bad_tick_fields",
     "etf_leverage_warning",
     "ingest_all",
     "ingest_file",
