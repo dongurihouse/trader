@@ -134,6 +134,9 @@ class RealBook:
             raw_entry_price=raw_entry,
             stop=cast(float, position.stop),
         )
+        dollar_pnl = position.shares * (fill.price - position.entry_price)
+        self._state.cash += dollar_pnl
+        self._state.equity += dollar_pnl
         exit_kind = cast(_ExitKind, fill.kind)
         closed = ClosedTrade(
             algo_id=position.algo_id,

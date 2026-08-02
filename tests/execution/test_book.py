@@ -306,6 +306,42 @@ def test_realized_r_today_accumulates_sequential_round_trips() -> None:
     assert book.state.realized_r_today == pytest.approx(0.4)
 
 
+def test_cash_and_equity_accumulate_dollar_pnl_across_round_trips() -> None:
+    book = RealBook(_risk_config(equity=12_345.0))
+    data = _data_for_raw_opens(100.0, 110.0)
+
+    _apply_real_round_trip(
+        book,
+        data,
+        _ticket("ticket-a", shares=10, stop=95.0),
+        entry_ts=BAR_START + timedelta(minutes=1),
+        entry_price=100.25,
+        exit_ts=BAR_START + timedelta(minutes=1, seconds=30),
+        exit_price=94.75,
+        exit_kind="stop",
+    )
+    _apply_real_round_trip(
+        book,
+        data,
+        _ticket(
+            "ticket-b",
+            shares=20,
+            stop=105.0,
+            target=115.0,
+            created_ts=BAR_START + timedelta(minutes=1),
+        ),
+        entry_ts=BAR_START + timedelta(minutes=2),
+        entry_price=110.25,
+        exit_ts=BAR_START + timedelta(minutes=2),
+        exit_price=114.75,
+        exit_kind="target",
+    )
+
+    # 10 * (94.75 - 100.25) + 20 * (114.75 - 110.25) = $35.00.
+    assert book.state.cash == 12_380.0
+    assert book.state.equity == 12_380.0
+
+
 def test_two_consecutive_losing_stops_mute_at_session_close() -> None:
     book = RealBook(_risk_config(mute_after_consecutive_stops=2))
     data = _data_for_raw_opens(100.0, 100.0)

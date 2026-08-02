@@ -333,10 +333,10 @@ def test_session_runner_executes_real_and_shadow_paths_in_exact_order() -> None:
         bars_processed=6,
         real_trades=1,
         shadow_trades=2,
-        final_equity=10_000.0,
+        final_equity=10_250.0,
     )
     assert telemetry.records[-1]["ts"] == "2026-07-01T13:36:00Z"
-    assert telemetry.records[-1]["final_equity"] == 10_000.0
+    assert telemetry.records[-1]["final_equity"] == 10_250.0
     explicit_event_times = {
         "2026-07-01T13:30:00Z",
         *(asof.isoformat().replace("+00:00", "Z") for asof in asofs),
@@ -452,4 +452,4 @@ def test_end_session_force_flats_real_position_and_emits_final_metrics() -> None
     assert telemetry.records[8]["book"] == "real"
     assert telemetry.records[9]["book"] == "shadow"
     assert real_book.state.positions == []
-    assert summary == SessionSummary(2, 1, 0, 10_000.0)
+    assert summary == SessionSummary(2, 1, 0, 10_098.0)
