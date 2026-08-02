@@ -168,7 +168,7 @@ def test_handle_query_rejects_with_specific_risk_rail(tmp_path: Path) -> None:
     assert payload["data"]["decision"] == "rejected"
     assert payload["data"]["ticket"] is None
     assert payload["data"]["rejection"]["rule"] == "degenerate_bracket"
-    assert "long bracket has no tradeable stop/target spread" in (
+    assert "instrument bracket has no tradeable stop/target spread" in (
         payload["data"]["rejection"]["detail"]
     )
     assert payload["data"]["sizing_context"] == {
