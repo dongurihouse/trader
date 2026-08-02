@@ -51,6 +51,7 @@ trader/
     risk.yaml               # equity, slots, rails, mutes
     execution.yaml          # broker selection, fill model, slippage/commission, live interlock
     console.yaml            # host/port
+    calendar.yaml           # static ex-ante market calendar (generated in Wave 1-A)
   src/trader/
     contracts/              # Wave 0. Types, protocols, serde, errors, testing fakes + fixtures
     provider/               # Wave 1-A
@@ -112,6 +113,19 @@ end of session: force-flat both books, write final metrics + state.json + report
   exit, metrics snapshot, algo error, session_end) is appended to
   `data/sessions/<session_id>/telemetry.jsonl` as it happens. The console only ever reads
   this file; it never touches component internals.
+- Reversal exits (added 2026-08-01; ported dt semantics — omitting them was a design
+  gap): when a position is open and an opposite-direction open intent arrives, the
+  position is scheduled to exit at the next bar's open (fill kind `reversal`); the
+  reversal cooldown (risk.yaml) runs from the exit and blocks re-entry; the mute-state
+  reversal category applies; shadow episodes track reversal independently per episode.
+  The exact trigger population and edge semantics port from dt `engine/core.py`
+  (lines 11-15, 182-194 and the shadow machinery) — where trader's component split
+  leaves any ambiguity, dt's observed behavior governs, and the port must record what
+  dt actually does on each ambiguous point.
+- Day roll and session end (clarified 2026-08-01): `start_day` resets BOTH books —
+  pending unfilled entries (real and shadow) are cancelled, never carried into a later
+  day; `end_session` force-flats BOTH books, shadow episodes included (fill kind
+  `eod`), exactly as §5's loop sketch states.
 
 ## 6. Data root layout (file contracts)
 
@@ -123,7 +137,6 @@ data/
   events/earnings.json
   events/options/*.json                   # implied-move captures (manual procedure)
   news/raw/<YYYY-MM-DD>.jsonl             # optional archive; carries no measured signal
-  calendar/market.yaml
   sessions/<session_id>/                  # session_id = <mode>-<YYYYMMDD>-<HHMMSS>
     telemetry.jsonl
     state.json
@@ -142,6 +155,15 @@ shadow leaderboards overstate: the apparent edge concentrated in candidates the 
 refused (conversion examples on record: 29 shadow candidates -> 2 emitted trades;
 13 -> 1). The console must render shadow metrics with that caveat visible, never as a
 forecast of promoted performance.
+
+Gate and veto refusals inside emitting algos are never silent (amendment A8,
+2026-08-01): when a global gate or veto blocks an emitting algo's candidate, the algo
+still returns the intent, stamped `meta.gates_pass: false` (and `meta.vetoed: <rule>`
+when a veto bound). Execution routes any intent stamped `gates_pass: false` to the
+shadow book tagged `gate_refused` — never to the real book, regardless of algo status.
+This ports dt's silent-record discipline; the refused-candidate ledger is the raw
+material of the promotion loop and must survive the rewrite. Probe algos are unaffected
+(all their intents go to the shadow book already).
 
 ## 8. Signal engine scope (provider)
 
@@ -213,6 +235,47 @@ correctness comes from the PIT rules in §4.
   16:27Z printed at 1615.00 against a 1430-1442 tape); ingest must quarantine, not
   ingest, such bars.
 
+## 10a. Bad-tick policy (amendment A9, 2026-08-02 — normative)
+
+Two review rounds produced detectors that were locally reasonable and globally wrong (a
+neighbour-pair rule that missed runs at day edges; then a median-vote classifier that
+inverted whenever the bad run was a majority of the frame, deleting good bars and keeping
+corrupt ones). The cause was using a *vote* where the phenomenon is an *excursion*. The
+policy below replaces threshold tuning with a definition.
+
+**Definition.** A bad tick is a SHORT excursion that RETURNS: a contiguous run of bars
+whose prices depart from the local level while the level immediately before the run and
+immediately after the run agree with each other. A level that shifts and stays is a
+regime change (gap, halt-and-reopen, genuine repricing) and is never a bad tick,
+regardless of how large the move is or how much of the session it covers.
+
+**Rules.**
+1. Detection considers maximal contiguous candidate runs, never a global vote. No
+   statistic computed over the whole frame may decide any individual bar's fate.
+2. A run is quarantined only when all hold: (a) its length is at most
+   `max_bad_run_bars`; (b) the reference level before it and the reference level after it
+   agree within `bad_tick_neighbor_fraction`; (c) the run itself deviates from that
+   agreed level beyond the same fraction, in both high and low.
+3. Day-frame edges: a run touching the first or last bar has a reference on one side
+   only. It may still be quarantined, but only when the available reference side is
+   strictly longer than the run — never when the run is the majority of the frame.
+4. A candidate run longer than `max_bad_run_bars` is NEVER quarantined. It is recorded as
+   a validation error naming the symbol, day, and span, for the Dev to judge. Wholesale
+   corruption is escalated, never silently repaired.
+5. Total quarantine per (symbol, day) is capped at `quarantine_abort_fraction` of the
+   frame, measured against the ORIGINAL frame size. Exceeding it aborts quarantining for
+   that day and records a validation error. This cap is a backstop only; rules 2-4 must
+   make it unreachable in normal operation.
+6. Bias rule, decisive on any ambiguity: prefer keeping a suspect bar over deleting a
+   good one. Deleted data is unrecoverable and silently corrupts every downstream signal;
+   a retained suspect bar is visible, reviewable, and fixable later. Any tie, any
+   insufficient-context case, any detector disagreement resolves toward retention plus a
+   validation error.
+7. Retroactive re-evaluation stands (from the prior fix): each ingest classifies the full
+   merged frame — stored plus incoming — so a bar whose context was insufficient earlier
+   is judged once the surrounding bars arrive, and the derived daily bar is recomputed
+   from the surviving frame.
+
 ## 11. Migration and decommissioning
 
 1. Data: copy bar stores, raw dumps, events/options captures, news archive, and calendar
@@ -221,6 +284,8 @@ correctness comes from the PIT rules in §4.
    `docs/archive/{dt,daytrader,win}/`, plus each old repo's `git log --stat` exported to
    a text file there (the old histories have no remotes; this is their surviving record).
 3. Removal: only after Wave 4 verification (integration green, console live against a
-   real session, migration checksums verified) and an explicit final Dev confirmation in
+   real session, migration checksums verified), a side-by-side dt-vs-trader backtest
+   comparison over the same bars reviewed by the Dev — the Dev judges whether trader is
+   at least somewhat better (Dev directive 2026-08-01) — and an explicit final Dev confirmation in
    chat, the three directories `/Users/xup/dh/win`, `/Users/xup/dh/dt`,
    `/Users/xup/dh/daytrader` are deleted. Nothing is deleted before that point.

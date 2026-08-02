@@ -60,7 +60,7 @@ not file layout.
   bad-tick quarantine per provider.yaml. Port: `/Users/xup/dh/dt/datalayer/robinhood_ingest.py`.
   Fixture: craft a small raw dump matching the vendor format (read one file under
   `/Users/xup/dh/dt/data/robinhood_raw/` for the shape).
-- A3 calendar: generate `data/calendar/market.yaml` from
+- A3 calendar: generate `config/calendar.yaml` (versioned; the data/ tree is git-ignored) from
   `/Users/xup/dh/dt/datalayer/market_calendar.py` (static, ex-ante) + MarketCalendar impl.
 - A4 signal engine: named signals with per-session memo cache, ported from
   `/Users/xup/dh/dt/engine/features.py`; registry doc generation to `docs/signals.md`
@@ -156,8 +156,16 @@ not file layout.
 - M2 knowledge archive per §11.2 (docs of dt/daytrader, win design, `git log --stat`
   exports of all three repos).
 
-## Wave 4 — final review + decommission
+## Wave 4 — comparison gate, final review, decommission
 
+- C0 comparison gate (Dev directive 2026-08-01): before any decommission, run dt's own
+  replay (`dt.py backtest` in /Users/xup/dh/dt) and trader's backtest over the same
+  window on the same bars, with trader configured to dt's posture (max_entries_per_day
+  3, day_slots 2, dt's slippage eras), and produce a side-by-side report: trades, win
+  rate, mean R, profit factor, per-setup real + shadow. The Dev judges whether trader
+  is at least somewhat better. Exact equality is not expected (fresh build, "start
+  over" ruling); unexplained large divergences are findings to investigate, not
+  round-off.
 - Final whole-branch review (most capable model), fix wave, then Dev confirmation in
   chat before `/Users/xup/dh/{win,dt,daytrader}` are removed. Removal is the last step
-  and never runs before that confirmation.
+  and never runs before the comparison report is presented and that confirmation given.
