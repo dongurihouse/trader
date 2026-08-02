@@ -35,6 +35,20 @@ def test_register_adds_provider_commands_with_handlers_and_defaults() -> None:
     assert fetch.tag is None
     assert fetch.interval == "minute"
     assert fetch.bounds == "regular"
+    assert fetch.min_intraday_bars == 100
+
+    custom_fetch = parser.parse_args(
+        [
+            "fetch",
+            "--symbols",
+            "SNDK",
+            "--day",
+            "2026-07-01",
+            "--min-intraday-bars",
+            "42",
+        ]
+    )
+    assert custom_fetch.min_intraday_bars == 42
 
     ingest = parser.parse_args(["ingest"])
     assert ingest.func is handle_ingest
@@ -327,6 +341,7 @@ def test_fetch_handler_saves_validated_raw_payload_without_real_subprocess(
         tag=None,
         interval="5minute",
         bounds="regular",
+        min_intraday_bars=3,
     )
 
     assert handle_fetch(args) == 0
@@ -372,6 +387,7 @@ def test_fetch_handler_reports_relay_errors_to_stderr(
         tag="retry",
         interval="minute",
         bounds="regular",
+        min_intraday_bars=100,
     )
 
     assert handle_fetch(args) == 1

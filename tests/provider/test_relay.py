@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -134,6 +134,38 @@ def _payload(*symbols: str) -> dict:
                     ],
                 }
                 for symbol in symbols
+            ]
+        }
+    }
+
+
+def _bar_count_payload(
+    symbol: str,
+    *,
+    count: int,
+    start_iso: str = "2026-07-01T13:30:00Z",
+    end_iso: str = "2026-07-01T20:00:00Z",
+) -> dict:
+    start = datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
+    end = datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
+    if count == 1:
+        timestamps = [start]
+    else:
+        timestamps = [
+            start,
+            *[start + timedelta(minutes=offset) for offset in range(1, count - 1)],
+            end,
+        ]
+    return {
+        "data": {
+            "results": [
+                {
+                    "symbol": symbol,
+                    "bars": [
+                        {"begins_at": timestamp.strftime("%Y-%m-%dT%H:%M:%SZ")}
+                        for timestamp in timestamps
+                    ],
+                }
             ]
         }
     }
@@ -291,12 +323,104 @@ def test_run_relay_classifies_auth_shaped_failure() -> None:
 
 
 def test_validate_payload_accepts_requested_symbols_with_in_range_bars() -> None:
+    calendar = load_calendar(Path("config/calendar.yaml"))
+
     validate_payload(
         _payload("SNDK", "SNXX"),
         ["sndk", "snxx"],
         "2026-07-01T13:30:00Z",
         "2026-07-01T20:00:00Z",
+        calendar=calendar,
+        day=date(2026, 7, 1),
+        min_intraday_bars=2,
     )
+
+
+def test_validate_payload_accepts_regular_day_at_min_intraday_bars() -> None:
+    calendar = load_calendar(Path("config/calendar.yaml"))
+
+    validate_payload(
+        _bar_count_payload("SNDK", count=120),
+        ["SNDK"],
+        "2026-07-01T13:30:00Z",
+        "2026-07-01T20:00:00Z",
+        calendar=calendar,
+        day=date(2026, 7, 1),
+        min_intraday_bars=100,
+    )
+
+
+def test_validate_payload_rejects_regular_day_below_min_intraday_bars() -> None:
+    calendar = load_calendar(Path("config/calendar.yaml"))
+
+    with pytest.raises(RelayError, match="SNDK.*99 bars.*minimum 100"):
+        validate_payload(
+            _bar_count_payload("SNDK", count=99),
+            ["SNDK"],
+            "2026-07-01T13:30:00Z",
+            "2026-07-01T20:00:00Z",
+            calendar=calendar,
+            day=date(2026, 7, 1),
+            min_intraday_bars=100,
+        )
+
+
+def test_validate_payload_rejects_any_requested_symbol_below_minimum() -> None:
+    calendar = load_calendar(Path("config/calendar.yaml"))
+    payload = _bar_count_payload("SNDK", count=100)
+    payload["data"]["results"].append(
+        _bar_count_payload("SNXX", count=99)["data"]["results"][0]
+    )
+
+    with pytest.raises(RelayError, match="SNXX.*99 bars.*minimum 100"):
+        validate_payload(
+            payload,
+            ["SNDK", "SNXX"],
+            "2026-07-01T13:30:00Z",
+            "2026-07-01T20:00:00Z",
+            calendar=calendar,
+            day=date(2026, 7, 1),
+            min_intraday_bars=100,
+        )
+
+
+def test_validate_payload_accepts_early_close_payload_above_scaled_minimum() -> None:
+    calendar = load_calendar(Path("config/calendar.yaml"))
+
+    validate_payload(
+        _bar_count_payload(
+            "SNDK",
+            count=60,
+            start_iso="2026-11-27T14:30:00Z",
+            end_iso="2026-11-27T18:00:00Z",
+        ),
+        ["SNDK"],
+        "2026-11-27T14:30:00Z",
+        "2026-11-27T18:00:00Z",
+        calendar=calendar,
+        day=date(2026, 11, 27),
+        min_intraday_bars=100,
+    )
+
+
+def test_validate_payload_rejects_early_close_payload_below_scaled_minimum() -> None:
+    calendar = load_calendar(Path("config/calendar.yaml"))
+
+    with pytest.raises(RelayError, match="SNDK.*53 bars.*minimum 54"):
+        validate_payload(
+            _bar_count_payload(
+                "SNDK",
+                count=53,
+                start_iso="2026-11-27T14:30:00Z",
+                end_iso="2026-11-27T18:00:00Z",
+            ),
+            ["SNDK"],
+            "2026-11-27T14:30:00Z",
+            "2026-11-27T18:00:00Z",
+            calendar=calendar,
+            day=date(2026, 11, 27),
+            min_intraday_bars=100,
+        )
 
 
 @pytest.mark.parametrize(
@@ -336,11 +460,15 @@ def test_validate_payload_rejects_incomplete_or_out_of_range_data(
     payload, symbols, message
 ) -> None:
     with pytest.raises(RelayError, match=message):
+        calendar = load_calendar(Path("config/calendar.yaml"))
         validate_payload(
             payload,
             symbols,
             "2026-07-01T13:30:00Z",
             "2026-07-01T20:00:00Z",
+            calendar=calendar,
+            day=date(2026, 7, 1),
+            min_intraday_bars=2,
         )
 
 
