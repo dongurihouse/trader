@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -148,3 +149,27 @@ def test_translate_returns_none_for_a_non_positive_sndk_previous_close() -> None
     )
 
     assert translate("long", 101.0, 99.0, 103.0, "SNDK", data, ASOF) is None
+
+
+def test_translate_returns_none_for_a_non_positive_etf_previous_close() -> None:
+    data = FakeMarketData(
+        {
+            "SNDK": _daily_frame([98.0, 100.0, 104.0]),
+            "SNXX": _daily_frame([48.0, 0.0, 52.0]),
+        }
+    )
+
+    assert translate("long", 101.0, 99.0, 103.0, "SNDK", data, ASOF) is None
+
+
+@pytest.mark.parametrize(
+    "forbidden_term",
+    ["AccountCfg", "shares", "equity", "slot_cap", "tail_budget"],
+)
+def test_bracket_translation_does_not_size_positions(forbidden_term: str) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    source = (repo_root / "src" / "trader" / "algos" / "bracket.py").read_text()
+
+    assert forbidden_term.casefold() not in source.casefold(), (
+        f"bracket.py must not perform position sizing; found {forbidden_term!r}"
+    )

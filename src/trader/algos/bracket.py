@@ -62,9 +62,9 @@ def translate(
     etf_prev = previous_close(instrument, data, asof)
     if sndk_prev is None or etf_prev is None:
         return None
-    # Defensive addition beyond dt: a broken non-positive quote cannot be used
-    # as the denominator for translating today's SNDK-space levels.
-    if sndk_prev <= 0:
+    # Defensive additions beyond dt: broken non-positive previous-close quotes
+    # cannot be used to translate today's SNDK-space levels into a valid bracket.
+    if sndk_prev <= 0 or etf_prev <= 0:
         return None
 
     entry = etf_price(entry_sndk, sndk_prev, etf_prev, lev)
