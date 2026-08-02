@@ -100,34 +100,29 @@ def _deviates(value: float, reference: float, fraction: float) -> bool:
     return abs(value - reference) / abs(reference) > fraction
 
 
-def _interior_references(
-    frame: pd.DataFrame,
+def _gather_references(
     position: int,
-) -> tuple[float, float]:
-    left = median(
-        float(value)
-        for value in frame.iloc[max(0, position - 2) : position]["c"]
-    )
-    right = median(
-        float(value)
-        for value in frame.iloc[position + 1 : position + 3]["c"]
-    )
-    return float(left), float(right)
+    size: int,
+    closes: list[float],
+    excluded: set[int],
+) -> list[float]:
+    """Return up to two close references per side, skipping exclusions."""
+    references: list[float] = []
+    step = 1
+    while len(references) < 2 and position - step >= 0:
+        candidate = position - step
+        if candidate not in excluded:
+            references.append(closes[candidate])
+        step += 1
 
-
-def _bad_price_field(
-    row: pd.Series,
-    references: tuple[float, ...],
-    fraction: float,
-) -> str | None:
-    high = float(row["h"])
-    if all(_deviates(high, reference, fraction) for reference in references):
-        return "high"
-
-    low = float(row["l"])
-    if all(_deviates(low, reference, fraction) for reference in references):
-        return "low"
-    return None
+    left_count = len(references)
+    step = 1
+    while len(references) - left_count < 2 and position + step < size:
+        candidate = position + step
+        if candidate not in excluded:
+            references.append(closes[candidate])
+        step += 1
+    return references
 
 
 def bad_tick_fields(
@@ -137,47 +132,50 @@ def bad_tick_fields(
     """Classify anomalous high/low fields across one ordered trading day."""
     frame = prospective_frame
     size = len(frame)
-    fields: list[str | None] = [None] * size
-    if size < 3:
-        return fields
+    closes = [float(value) for value in frame["c"]]
+    highs = [float(value) for value in frame["h"]]
+    lows = [float(value) for value in frame["l"]]
+    flagged_field: dict[int, str] = {}
 
-    # Edges use closes as references, so track close trust separately from a
-    # row's reportable high/low finding (a bad low does not taint a good close).
-    bad_closes: set[int] = set()
-    for position in range(1, size - 1):
-        references = _interior_references(frame, position)
-        row = frame.iloc[position]
-        fields[position] = _bad_price_field(row, references, fraction)
-        close = float(row["c"])
-        if all(
-            _deviates(close, reference, fraction) for reference in references
-        ):
-            bad_closes.add(position)
+    for _ in range(10):
+        excluded = set(flagged_field)
+        new_flagged_field: dict[int, str] = {}
+        for position in range(size):
+            references = _gather_references(
+                position,
+                size,
+                closes,
+                excluded,
+            )
+            if len(references) < 2:
+                if position in flagged_field:
+                    new_flagged_field[position] = flagged_field[position]
+                continue
 
-    edge_searches = (
-        (0, range(1, size)),
-        (size - 1, range(size - 2, -1, -1)),
-    )
-    for edge_position, candidates in edge_searches:
-        # Skip close outliers found by the interior pass, then require a second
-        # inward close to corroborate the reference before checking the edge.
-        trustworthy = [
-            position for position in candidates if position not in bad_closes
-        ]
-        if len(trustworthy) < 2:
-            continue
+            reference = median(references)
+            if _deviates(highs[position], reference, fraction):
+                new_flagged_field[position] = "high"
+            elif _deviates(lows[position], reference, fraction):
+                new_flagged_field[position] = "low"
 
-        reference = float(frame.iloc[trustworthy[0]]["c"])
-        corroborating_close = float(frame.iloc[trustworthy[1]]["c"])
-        if _deviates(reference, corroborating_close, fraction):
-            continue
-        fields[edge_position] = _bad_price_field(
-            frame.iloc[edge_position],
-            (reference,),
-            fraction,
-        )
+        # If every position is excluded, sticky deferral cannot recover false
+        # positives caused by a short split-level frame. Re-anchor that fully
+        # starved state to the day's close median before continuing iteration.
+        if size and len(new_flagged_field) == size:
+            day_reference = median(closes)
+            new_flagged_field = {}
+            for position in range(size):
+                if _deviates(highs[position], day_reference, fraction):
+                    new_flagged_field[position] = "high"
+                elif _deviates(lows[position], day_reference, fraction):
+                    new_flagged_field[position] = "low"
 
-    return fields
+        if new_flagged_field == flagged_field:
+            flagged_field = new_flagged_field
+            break
+        flagged_field = new_flagged_field
+
+    return [flagged_field.get(position) for position in range(size)]
 
 
 def is_bad_tick(

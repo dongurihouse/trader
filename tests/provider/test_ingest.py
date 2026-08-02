@@ -226,6 +226,303 @@ def test_ingest_file_quarantines_two_consecutive_bad_ticks(tmp_path) -> None:
     assert_frame_equal(stored, expected)
 
 
+def test_ingest_file_quarantines_bad_run_ending_at_last_bar(tmp_path) -> None:
+    path = tmp_path / "bad-run-at-close.json"
+    data_root = tmp_path / "store"
+    _write_dump(
+        path,
+        [
+            _result(
+                "SNDK",
+                [
+                    _bar(
+                        "2026-07-17T13:30:00Z",
+                        open_price=100.0,
+                        close_price=100.0,
+                        high_price=100.5,
+                        low_price=99.5,
+                    ),
+                    _bar(
+                        "2026-07-17T13:31:00Z",
+                        open_price=100.2,
+                        close_price=100.2,
+                        high_price=100.7,
+                        low_price=99.7,
+                    ),
+                    _bar(
+                        "2026-07-17T13:32:00Z",
+                        open_price=100.1,
+                        close_price=100.1,
+                        high_price=100.6,
+                        low_price=99.6,
+                    ),
+                    _bar(
+                        "2026-07-17T13:33:00Z",
+                        open_price=100.3,
+                        close_price=100.3,
+                        high_price=100.8,
+                        low_price=99.8,
+                    ),
+                    _bar(
+                        "2026-07-17T13:34:00Z",
+                        open_price=180.0,
+                        close_price=180.0,
+                        high_price=180.5,
+                        low_price=179.5,
+                    ),
+                    _bar(
+                        "2026-07-17T13:35:00Z",
+                        open_price=180.1,
+                        close_price=180.1,
+                        high_price=180.6,
+                        low_price=179.6,
+                    ),
+                ],
+            )
+        ],
+    )
+
+    summary = ingest_file(path, data_root, bad_tick_neighbor_fraction=0.05)
+
+    assert summary["quarantined"] == [
+        {
+            "timestamp": pd.Timestamp("2026-07-17T13:34:00Z"),
+            "symbol": "SNDK",
+            "day": date(2026, 7, 17),
+            "field": "high",
+            "value": 180.5,
+        },
+        {
+            "timestamp": pd.Timestamp("2026-07-17T13:35:00Z"),
+            "symbol": "SNDK",
+            "day": date(2026, 7, 17),
+            "field": "high",
+            "value": 180.6,
+        },
+    ]
+    stored = read_1m_day(data_root, "SNDK", date(2026, 7, 17))
+    assert stored is not None
+    expected = pd.DataFrame(
+        {
+            "o": [100.0, 100.2, 100.1, 100.3],
+            "h": [100.5, 100.7, 100.6, 100.8],
+            "l": [99.5, 99.7, 99.6, 99.8],
+            "c": [100.0, 100.2, 100.1, 100.3],
+            "v": [100.0, 100.0, 100.0, 100.0],
+        },
+        index=pd.DatetimeIndex(
+            [
+                "2026-07-17T13:30:00Z",
+                "2026-07-17T13:31:00Z",
+                "2026-07-17T13:32:00Z",
+                "2026-07-17T13:33:00Z",
+            ],
+            name="t",
+        ),
+        dtype="float64",
+    )
+    assert_frame_equal(stored, expected)
+
+
+def test_ingest_file_quarantines_bad_run_starting_at_first_bar(tmp_path) -> None:
+    path = tmp_path / "bad-run-at-open.json"
+    data_root = tmp_path / "store"
+    _write_dump(
+        path,
+        [
+            _result(
+                "SNDK",
+                [
+                    _bar(
+                        "2026-07-22T13:30:00Z",
+                        open_price=180.0,
+                        close_price=180.0,
+                        high_price=180.5,
+                        low_price=179.5,
+                    ),
+                    _bar(
+                        "2026-07-22T13:31:00Z",
+                        open_price=180.1,
+                        close_price=180.1,
+                        high_price=180.6,
+                        low_price=179.6,
+                    ),
+                    _bar(
+                        "2026-07-22T13:32:00Z",
+                        open_price=100.3,
+                        close_price=100.3,
+                        high_price=100.8,
+                        low_price=99.8,
+                    ),
+                    _bar(
+                        "2026-07-22T13:33:00Z",
+                        open_price=100.1,
+                        close_price=100.1,
+                        high_price=100.6,
+                        low_price=99.6,
+                    ),
+                    _bar(
+                        "2026-07-22T13:34:00Z",
+                        open_price=100.2,
+                        close_price=100.2,
+                        high_price=100.7,
+                        low_price=99.7,
+                    ),
+                    _bar(
+                        "2026-07-22T13:35:00Z",
+                        open_price=100.0,
+                        close_price=100.0,
+                        high_price=100.5,
+                        low_price=99.5,
+                    ),
+                ],
+            )
+        ],
+    )
+
+    summary = ingest_file(path, data_root, bad_tick_neighbor_fraction=0.05)
+
+    assert summary["quarantined"] == [
+        {
+            "timestamp": pd.Timestamp("2026-07-22T13:30:00Z"),
+            "symbol": "SNDK",
+            "day": date(2026, 7, 22),
+            "field": "high",
+            "value": 180.5,
+        },
+        {
+            "timestamp": pd.Timestamp("2026-07-22T13:31:00Z"),
+            "symbol": "SNDK",
+            "day": date(2026, 7, 22),
+            "field": "high",
+            "value": 180.6,
+        },
+    ]
+    stored = read_1m_day(data_root, "SNDK", date(2026, 7, 22))
+    assert stored is not None
+    expected = pd.DataFrame(
+        {
+            "o": [100.3, 100.1, 100.2, 100.0],
+            "h": [100.8, 100.6, 100.7, 100.5],
+            "l": [99.8, 99.6, 99.7, 99.5],
+            "c": [100.3, 100.1, 100.2, 100.0],
+            "v": [100.0, 100.0, 100.0, 100.0],
+        },
+        index=pd.DatetimeIndex(
+            [
+                "2026-07-22T13:32:00Z",
+                "2026-07-22T13:33:00Z",
+                "2026-07-22T13:34:00Z",
+                "2026-07-22T13:35:00Z",
+            ],
+            name="t",
+        ),
+        dtype="float64",
+    )
+    assert_frame_equal(stored, expected)
+
+
+def test_ingest_file_keeps_self_consistent_gap_up_day(tmp_path) -> None:
+    path = tmp_path / "gap-up-day.json"
+    data_root = tmp_path / "store"
+    _write_dump(
+        path,
+        [
+            _result(
+                "SNDK",
+                [
+                    _bar(
+                        "2026-07-16T13:30:00Z",
+                        open_price=150.5,
+                        close_price=150.5,
+                        high_price=151.2,
+                        low_price=149.0,
+                    ),
+                    _bar(
+                        "2026-07-16T13:31:00Z",
+                        open_price=150.2,
+                        close_price=150.2,
+                        high_price=150.6,
+                        low_price=149.9,
+                    ),
+                    _bar(
+                        "2026-07-16T13:32:00Z",
+                        open_price=150.0,
+                        close_price=150.0,
+                        high_price=150.4,
+                        low_price=149.7,
+                    ),
+                    _bar(
+                        "2026-07-16T13:33:00Z",
+                        open_price=150.3,
+                        close_price=150.3,
+                        high_price=150.7,
+                        low_price=150.0,
+                    ),
+                    _bar(
+                        "2026-07-16T13:34:00Z",
+                        open_price=150.1,
+                        close_price=150.1,
+                        high_price=150.5,
+                        low_price=149.8,
+                    ),
+                    _bar(
+                        "2026-07-16T13:35:00Z",
+                        open_price=150.4,
+                        close_price=150.4,
+                        high_price=150.8,
+                        low_price=150.1,
+                    ),
+                    _bar(
+                        "2026-07-16T13:36:00Z",
+                        open_price=150.2,
+                        close_price=150.2,
+                        high_price=150.6,
+                        low_price=149.9,
+                    ),
+                    _bar(
+                        "2026-07-16T13:37:00Z",
+                        open_price=150.0,
+                        close_price=150.0,
+                        high_price=150.4,
+                        low_price=149.7,
+                    ),
+                ],
+            )
+        ],
+    )
+
+    summary = ingest_file(path, data_root, bad_tick_neighbor_fraction=0.05)
+
+    assert summary["quarantined"] == []
+    stored = read_1m_day(data_root, "SNDK", date(2026, 7, 16))
+    assert stored is not None
+    expected = pd.DataFrame(
+        {
+            "o": [150.5, 150.2, 150.0, 150.3, 150.1, 150.4, 150.2, 150.0],
+            "h": [151.2, 150.6, 150.4, 150.7, 150.5, 150.8, 150.6, 150.4],
+            "l": [149.0, 149.9, 149.7, 150.0, 149.8, 150.1, 149.9, 149.7],
+            "c": [150.5, 150.2, 150.0, 150.3, 150.1, 150.4, 150.2, 150.0],
+            "v": [100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0],
+        },
+        index=pd.DatetimeIndex(
+            [
+                "2026-07-16T13:30:00Z",
+                "2026-07-16T13:31:00Z",
+                "2026-07-16T13:32:00Z",
+                "2026-07-16T13:33:00Z",
+                "2026-07-16T13:34:00Z",
+                "2026-07-16T13:35:00Z",
+                "2026-07-16T13:36:00Z",
+                "2026-07-16T13:37:00Z",
+            ],
+            name="t",
+        ),
+        dtype="float64",
+    )
+    assert_frame_equal(stored, expected)
+
+
 def test_ingest_file_writes_rth_daily_bars_for_every_touched_symbol(
     tmp_path,
 ) -> None:
