@@ -39,6 +39,7 @@ from trader.execution.driver import (
 )
 from trader.execution.risk import RiskRails
 from trader.execution.session import RosterEntry, SessionRunner, SessionSummary
+from trader.provider.market import ProviderMarketData
 
 
 REPO_CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
@@ -697,11 +698,26 @@ def test_run_live_cadence_ends_session_once_after_keyboard_interrupt() -> None:
     assert session_end_records[0]["ts"] == "2026-07-01T13:32:00Z"
 
 
-def test_compose_real_market_data_wraps_missing_provider_import() -> None:
+def test_compose_real_market_data_builds_provider_market_data() -> None:
     resolved = load_config(REPO_CONFIG_DIR)
 
-    with pytest.raises(ContractViolation, match=r"trader\.provider"):
-        compose_real_market_data(resolved)
+    market_data = compose_real_market_data(resolved)
+
+    assert isinstance(market_data, ProviderMarketData)
+    for method_name in ("bars_1m", "bars_1d", "signal", "event", "calendar"):
+        assert callable(getattr(market_data, method_name))
+
+    calendar = market_data.calendar()
+    assert calendar.is_session(date(2026, 7, 2))
+    assert calendar.session_close(date(2026, 7, 2)) == datetime(
+        2026,
+        7,
+        2,
+        20,
+        0,
+        tzinfo=UTC,
+    )
+    assert calendar.prev_session(date(2026, 7, 6)) == date(2026, 7, 2)
 
 
 def test_compose_algos_from_roster_wraps_missing_algos_import(
