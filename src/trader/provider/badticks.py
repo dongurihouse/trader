@@ -109,12 +109,66 @@ def _run_deviates(
     run = frame.iloc[segment.start : segment.stop]
     return bool(
         (
-            run["h"].map(lambda value: _deviates(float(value), reference_level, fraction))
-            & run["l"].map(
+            run["o"].map(
                 lambda value: _deviates(float(value), reference_level, fraction)
             )
-        ).all()
+            | run["c"].map(
+                lambda value: _deviates(float(value), reference_level, fraction)
+            )
+        ).any()
     )
+
+
+def _wick_positions_and_errors(
+    frame: pd.DataFrame,
+    segments: list[_Segment],
+    *,
+    fraction: float,
+    symbol: str | None,
+    day: Any | None,
+) -> tuple[set[int], list[dict[str, Any]]]:
+    wick_positions: set[int] = set()
+    errors: list[dict[str, Any]] = []
+    for segment in segments:
+        for position in range(segment.start, segment.stop):
+            row = frame.iloc[position]
+            high_departs = _deviates(float(row["h"]), segment.level, fraction)
+            low_departs = _deviates(float(row["l"]), segment.level, fraction)
+            if not (high_departs or low_departs):
+                continue
+
+            body_agrees = _agree(
+                float(row["o"]),
+                segment.level,
+                fraction,
+            ) and _agree(float(row["c"]), segment.level, fraction)
+            if not body_agrees:
+                continue
+
+            departed = []
+            if high_departs:
+                departed.append("high")
+            if low_departs:
+                departed.append("low")
+            timestamp = frame.index[position]
+            wick_positions.add(position)
+            errors.append(
+                _span_error(
+                    frame,
+                    start=position,
+                    stop=position + 1,
+                    rule="rule 2a",
+                    detail=(
+                        f"wick retained at {timestamp}: "
+                        f"{' and '.join(departed)} departed while open and close "
+                        "stayed within the local level"
+                    ),
+                    symbol=symbol,
+                    day=day,
+                )
+            )
+
+    return wick_positions, errors
 
 
 def _classify_shorter_against_longer(
@@ -242,11 +296,18 @@ def classify_bad_ticks(
     """Return timestamps to quarantine and validation errors for one symbol/day."""
     original_size = len(frame)
     segments = _segments(frame, bad_tick_neighbor_fraction)
+    wick_positions, wick_errors = _wick_positions_and_errors(
+        frame,
+        segments,
+        fraction=bad_tick_neighbor_fraction,
+        symbol=symbol,
+        day=day,
+    )
     if len(segments) <= 1:
-        return ([], [])
+        return ([], wick_errors)
 
     quarantined_positions: set[int] = set()
-    validation_errors: list[dict[str, Any]] = []
+    validation_errors: list[dict[str, Any]] = list(wick_errors)
 
     if len(segments) == 2:
         first, second = segments
@@ -340,6 +401,7 @@ def classify_bad_ticks(
             quarantined_positions.update(positions)
             validation_errors.extend(errors)
 
+    quarantined_positions.difference_update(wick_positions)
     quarantined = [frame.index[position] for position in sorted(quarantined_positions)]
     if original_size and len(quarantined) / original_size > quarantine_abort_fraction:
         flagged_count = len(quarantined)
