@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, fields, replace
+from dataclasses import MISSING, asdict, dataclass, fields, replace
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, TypeVar, get_args, get_origin, get_type_hints
+from typing import Any, Literal, TypeVar, get_args, get_origin, get_type_hints
 
 import yaml
 
@@ -17,6 +17,9 @@ from trader.contracts import AlgoSpec, ContractViolation
 
 class ConfigError(ContractViolation):
     """A versioned configuration file does not match its schema."""
+
+
+FillPriceBasisMode = Literal["auto", "synthetic", "real"]
 
 
 @dataclass(frozen=True)
@@ -113,6 +116,23 @@ class RiskConfig:
 @dataclass(frozen=True)
 class FillsConfig:
     commission: float
+    etf_price_basis: FillPriceBasisMode = "auto"
+    min_intraday_bars: int = 100
+
+    def __post_init__(self) -> None:
+        if self.etf_price_basis not in get_args(FillPriceBasisMode):
+            raise ConfigError(
+                "execution.yaml: fills: etf_price_basis: "
+                "expected one of 'auto', 'synthetic', 'real'"
+            )
+        if not isinstance(self.min_intraday_bars, int):
+            raise ConfigError(
+                "execution.yaml: fills: min_intraday_bars: expected an integer"
+            )
+        if self.min_intraday_bars < 1:
+            raise ConfigError(
+                "execution.yaml: fills: min_intraday_bars: must be at least 1"
+            )
 
 
 @dataclass(frozen=True)
@@ -181,13 +201,19 @@ def _build(
     if unknown_keys:
         raise ConfigError(f"{where}: unknown key {unknown_keys[0]!r}")
 
-    for name in schema_fields:
-        if name not in data:
+    for name, field in schema_fields.items():
+        if (
+            name not in data
+            and field.default is MISSING
+            and field.default_factory is MISSING
+        ):
             raise ConfigError(f"{where}: missing required key {name!r}")
 
     type_hints = get_type_hints(cls)
     values: dict[str, Any] = {}
     for name in schema_fields:
+        if name not in data:
+            continue
         annotation = type_hints[name]
         raw_value = data[name]
         child_location = f"{where}: {name}"

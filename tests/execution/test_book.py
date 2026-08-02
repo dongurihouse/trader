@@ -28,6 +28,7 @@ from trader.execution.config import (
 
 
 BAR_START = datetime(2026, 7, 1, 13, 30, tzinfo=timezone.utc)
+PREV_CLOSE_BAR = datetime(2026, 6, 30, 19, 59, tzinfo=timezone.utc)
 SESSION_CLOSE = datetime(2026, 7, 1, 20, 0, tzinfo=timezone.utc)
 
 
@@ -56,13 +57,22 @@ def _risk_config(
     )
 
 
-def _execution_config() -> ExecutionConfig:
+def _execution_config(
+    *,
+    etf_price_basis: str = "real",
+    min_intraday_bars: int = 1,
+    slippage_bps: float = 25.0,
+) -> ExecutionConfig:
     return ExecutionConfig(
         broker="sim",
         live_orders=False,
-        fills=FillsConfig(commission=0.0),
+        fills=FillsConfig(
+            commission=0.0,
+            etf_price_basis=etf_price_basis,
+            min_intraday_bars=min_intraday_bars,
+        ),
         slippage_bps={
-            "SNXX": {"2026-07": 25.0},
+            "SNXX": {"2026-07": slippage_bps},
             "SNDQ": {"2026-07": 10.0},
         },
     )
@@ -136,6 +146,40 @@ def _data_for_stop_gap_to_entry_open() -> FakeMarketData:
     )
 
 
+def _basis_data(
+    *,
+    instrument: str = "SNXX",
+    sndk_prev_close: float = 100.0,
+    etf_prev_close: float = 50.0,
+    sndk_rows: tuple[tuple[datetime, float, float, float, float], ...],
+    etf_rows: tuple[tuple[datetime, float, float, float, float], ...] = (),
+) -> FakeMarketData:
+    return FakeMarketData(
+        {
+            "SNDK": _frame(
+                (
+                    PREV_CLOSE_BAR,
+                    sndk_prev_close,
+                    sndk_prev_close,
+                    sndk_prev_close,
+                    sndk_prev_close,
+                ),
+                *sndk_rows,
+            ),
+            instrument: _frame(
+                (
+                    PREV_CLOSE_BAR,
+                    etf_prev_close,
+                    etf_prev_close,
+                    etf_prev_close,
+                    etf_prev_close,
+                ),
+                *etf_rows,
+            ),
+        }
+    )
+
+
 def _ticket(
     ticket_id: str = "ticket-1",
     *,
@@ -204,6 +248,7 @@ def _apply_real_round_trip(
                 shares=ticket.shares,
                 kind="entry",
                 book="real",
+                price_basis="real",
             )
         ],
         data,
@@ -217,6 +262,7 @@ def _apply_real_round_trip(
                 shares=ticket.shares,
                 kind=exit_kind,
                 book="real",
+                price_basis="real",
             )
         ],
         data,
@@ -265,6 +311,7 @@ def test_entry_fill_consumes_daily_entry_and_builds_position_from_ticket() -> No
                 shares=17,
                 kind="entry",
                 book="real",
+                price_basis="real",
             )
         ],
         data,
@@ -302,6 +349,7 @@ def test_forget_unfilled_tickets_discards_only_tickets_without_positions() -> No
                 shares=filled.shares,
                 kind="entry",
                 book="real",
+                price_basis="real",
             )
         ],
         data,
@@ -320,6 +368,7 @@ def test_forget_unfilled_tickets_discards_only_tickets_without_positions() -> No
                 shares=filled.shares,
                 kind="target",
                 book="real",
+                price_basis="real",
             )
         ],
         data,
@@ -343,6 +392,7 @@ def test_target_exit_resolves_r_removes_position_and_drains_closed_trade() -> No
                 shares=10,
                 kind="entry",
                 book="real",
+                price_basis="real",
             ),
             Fill(
                 ticket_id=ticket.ticket_id,
@@ -351,6 +401,7 @@ def test_target_exit_resolves_r_removes_position_and_drains_closed_trade() -> No
                 shares=10,
                 kind="target",
                 book="real",
+                price_basis="real",
             ),
         ],
         data,
@@ -818,6 +869,7 @@ def test_shadow_entry_and_exit_use_x4_slippage_and_zero_real_shares() -> None:
             shares=0,
             kind="target",
             book="shadow",
+            price_basis="real",
         )
     ]
     assert book.resolved_r_multiples("probe-algo") == pytest.approx([0.8975])
@@ -831,6 +883,34 @@ def test_shadow_entry_and_exit_use_x4_slippage_and_zero_real_shares() -> None:
         )
     ]
     assert book.take_closed_trades() == []
+
+
+def test_shadow_book_uses_same_synthetic_entry_basis_as_sim_broker() -> None:
+    config = _execution_config(etf_price_basis="synthetic", slippage_bps=0.0)
+    broker = SimBroker(config)
+    book = ShadowBook(config)
+    asof = BAR_START + timedelta(minutes=1)
+    data = _basis_data(
+        sndk_rows=((BAR_START, 101.0, 101.5, 100.5, 101.0),),
+    )
+    ticket = _ticket(stop=45.0, target=60.0)
+    broker.submit(ticket)
+    _open_shadow(
+        book,
+        algo_id="probe-algo",
+        stop=45.0,
+        target=60.0,
+        opened_ts=BAR_START,
+    )
+
+    real_fills = broker.on_bar(asof, data)
+    shadow_fills = book.on_bar(asof, data)
+
+    assert len(real_fills) == 1
+    assert len(shadow_fills) == 1
+    assert real_fills[0].price == 51.0
+    assert shadow_fills[0].price == real_fills[0].price
+    assert shadow_fills[0].price_basis == real_fills[0].price_basis == "synthetic"
 
 
 def test_shadow_book_records_zero_r_when_gap_entry_opens_on_stop() -> None:
@@ -995,6 +1075,7 @@ def test_shadow_reversal_mark_resolves_only_conflicting_episode_on_later_open() 
             shares=0,
             kind="target",
             book="shadow",
+            price_basis="real",
         )
     ]
     assert book.on_bar(reversal_asof, data) == [
@@ -1005,6 +1086,7 @@ def test_shadow_reversal_mark_resolves_only_conflicting_episode_on_later_open() 
             shares=0,
             kind="reversal",
             book="shadow",
+            price_basis="real",
         )
     ]
     assert [
@@ -1063,6 +1145,7 @@ def test_shadow_reversal_mark_with_same_side_leaves_bracket_exit_unchanged() -> 
             shares=0,
             kind="target",
             book="shadow",
+            price_basis="real",
         )
     ]
     assert book.take_closed_trades() == [

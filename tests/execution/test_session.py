@@ -152,7 +152,11 @@ def _execution_config(*, slippage_bps: float = 0.0) -> ExecutionConfig:
     return ExecutionConfig(
         broker="sim",
         live_orders=False,
-        fills=FillsConfig(commission=0.0),
+        fills=FillsConfig(
+            commission=0.0,
+            etf_price_basis="real",
+            min_intraday_bars=1,
+        ),
         slippage_bps={"SNXX": {"2026-07": slippage_bps}},
     )
 

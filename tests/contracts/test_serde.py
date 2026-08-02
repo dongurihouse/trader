@@ -109,6 +109,7 @@ RECORDS = [
         shares=100,
         kind="entry",
         book="real",
+        price_basis="real",
     ),
     Rejection(
         intent=REJECTION_INTENT,
