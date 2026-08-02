@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
@@ -41,6 +41,8 @@ class _Runtime:
     RailsConfig: Any
     DrawdownStopConfig: Any
     RiskConfig: Any
+    FillsConfig: Any
+    ExecutionConfig: Any
     RiskRails: Any
 
 
@@ -84,13 +86,14 @@ def handle_query(
     try:
         primary_symbol = _read_primary_symbol(config_dir)
         risk_config = _read_risk_config(config_dir, parsed_request, runtime)
+        execution_config = _read_execution_config(config_dir, runtime)
         parsed = _with_config_defaults(parsed, primary_symbol, risk_config.account)
         market = runtime.ProviderMarketData(
             data_root,
             calendar_path=config_dir / "calendar.yaml",
             primary_symbol=primary_symbol,
         )
-        risk = runtime.RiskRails(risk_config)
+        risk = runtime.RiskRails(risk_config, execution_config)
         intent = runtime.Intent(
             algo_id=str(parsed["algo_id"]),
             ts=parsed_request.ts,
@@ -118,6 +121,12 @@ def handle_query(
             muted_until=parsed_request.muted_until,
         )
         result = risk.check_and_size(intent, portfolio, market)
+        if _is_no_price_data(result, runtime):
+            _raise_lookahead_if_stale(
+                market,
+                str(parsed["instrument"]),
+                parsed_request.ts,
+            )
     except runtime.LookaheadError as exc:
         return _response(
             200,
@@ -351,6 +360,8 @@ def _load_execution_runtime() -> _Runtime:
     from trader.execution.config import (
         AccountConfig,
         DrawdownStopConfig,
+        ExecutionConfig,
+        FillsConfig,
         RailsConfig,
         RiskConfig,
     )
@@ -368,6 +379,8 @@ def _load_execution_runtime() -> _Runtime:
         RailsConfig=RailsConfig,
         DrawdownStopConfig=DrawdownStopConfig,
         RiskConfig=RiskConfig,
+        FillsConfig=FillsConfig,
+        ExecutionConfig=ExecutionConfig,
         RiskRails=RiskRails,
     )
 
@@ -409,6 +422,63 @@ def _read_risk_config(
         account=account,
         rails=runtime.RailsConfig(**rails_values),
         drawdown_stop=runtime.DrawdownStopConfig(**drawdown_stop_values),
+    )
+
+
+def _read_execution_config(config_dir: Path, runtime: _Runtime) -> Any:
+    execution_path = Path(config_dir) / "execution.yaml"
+    values = yaml.safe_load(execution_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(values, dict):
+        raise ValueError(f"{execution_path} must contain a mapping")
+
+    execution_values = dict(values)
+    execution_values["fills"] = runtime.FillsConfig(
+        **_mapping_value(values, "fills", execution_path)
+    )
+    execution_values["slippage_bps"] = _normalize_slippage_bps(
+        _mapping_value(values, "slippage_bps", execution_path)
+    )
+    return _workbench_execution_config(
+        runtime.ExecutionConfig(**execution_values),
+        runtime,
+    )
+
+
+def _workbench_execution_config(execution_config: Any, runtime: _Runtime) -> Any:
+    fills = runtime.FillsConfig(
+        commission=execution_config.fills.commission,
+        etf_price_basis="real",
+        min_intraday_bars=1,
+    )
+    return replace(execution_config, fills=fills)
+
+
+def _normalize_slippage_bps(
+    values: dict[str, object],
+) -> dict[str, dict[str, object]]:
+    normalized: dict[str, dict[str, object]] = {}
+    for symbol, monthly_values in values.items():
+        if not isinstance(monthly_values, dict):
+            raise ValueError(f"slippage_bps for {symbol!r} must contain a mapping")
+        normalized[str(symbol)] = {
+            str(month): value for month, value in monthly_values.items()
+        }
+    return normalized
+
+
+def _is_no_price_data(result: Any, runtime: _Runtime) -> bool:
+    return isinstance(result, runtime.Rejection) and result.rule == "no_price_data"
+
+
+def _raise_lookahead_if_stale(
+    market: Any,
+    instrument: str,
+    ts: datetime,
+) -> None:
+    market.bars_1m(
+        instrument,
+        asof=ts,
+        lookback_minutes=1,
     )
 
 
