@@ -209,6 +209,7 @@ class CandidateEval:
     direction_votes: list[str]
     n_confirmations: int
     rules_fired: list[str]
+    vetoed_rule_id: str | None = None
 
 
 @dataclass
@@ -241,6 +242,7 @@ class RuleEval:
         fired = self.fired_in(direction)
         gates: list[bool] = []
         vetoed = False
+        vetoed_rule_id: str | None = None
         direction_votes: list[str] = []
         n_confirmations = 0
         rules_fired: list[str] = []
@@ -256,6 +258,8 @@ class RuleEval:
                 gates.append(hit)
             elif role == "veto":
                 vetoed = vetoed or hit
+                if hit and vetoed_rule_id is None:
+                    vetoed_rule_id = rule_id
             elif role == "direction":
                 if hit and rule["direction"] != direction:
                     continue
@@ -272,6 +276,7 @@ class RuleEval:
             direction=direction,
             gates_pass=all(gates) if gates else True,
             vetoed=vetoed,
+            vetoed_rule_id=vetoed_rule_id,
             direction_votes=direction_votes,
             n_confirmations=n_confirmations,
             rules_fired=rules_fired,

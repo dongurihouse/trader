@@ -16,6 +16,15 @@ from trader.contracts.testing import FakeMarketData
 ASOF = datetime(2026, 7, 1, 14, 30, tzinfo=timezone.utc)
 
 
+def test_candidate_eval_preserves_the_previous_constructor_signature() -> None:
+    candidate = CandidateEval("algo", "long", True, False, [], 0, [])
+
+    assert candidate.direction_votes == []
+    assert candidate.n_confirmations == 0
+    assert candidate.rules_fired == []
+    assert candidate.vetoed_rule_id is None
+
+
 @pytest.mark.parametrize(
     ("operator", "lhs", "rhs", "expected"),
     [
@@ -184,9 +193,11 @@ def test_gate_and_veto_roles_drive_whole_set_and_candidate_verdicts() -> None:
     assert isinstance(evaluated, RuleEval)
     assert evaluated.gates_pass is False
     assert evaluated.vetoed is True
-    assert evaluated.for_candidate("algo-a", "long").gates_pass is False
+    candidate = evaluated.for_candidate("algo-a", "long")
+    assert candidate.gates_pass is False
     assert evaluated.for_candidate("algo-b", "short").gates_pass is False
-    assert evaluated.for_candidate("algo-a", "long").vetoed is True
+    assert candidate.vetoed is True
+    assert candidate.vetoed_rule_id == "firing-veto"
 
 
 def test_no_gate_rules_default_to_passing() -> None:
@@ -198,15 +209,25 @@ def test_no_gate_rules_default_to_passing() -> None:
                 "source": "signal",
                 "operator": ">",
                 "value": 0.0,
-            }
+            },
+            {
+                "id": "inactive-veto",
+                "role": "veto",
+                "source": "veto",
+                "operator": ">",
+                "value": 0.0,
+            },
         ],
     )
-    data = FakeMarketData(frames={}, signals={"signal": 1.0})
+    data = FakeMarketData(frames={}, signals={"signal": 1.0, "veto": 0.0})
 
     evaluated = rules.evaluate(data, ASOF)
+    candidate = evaluated.for_candidate("algo-a", "long")
 
     assert evaluated.gates_pass is True
-    assert evaluated.for_candidate("algo-a", "long").gates_pass is True
+    assert candidate.gates_pass is True
+    assert candidate.vetoed is False
+    assert candidate.vetoed_rule_id is None
 
 
 def test_direction_rule_is_attributed_only_to_its_declared_candidate_side() -> None:

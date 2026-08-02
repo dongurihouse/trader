@@ -340,12 +340,65 @@ def test_gate_block_consumes_one_shot_before_the_gate_verdict() -> None:
         frames=_frames(), signals={**_signals(), "gate_signal": 0.0}
     )
 
-    assert algo.on_bar(ASOF, data) == []
+    intents = algo.on_bar(ASOF, data)
+
+    assert len(intents) == 1
+    assert intents[0].meta["gates_pass"] is False
+    assert "vetoed" not in intents[0].meta
     assert algo._done is True
 
     data._signals["gate_signal"] = 1.0
 
     assert algo.on_bar(ASOF + timedelta(minutes=1), data) == []
+
+
+def test_veto_blocked_candidate_carries_the_fired_rule_id() -> None:
+    params = _params(
+        gates=[
+            {
+                "id": "veto-entry-cutoff",
+                "role": "veto",
+                "source": "past_entry_cutoff",
+                "operator": ">",
+                "value": 0.0,
+            }
+        ]
+    )
+    algo = DeclarativeAlgo("veto-blocked", "emitting", params)
+    data = FakeMarketData(
+        frames=_frames(),
+        signals={**_signals(), "past_entry_cutoff": 1.0},
+    )
+
+    intents = algo.on_bar(ASOF, data)
+
+    assert len(intents) == 1
+    assert intents[0].meta["gates_pass"] is False
+    assert intents[0].meta["vetoed"] == "veto-entry-cutoff"
+
+
+def test_probe_gate_failure_omits_vetoed_metadata_when_no_veto_fired() -> None:
+    params = _params(
+        gates=[
+            {
+                "id": "entry-gate",
+                "role": "gate",
+                "source": "gate_signal",
+                "operator": ">",
+                "value": 0.0,
+            }
+        ]
+    )
+    algo = DeclarativeAlgo("probe-gate-blocked", "probe", params)
+    data = FakeMarketData(
+        frames=_frames(), signals={**_signals(), "gate_signal": 0.0}
+    )
+
+    intents = algo.on_bar(ASOF, data)
+
+    assert len(intents) == 1
+    assert intents[0].meta["gates_pass"] is False
+    assert "vetoed" not in intents[0].meta
 
 
 def test_successful_candidate_emits_translated_intent_with_rule_attribution() -> None:
@@ -373,6 +426,13 @@ def test_successful_candidate_emits_translated_intent_with_rule_attribution() ->
                 "operator": ">=",
                 "value": 1.0,
             },
+            {
+                "id": "veto-entry-cutoff",
+                "role": "veto",
+                "source": "past_entry_cutoff",
+                "operator": ">",
+                "value": 0.0,
+            },
         ]
     )
     algo = DeclarativeAlgo("full-success", "emitting", params)
@@ -383,6 +443,7 @@ def test_successful_candidate_emits_translated_intent_with_rule_attribution() ->
             "gate_signal": 1.0,
             "trend": 1.0,
             "liquidity": 1.0,
+            "past_entry_cutoff": 0.0,
         },
     )
 
@@ -409,8 +470,10 @@ def test_successful_candidate_emits_translated_intent_with_rule_attribution() ->
         "rules_version": "test-v1",
         "rules_fired": ["market-open", "trend-long", "liquid-tape"],
         "direction_votes": ["trend-long"],
+        "gates_pass": True,
         "uncalibrated": True,
     }
+    assert "vetoed" not in intent.meta
 
 
 @pytest.mark.parametrize(

@@ -581,8 +581,6 @@ class DeclarativeAlgo:
             self._done = True
             rule_eval = self._ruleset.evaluate(data, asof)
             candidate_eval = rule_eval.for_candidate(self.id, direction)
-            if not candidate_eval.gates_pass or candidate_eval.vetoed:
-                return []
 
             translated = translate(
                 direction,
@@ -609,6 +607,18 @@ class DeclarativeAlgo:
                 f"{fired_text}; confirmations: "
                 f"{candidate_eval.n_confirmations}."
             )
+            meta = {
+                "setup_id": self.id,
+                "rules_version": self._rules_version,
+                "rules_fired": list(candidate_eval.rules_fired),
+                "direction_votes": list(candidate_eval.direction_votes),
+                "gates_pass": (
+                    candidate_eval.gates_pass and not candidate_eval.vetoed
+                ),
+                "uncalibrated": True,
+            }
+            if candidate_eval.vetoed_rule_id is not None:
+                meta["vetoed"] = candidate_eval.vetoed_rule_id
             return [
                 Intent(
                     algo_id=self.id,
@@ -622,13 +632,7 @@ class DeclarativeAlgo:
                     target=target,
                     confidence=confidence,
                     reason=reason,
-                    meta={
-                        "setup_id": self.id,
-                        "rules_version": self._rules_version,
-                        "rules_fired": list(candidate_eval.rules_fired),
-                        "direction_votes": list(candidate_eval.direction_votes),
-                        "uncalibrated": True,
-                    },
+                    meta=meta,
                 )
             ]
         return []
