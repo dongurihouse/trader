@@ -74,7 +74,7 @@ class MarketData(Protocol):
 | field | type | notes |
 |---|---|---|
 | `algo_id` | str | roster id |
-| `ts` | datetime | the completed bar that produced it |
+| `ts` | datetime | the asof at which the completed bar was evaluated — the bar's CLOSE time (design ruling 2026-08-01: the producing bar spans [ts-1min, ts), so its Bar.ts open-time is ts-1min; any consumer needing that bar queries `bars_1m(asof=intent.ts)`, never `ts+1min`) |
 | `action` | `Literal["open", "close"]` | |
 | `side` | `Side \| None` | required for open, None for close |
 | `signal_symbol` | str | e.g. SNDK |

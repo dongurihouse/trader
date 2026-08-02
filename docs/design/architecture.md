@@ -113,6 +113,19 @@ end of session: force-flat both books, write final metrics + state.json + report
   exit, metrics snapshot, algo error, session_end) is appended to
   `data/sessions/<session_id>/telemetry.jsonl` as it happens. The console only ever reads
   this file; it never touches component internals.
+- Reversal exits (added 2026-08-01; ported dt semantics — omitting them was a design
+  gap): when a position is open and an opposite-direction open intent arrives, the
+  position is scheduled to exit at the next bar's open (fill kind `reversal`); the
+  reversal cooldown (risk.yaml) runs from the exit and blocks re-entry; the mute-state
+  reversal category applies; shadow episodes track reversal independently per episode.
+  The exact trigger population and edge semantics port from dt `engine/core.py`
+  (lines 11-15, 182-194 and the shadow machinery) — where trader's component split
+  leaves any ambiguity, dt's observed behavior governs, and the port must record what
+  dt actually does on each ambiguous point.
+- Day roll and session end (clarified 2026-08-01): `start_day` resets BOTH books —
+  pending unfilled entries (real and shadow) are cancelled, never carried into a later
+  day; `end_session` force-flats BOTH books, shadow episodes included (fill kind
+  `eod`), exactly as §5's loop sketch states.
 
 ## 6. Data root layout (file contracts)
 
