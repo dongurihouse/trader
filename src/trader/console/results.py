@@ -153,6 +153,13 @@ def build_day_candles(data_root: Path, symbol: str, day: date) -> list[dict]:
     return candles
 
 
+def render_results_html() -> str:
+    """Return the post-session results page as one self-contained document."""
+    from trader.console.results_page import render_results_html as _render_results_html
+
+    return _render_results_html()
+
+
 def _read_events(session_dir: Path) -> list[dict]:
     telemetry_path = session_dir / "telemetry.jsonl"
     try:
@@ -376,4 +383,4 @@ def _list_value(value: object) -> list:
     return list(value) if isinstance(value, list) else []
 
 
-__all__ = ["build_day_candles", "build_results_payload"]
+__all__ = ["build_day_candles", "build_results_payload", "render_results_html"]
