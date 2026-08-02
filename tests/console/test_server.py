@@ -404,7 +404,7 @@ def test_events_stream_fixture_then_incremental_record_on_same_socket(
     sock, reader = _open_sse(server, "fixture-session-001")
 
     try:
-        initial_records = reader.read_frames(time.monotonic() + 2.0, expected_count=11)
+        initial_records = reader.read_frames(time.monotonic() + 2.0, expected_count=12)
 
         assert reader.headers is not None
         assert reader.headers.startswith(b"HTTP/1.0 200")
