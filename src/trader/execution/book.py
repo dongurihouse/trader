@@ -70,6 +70,7 @@ class RealBook:
         self,
         risk_config: RiskConfig,
         *,
+        commission: float = 0.0,
         timezone: str = "America/New_York",
     ) -> None:
         equity = risk_config.account.equity
@@ -82,6 +83,7 @@ class RealBook:
             muted_until=None,
         )
         self._risk_config = risk_config
+        self._commission = commission
         self._tz = ZoneInfo(timezone)
         self._tickets: dict[str, OrderTicket] = {}
         self._positions_by_ticket: dict[str, PositionState] = {}
@@ -139,6 +141,8 @@ class RealBook:
             entry_fill_ts=fill.ts,
         )
         self._state.entries_today += 1
+        self._state.cash -= self._commission
+        self._state.equity -= self._commission
 
     def _apply_exit(self, fill: Fill, data: MarketData) -> None:
         position = self._positions_by_ticket[fill.ticket_id]
@@ -150,8 +154,8 @@ class RealBook:
             stop=cast(float, position.stop),
         )
         dollar_pnl = position.shares * (fill.price - position.entry_price)
-        self._state.cash += dollar_pnl
-        self._state.equity += dollar_pnl
+        self._state.cash += dollar_pnl - self._commission
+        self._state.equity += dollar_pnl - self._commission
         exit_kind = cast(_ExitKind, fill.kind)
         closed = ClosedTrade(
             algo_id=position.algo_id,

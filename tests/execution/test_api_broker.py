@@ -16,11 +16,7 @@ def _execution_config(*, live_orders: bool) -> ExecutionConfig:
     return ExecutionConfig(
         broker="api",
         live_orders=live_orders,
-        fills=FillsConfig(
-            entry="market_next_open",
-            stop_wins_ties=True,
-            commission=0.0,
-        ),
+        fills=FillsConfig(commission=0.0),
         slippage_bps={},
     )
 

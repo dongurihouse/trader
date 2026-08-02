@@ -197,11 +197,7 @@ def _execution_config(*, broker: str = "sim") -> ExecutionConfig:
     return ExecutionConfig(
         broker=broker,
         live_orders=False,
-        fills=FillsConfig(
-            entry="market_next_open",
-            stop_wins_ties=True,
-            commission=0.0,
-        ),
+        fills=FillsConfig(commission=0.0),
         slippage_bps={"SNXX": {"2026-07": 0.0}},
     )
 

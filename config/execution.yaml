@@ -7,8 +7,7 @@ live_orders: false           # api broker interlock 1 of 2; interlock 2 is env T
                              # Flipping this is a Dev decision recorded in git.
 
 fills:
-  entry: market_next_open
-  stop_wins_ties: true
+  # Entry timing and stop/target tie-breaks are normative broker constants.
   commission: 0.0            # broker charges none on these symbols (measured, carried from dt)
 
 # One-way slippage in basis points by symbol-era (ported verbatim from dt backtest/replay.py).

@@ -110,8 +110,6 @@ class RiskConfig:
 
 @dataclass(frozen=True)
 class FillsConfig:
-    entry: str
-    stop_wins_ties: bool
     commission: float
 
 

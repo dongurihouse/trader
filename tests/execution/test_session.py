@@ -123,7 +123,11 @@ def _frame(
     )
 
 
-def _risk_config(*, max_entries_per_day: int = 10) -> RiskConfig:
+def _risk_config(
+    *,
+    max_entries_per_day: int = 10,
+    max_session_drawdown_r: float | None = None,
+) -> RiskConfig:
     return RiskConfig(
         account=AccountConfig(
             equity=10_000.0,
@@ -138,7 +142,9 @@ def _risk_config(*, max_entries_per_day: int = 10) -> RiskConfig:
             mute_after_cumulative_day_r=-99.0,
             reversal_cooldown_minutes=10,
         ),
-        drawdown_stop=DrawdownStopConfig(max_session_drawdown_r=None),
+        drawdown_stop=DrawdownStopConfig(
+            max_session_drawdown_r=max_session_drawdown_r
+        ),
     )
 
 
@@ -146,11 +152,7 @@ def _execution_config(*, slippage_bps: float = 0.0) -> ExecutionConfig:
     return ExecutionConfig(
         broker="sim",
         live_orders=False,
-        fills=FillsConfig(
-            entry="market_next_open",
-            stop_wins_ties=True,
-            commission=0.0,
-        ),
+        fills=FillsConfig(commission=0.0),
         slippage_bps={"SNXX": {"2026-07": slippage_bps}},
     )
 
@@ -509,6 +511,54 @@ def test_last_bar_pending_ticket_does_not_consume_slot_or_block_next_day() -> No
         for record in real_fills
     ] == [(True, "entry")]
     assert real_book.state.entries_today == 1
+
+
+def test_drawdown_stop_rejection_emits_telemetry_and_rearms_on_day_roll() -> None:
+    first_intent_ts = BAR_START + timedelta(minutes=1)
+    next_day_start = BAR_START + timedelta(days=1)
+    second_intent_ts = next_day_start + timedelta(minutes=1)
+    data = FakeMarketData(
+        {
+            "SNXX": _frame(
+                (BAR_START, 100.0, 101.0, 99.0, 100.0),
+                (next_day_start, 100.0, 101.0, 99.0, 100.0),
+            )
+        }
+    )
+    algo = ScriptedAlgo(
+        "drawdown-guarded",
+        {
+            first_intent_ts: [_intent("drawdown-guarded", first_intent_ts)],
+            second_intent_ts: [_intent("drawdown-guarded", second_intent_ts)],
+        },
+    )
+    telemetry = CollectingTelemetry()
+    runner, real_book, _shadow_book = _runner(
+        data=data,
+        telemetry=telemetry,
+        roster=[RosterEntry(algo, "emitting")],
+        risk_config=_risk_config(max_session_drawdown_r=3.0),
+    )
+
+    runner.start_day(BAR_START.date())
+    real_book.state.realized_r_today = -3.0
+    runner.process_bar(first_intent_ts)
+    runner.start_day(next_day_start.date())
+    assert real_book.state.realized_r_today == 0.0
+    runner.process_bar(second_intent_ts)
+
+    rejections = [
+        record for record in telemetry.records if record["ev"] == "rejection"
+    ]
+    tickets = [
+        record for record in telemetry.records if record["ev"] == "ticket"
+    ]
+    assert [(record["algo_id"], record["rule"]) for record in rejections] == [
+        ("drawdown-guarded", "drawdown_stop")
+    ]
+    assert [record["algo_id"] for record in tickets] == ["drawdown-guarded"]
+    assert tickets[0]["ticket_id"].startswith("drawdown-guarded-20260702T133100Z")
+    assert real_book.state.entries_today == 0
 
 
 def test_api_broker_submit_failure_emits_error_without_ticket_or_in_flight() -> None:

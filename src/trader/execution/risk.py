@@ -58,6 +58,22 @@ class RiskRails:
                 detail=f"portfolio is muted until {portfolio.muted_until.isoformat()}",
             )
 
+        max_session_drawdown_r = (
+            self._config.drawdown_stop.max_session_drawdown_r
+        )
+        if (
+            max_session_drawdown_r is not None
+            and portfolio.realized_r_today <= -max_session_drawdown_r
+        ):
+            return Rejection(
+                intent=intent,
+                rule="drawdown_stop",
+                detail=(
+                    f"portfolio realized {portfolio.realized_r_today:.2f}R today; "
+                    f"session drawdown stop is {max_session_drawdown_r:.2f}R"
+                ),
+            )
+
         if portfolio.entries_today >= self._config.rails.max_entries_per_day:
             return Rejection(
                 intent=intent,

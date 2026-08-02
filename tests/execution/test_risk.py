@@ -40,6 +40,7 @@ def _risk_config(
     max_entries_per_day: int = 2,
     one_position_at_a_time: bool = True,
     no_hedge: bool = True,
+    max_session_drawdown_r: float | None = None,
 ) -> RiskConfig:
     return RiskConfig(
         account=AccountConfig(
@@ -55,7 +56,9 @@ def _risk_config(
             mute_after_cumulative_day_r=-99.0,
             reversal_cooldown_minutes=99,
         ),
-        drawdown_stop=DrawdownStopConfig(max_session_drawdown_r=None),
+        drawdown_stop=DrawdownStopConfig(
+            max_session_drawdown_r=max_session_drawdown_r
+        ),
     )
 
 
@@ -172,7 +175,7 @@ class BarsForbiddenMarketData:
         lookback_minutes: int | None = None,
     ) -> pd.DataFrame:
         del symbol, asof, lookback_minutes
-        raise AssertionError("structural bracket rail should run before bars_1m")
+        raise AssertionError("early rail should run before bars_1m")
 
 
 def _assert_rejection(
@@ -205,6 +208,41 @@ def test_muted_rejects_future_deadline_but_past_and_none_are_controls() -> None:
     _assert_rejection(rejected, intent, "muted")
     assert isinstance(past_control, OrderTicket)
     assert isinstance(none_control, OrderTicket)
+
+
+def test_drawdown_stop_disabled_allows_portfolio_past_loss_threshold() -> None:
+    engine = RiskRails(_risk_config(max_session_drawdown_r=None))
+    intent = _intent()
+
+    result = engine.check_and_size(
+        intent,
+        _portfolio(realized_r_today=-999.0),
+        _data(),
+    )
+
+    assert isinstance(result, OrderTicket)
+
+
+@pytest.mark.parametrize("realized_r_today", [-3.0, -3.01])
+def test_drawdown_stop_rejects_at_or_beyond_negative_threshold_before_price_lookup(
+    realized_r_today: float,
+) -> None:
+    engine = RiskRails(_risk_config(max_session_drawdown_r=3.0))
+    intent = _intent()
+
+    rejected = engine.check_and_size(
+        intent,
+        _portfolio(realized_r_today=realized_r_today),
+        BarsForbiddenMarketData(),
+    )
+    control = engine.check_and_size(
+        intent,
+        _portfolio(realized_r_today=-2.99),
+        _data(),
+    )
+
+    _assert_rejection(rejected, intent, "drawdown_stop")
+    assert isinstance(control, OrderTicket)
 
 
 @pytest.mark.parametrize("entries_today", [2, 3])

@@ -60,11 +60,7 @@ def _execution_config() -> ExecutionConfig:
     return ExecutionConfig(
         broker="sim",
         live_orders=False,
-        fills=FillsConfig(
-            entry="market_next_open",
-            stop_wins_ties=True,
-            commission=0.0,
-        ),
+        fills=FillsConfig(commission=0.0),
         slippage_bps={
             "SNXX": {"2026-07": 25.0},
             "SNDQ": {"2026-07": 10.0},
@@ -476,6 +472,51 @@ def test_cash_and_equity_accumulate_dollar_pnl_across_round_trips() -> None:
     # 10 * (94.75 - 100.25) + 20 * (114.75 - 110.25) = $35.00.
     assert book.state.cash == 12_380.0
     assert book.state.equity == 12_380.0
+
+
+def test_zero_commission_preserves_round_trip_equity_accounting() -> None:
+    book = RealBook(_risk_config(equity=12_345.0), commission=0.0)
+    data = _data_for_raw_opens(100.0)
+
+    _apply_real_round_trip(
+        book,
+        data,
+        _ticket("ticket-a", shares=10, stop=95.0),
+        entry_ts=BAR_START + timedelta(minutes=1),
+        entry_price=100.25,
+        exit_ts=BAR_START + timedelta(minutes=1, seconds=30),
+        exit_price=104.75,
+        exit_kind="target",
+    )
+
+    assert book.state.cash == 12_390.0
+    assert book.state.equity == 12_390.0
+
+
+def test_commission_deducts_one_flat_fee_per_fill_leg() -> None:
+    commission = 1.50
+    data = _data_for_raw_opens(100.0)
+    zero_commission = RealBook(_risk_config(equity=12_345.0), commission=0.0)
+    charged = RealBook(_risk_config(equity=12_345.0), commission=commission)
+
+    for book in (zero_commission, charged):
+        _apply_real_round_trip(
+            book,
+            data,
+            _ticket("ticket-a", shares=10, stop=95.0),
+            entry_ts=BAR_START + timedelta(minutes=1),
+            entry_price=100.25,
+            exit_ts=BAR_START + timedelta(minutes=1, seconds=30),
+            exit_price=104.75,
+            exit_kind="target",
+        )
+
+    assert charged.state.cash == pytest.approx(
+        zero_commission.state.cash - 2 * commission
+    )
+    assert charged.state.equity == pytest.approx(
+        zero_commission.state.equity - 2 * commission
+    )
 
 
 def test_two_consecutive_losing_stops_mute_at_session_close() -> None:

@@ -364,7 +364,10 @@ def run_session_command(args) -> int | None:
         _print_run_error(str(exc))
         return 2
     risk = RiskRails(resolved.risk)
-    real_book = RealBook(resolved.risk)
+    real_book = RealBook(
+        resolved.risk,
+        commission=resolved.execution.fills.commission,
+    )
     shadow_book = ShadowBook(resolved.execution)
     market_data = compose_real_market_data(resolved)
     roster = compose_algos_from_roster(resolved)
