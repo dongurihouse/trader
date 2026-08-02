@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -12,6 +13,7 @@ from trader.provider.store import write_1d, write_1m_day
 
 
 BAR_COLUMNS = ["o", "h", "l", "c", "v"]
+CALENDAR_PATH = Path(__file__).resolve().parents[2] / "config" / "calendar.yaml"
 
 
 def _frame(timestamps: list[str], base: float = 10.0) -> pd.DataFrame:
@@ -127,6 +129,20 @@ def test_bars_1d_excludes_asof_day_and_applies_lookback_days(tmp_path) -> None:
 
     assert_frame_equal(on_second_day, source.iloc[[0]])
     assert_frame_equal(after_second_day, source.iloc[[1]])
+
+
+def test_bars_1d_allows_weekend_gap_with_configured_calendar(tmp_path) -> None:
+    source = _frame(
+        ["2026-07-09T00:00:00Z", "2026-07-10T00:00:00Z"], base=30.0
+    )
+    write_1d(tmp_path, "SNDK", source)
+    market = ProviderMarketData(tmp_path, calendar_path=CALENDAR_PATH)
+
+    result = market.bars_1d(
+        "SNDK", asof=date(2026, 7, 13), lookback_days=15
+    )
+
+    assert_frame_equal(result, source)
 
 
 def test_bars_1d_raises_when_asof_is_past_last_known_day(tmp_path) -> None:

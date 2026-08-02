@@ -298,6 +298,38 @@ def test_daily_atr_price_and_session_range_use_known_true_range_sequence(
     assert market.signal("day_range_atr", asof=asof) == pytest.approx(expected_range)
 
 
+def test_daily_atr_and_price_allow_friday_to_monday_gap(tmp_path: Path) -> None:
+    friday = date(2026, 7, 10)
+    monday = date(2026, 7, 13)
+    prior = _minute_frame(friday, 60, start_price=99.0, end_price=101.0)
+    current = _minute_frame(monday, 2, start_price=120.0, end_price=123.0)
+    _write_primary_history(
+        tmp_path,
+        current_day=monday,
+        current=current,
+        prior=prior,
+    )
+    daily = pd.DataFrame(
+        {
+            "o": [98.0, 101.0],
+            "h": [102.0, 104.0],
+            "l": [97.0, 100.0],
+            "c": [101.0, 103.0],
+            "v": [1_000.0, 1_100.0],
+        },
+        index=pd.DatetimeIndex(
+            ["2026-07-09T00:00:00Z", "2026-07-10T00:00:00Z"],
+            name="t",
+        ),
+    )
+    write_1d(tmp_path, "SNDK", daily)
+    market = _market(tmp_path)
+    asof = current.index[-1].to_pydatetime() + timedelta(minutes=1)
+
+    assert market.signal("atr_day", asof=asof) == pytest.approx(4.0 / 101.0)
+    assert market.signal("price", asof=asof) == pytest.approx(123.0)
+
+
 def test_missing_immediately_previous_session_data_names_symbol_and_day(
     tmp_path: Path,
 ) -> None:
@@ -350,6 +382,54 @@ def test_unobserved_peers_are_excluded_instead_of_zero_filled(
     assert market.signal("market_ret_spread", asof=asof) == pytest.approx(4.0)
     assert market.signal("idio_strength", asof=asof) == pytest.approx(3.5)
     assert market.signal("peer_above_vwap_count", asof=asof) == 2.0
+
+
+def test_lagging_peer_is_excluded_like_an_unobserved_peer(tmp_path: Path) -> None:
+    day = date(2026, 7, 2)
+    primary = _minute_frame(day, 66, start_price=100.0, end_price=106.0)
+    prior = _minute_frame(date(2026, 7, 1), 10, start_price=95.0)
+    current_spy = _minute_frame(day, 66, start_price=100.0, end_price=102.0)
+    absent_root = tmp_path / "absent"
+    lagging_root = tmp_path / "lagging"
+    for root in (absent_root, lagging_root):
+        _write_primary_history(
+            root,
+            current_day=day,
+            current=primary,
+            prior=prior,
+        )
+        write_1m_day(root, "SPY", day, current_spy)
+    write_1m_day(
+        lagging_root,
+        "SOXX",
+        day,
+        _minute_frame(day, 6, start_price=100.0, end_price=103.0),
+    )
+    asof = primary.index[-1].to_pydatetime() + timedelta(minutes=1)
+    absent_market = _market(absent_root)
+    lagging_market = _market(lagging_root)
+    peer_signal_names = (
+        "peer_above_vwap_count",
+        "peer_below_vwap_count",
+        "comparable_ret_spread",
+        "sector_ret_spread",
+        "market_ret_spread",
+        "idio_strength",
+        "comparable_agrees",
+    )
+
+    assert lagging_market.signal("price", asof=asof) == pytest.approx(106.0)
+    absent_values = {
+        name: absent_market.signal(name, asof=asof) for name in peer_signal_names
+    }
+    lagging_values = {
+        name: lagging_market.signal(name, asof=asof) for name in peer_signal_names
+    }
+
+    assert lagging_values == absent_values
+    assert lagging_values["peer_above_vwap_count"] == 1.0
+    assert lagging_values["market_ret_spread"] == pytest.approx(4.0)
+    assert lagging_values["idio_strength"] == pytest.approx(4.0)
 
 
 def test_registry_and_generated_markdown_cover_only_this_tasks_catalog(

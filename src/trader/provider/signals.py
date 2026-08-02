@@ -10,6 +10,7 @@ from typing import Protocol
 
 import pandas as pd
 
+from trader.contracts.errors import LookaheadError
 from trader.provider.calendar import MarketCalendarImpl
 
 
@@ -575,7 +576,10 @@ class SignalEngine:
         peer_returns: dict[str, float] = {}
         peers = PEER_COMPARABLE + PEER_SECTOR + PEER_MARKET
         for peer_symbol in peers:
-            peer_bars = self._market.bars_1m(peer_symbol, asof=asof)
+            try:
+                peer_bars = self._market.bars_1m(peer_symbol, asof=asof)
+            except LookaheadError:
+                continue
             peer_bars = peer_bars.loc[peer_bars.index <= timestamp]
             peer_rth = _rth_slice(peer_bars, day, calendar)
             if len(peer_rth) <= PEER_MIN_BARS:

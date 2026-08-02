@@ -9,7 +9,7 @@ from pandas.testing import assert_frame_equal
 import pytest
 
 from trader.provider.ingest import ingest_all, ingest_file, parse_result_block
-from trader.provider.store import read_1m_day, write_1m_day
+from trader.provider.store import read_1d, read_1m_day, write_1m_day
 
 
 BAR_COLUMNS = ["o", "h", "l", "c", "v"]
@@ -134,6 +134,156 @@ def test_ingest_file_quarantines_bad_tick_and_accepts_matching_etf(tmp_path) -> 
     ]
     assert pd.Timestamp("2026-07-01T13:31:00Z") not in stored.index
     assert pd.Timestamp("2026-07-01T13:32:00Z") not in stored.index
+
+
+def test_ingest_file_writes_rth_daily_bars_for_every_touched_symbol(
+    tmp_path,
+) -> None:
+    path = tmp_path / "daily-bars.json"
+    data_root = tmp_path / "store"
+    _write_dump(
+        path,
+        [
+            _result(
+                "SNDK",
+                [
+                    _bar(
+                        "2026-07-09T13:00:00Z",
+                        open_price=90,
+                        close_price=100,
+                        high_price=101,
+                        low_price=89,
+                        volume=1_000,
+                    ),
+                    _bar(
+                        "2026-07-09T13:30:00Z",
+                        open_price=100,
+                        close_price=101,
+                        high_price=102,
+                        low_price=99,
+                        volume=10,
+                    ),
+                    _bar(
+                        "2026-07-09T13:31:00Z",
+                        open_price=101,
+                        close_price=102,
+                        high_price=103,
+                        low_price=100,
+                        volume=20,
+                    ),
+                    _bar(
+                        "2026-07-09T19:59:00Z",
+                        open_price=102,
+                        close_price=103,
+                        high_price=104,
+                        low_price=101,
+                        volume=30,
+                    ),
+                    _bar(
+                        "2026-07-09T20:00:00Z",
+                        open_price=103,
+                        close_price=103,
+                        high_price=200,
+                        low_price=10,
+                        volume=2_000,
+                    ),
+                ],
+            ),
+            _result(
+                "MU",
+                [
+                    _bar(
+                        "2026-07-09T13:30:00Z",
+                        open_price=50,
+                        close_price=51,
+                        high_price=52,
+                        low_price=49,
+                        volume=40,
+                    ),
+                    _bar(
+                        "2026-07-09T19:59:00Z",
+                        open_price=51,
+                        close_price=52,
+                        high_price=53,
+                        low_price=50,
+                        volume=60,
+                    ),
+                ],
+            ),
+        ],
+    )
+
+    ingest_file(path, data_root)
+
+    sndk_daily = read_1d(data_root, "SNDK")
+    mu_daily = read_1d(data_root, "MU")
+    assert sndk_daily is not None
+    assert mu_daily is not None
+    expected_timestamp = pd.Timestamp("2026-07-09T00:00:00Z")
+    assert list(sndk_daily.index) == [expected_timestamp]
+    assert sndk_daily.iloc[0].to_dict() == {
+        "o": 100.0,
+        "h": 104.0,
+        "l": 99.0,
+        "c": 103.0,
+        "v": 60.0,
+    }
+    assert list(mu_daily.index) == [expected_timestamp]
+    assert mu_daily.iloc[0].to_dict() == {
+        "o": 50.0,
+        "h": 53.0,
+        "l": 49.0,
+        "c": 52.0,
+        "v": 100.0,
+    }
+
+
+def test_reingesting_same_file_upserts_daily_bar_without_duplicate(tmp_path) -> None:
+    path = tmp_path / "repeat-daily-bar.json"
+    data_root = tmp_path / "store"
+    _write_dump(
+        path,
+        [
+            _result(
+                "SNDK",
+                [
+                    _bar(
+                        "2026-07-10T13:30:00Z",
+                        open_price=100,
+                        close_price=101,
+                        high_price=102,
+                        low_price=99,
+                        volume=10,
+                    ),
+                    _bar(
+                        "2026-07-10T19:59:00Z",
+                        open_price=101,
+                        close_price=103,
+                        high_price=104,
+                        low_price=100,
+                        volume=20,
+                    ),
+                ],
+            )
+        ],
+    )
+
+    ingest_file(path, data_root)
+    first = read_1d(data_root, "SNDK")
+    ingest_file(path, data_root)
+    second = read_1d(data_root, "SNDK")
+
+    assert first is not None
+    assert second is not None
+    assert len(second) == 1
+    assert_frame_equal(second, first)
+    assert second.iloc[0].to_dict() == {
+        "o": 100.0,
+        "h": 104.0,
+        "l": 99.0,
+        "c": 103.0,
+        "v": 30.0,
+    }
 
 
 def test_ingest_file_warns_when_etf_return_misses_leverage_range(tmp_path) -> None:

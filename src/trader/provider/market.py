@@ -104,7 +104,14 @@ class ProviderMarketData:
         frame = frame.sort_index()
         frame_days = frame.index.date
         last_known_day = max(frame_days)
-        if asof > last_known_day + timedelta(days=1):
+        if self._calendar is None:
+            is_stale = asof > last_known_day + timedelta(days=1)
+        else:
+            previous_session = self._calendar.prev_session(asof)
+            is_stale = (
+                previous_session is not None and last_known_day < previous_session
+            )
+        if is_stale:
             raise LookaheadError(
                 f"{symbol} daily data is known only through {last_known_day}"
             )

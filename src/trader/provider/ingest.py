@@ -7,6 +7,7 @@ import json
 import math
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -21,6 +22,9 @@ _PRICE_FIELDS = {
     "c": "close_price",
 }
 _DEFAULT_ETF_LEVERAGE_MAP = {"SNXX": 2.0, "SNDQ": -2.0}
+_NEW_YORK = ZoneInfo("America/New_York")
+_RTH_OPEN_MINUTE = 9 * 60 + 30
+_RTH_CLOSE_MINUTE = 16 * 60
 
 
 def _empty_bar_frame() -> pd.DataFrame:
@@ -60,6 +64,33 @@ def _merge_frames(
 ) -> pd.DataFrame:
     combined = pd.concat([existing, incoming]) if existing is not None else incoming
     return combined.loc[~combined.index.duplicated(keep="last")].sort_index()
+
+
+def _daily_bar(day: date, minute_bars: pd.DataFrame) -> pd.DataFrame | None:
+    ordered = minute_bars.sort_index()
+    local_index = ordered.index.tz_convert(_NEW_YORK)
+    local_minutes = local_index.hour * 60 + local_index.minute
+    rth = ordered.loc[
+        (local_minutes >= _RTH_OPEN_MINUTE)
+        & (local_minutes < _RTH_CLOSE_MINUTE)
+    ]
+    if rth.empty:
+        return None
+
+    return pd.DataFrame(
+        {
+            "o": [float(rth.iloc[0]["o"])],
+            "h": [float(rth["h"].max())],
+            "l": [float(rth["l"].min())],
+            "c": [float(rth.iloc[-1]["c"])],
+            "v": [float(rth["v"].sum())],
+        },
+        index=pd.DatetimeIndex(
+            [pd.Timestamp(day).tz_localize("UTC")],
+            name="t",
+        ),
+        dtype="float64",
+    )
 
 
 def is_bad_tick(
@@ -245,6 +276,14 @@ def ingest_file(
         )
         merged = _merge_frames(existing, surviving)
         store.write_1m_day(data_root, symbol, day, merged)
+        daily_bar = _daily_bar(day, merged)
+        if daily_bar is not None:
+            existing_daily = store.read_1d(data_root, symbol)
+            store.write_1d(
+                data_root,
+                symbol,
+                _merge_frames(existing_daily, daily_bar),
+            )
         quarantined.extend(day_quarantine)
 
     touched = set(incoming_by_day)
