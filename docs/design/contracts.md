@@ -152,6 +152,7 @@ Every record is a flat JSON object with common envelope fields
 | `intent` | full Intent fields |
 | `rejection` | intent fields + `rule`, `detail` |
 | `ticket` | full OrderTicket fields |
+| `ticket_declined` | `ticket_id`, `algo_id`, `instrument`, `reason` (`broker_declined` \| `day_roll` \| `eod_unfilled`) — a submitted ticket that never became a position; clears the in-flight latch and consumes no day slot (A10) |
 | `fill` | full Fill fields |
 | `position_closed` | `algo_id`, `instrument`, `r_multiple`, `book`, `exit_kind` |
 | `metrics` | one AlgoMetrics object |

@@ -14,5 +14,10 @@ rails:
   reversal_cooldown_minutes: 10
 
 drawdown_stop:
-  # Portfolio-level auto-stop for the session; null disables.
+  # Auto-stop measured over the WHOLE RUN, not one trading day (ruling A10): cumulative
+  # realized R across every day the session processes. In live and paper that is the one
+  # day; in a backtest it spans the entire window. Distinct on purpose from
+  # rails.mute_after_cumulative_day_r above, which resets each morning — this one does
+  # not reset, and once it trips the run takes no further entries.
+  # null disables (the default: the per-day mute is the active circuit breaker today).
   max_session_drawdown_r: null
