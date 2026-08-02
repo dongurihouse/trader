@@ -147,18 +147,6 @@ def test_bars_1d_returns_canonical_empty_frame_for_unknown_symbol(tmp_path) -> N
     _assert_empty_bar_frame(result)
 
 
-@pytest.mark.parametrize(
-    "call",
-    [
-        pytest.param(lambda market: market.calendar(), id="calendar"),
-        pytest.param(
-            lambda market: market.event(
-                "earnings", asof=datetime(2026, 7, 1, tzinfo=timezone.utc)
-            ),
-            id="event",
-        ),
-    ],
-)
-def test_later_provider_methods_are_explicitly_deferred(tmp_path, call) -> None:
+def test_calendar_without_configuration_is_explicitly_deferred(tmp_path) -> None:
     with pytest.raises(NotImplementedError, match="^wired by a later provider task$"):
-        call(ProviderMarketData(tmp_path))
+        ProviderMarketData(tmp_path).calendar()

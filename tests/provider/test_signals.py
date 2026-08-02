@@ -58,6 +58,9 @@ SIGNAL_IDS = (
     "market_ret_spread",
     "idio_strength",
     "comparable_agrees",
+    "days_to_earnings",
+    "peer_earnings_reaction",
+    "implied_move_pct",
 )
 EXCLUDED_SIGNAL_IDS = (
     "sector_bias",
@@ -71,9 +74,6 @@ EXCLUDED_SIGNAL_IDS = (
     "news_tone_shift",
     "nbbo_spread_bps",
     "l2_imbalance",
-    "days_to_earnings",
-    "peer_earnings_reaction",
-    "implied_move_pct",
 )
 
 

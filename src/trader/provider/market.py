@@ -10,6 +10,7 @@ import pandas as pd
 
 from trader.contracts.errors import LookaheadError
 from trader.contracts.market import MarketCalendar
+from trader.provider import events
 from trader.provider.calendar import load_calendar
 from trader.provider.signals import SignalEngine
 from trader.provider.store import read_1d, read_1m_day
@@ -123,6 +124,27 @@ class ProviderMarketData:
         asof: datetime,
         params: Mapping[str, object] | None = None,
     ) -> float:
+        if name == "implied_move_pct":
+            result = self.event("implied_move_pct", asof=asof)
+            return (
+                0.0
+                if result is None
+                else float(result["expected_move_pct"])
+            )
+        if name == "days_to_earnings":
+            result = self.event("earnings_proximity", asof=asof)
+            return (
+                999.0
+                if result is None or result["days_to_earnings"] is None
+                else float(result["days_to_earnings"])
+            )
+        if name == "peer_earnings_reaction":
+            result = self.event("earnings_proximity", asof=asof)
+            return (
+                0.0
+                if result is None
+                else 1.0 if result["peer_reaction_today"] else 0.0
+            )
         if self._calendar is None:
             raise RuntimeError(
                 "signal() requires a calendar; provide calendar_path at construction"
@@ -135,7 +157,21 @@ class ProviderMarketData:
         )
 
     def event(self, kind: str, *, asof: datetime) -> dict | None:
-        raise NotImplementedError("wired by a later provider task")
+        if kind == "implied_move_pct":
+            return events.implied_move(self._data_root, asof=asof)
+        if kind == "earnings_proximity":
+            if self._calendar is None:
+                raise RuntimeError(
+                    'event() requires a calendar for "earnings_proximity"; '
+                    "provide calendar_path at construction"
+                )
+            return events.earnings_proximity(
+                self._data_root,
+                self._calendar,
+                self._primary_symbol,
+                asof=asof,
+            )
+        raise ValueError(f"unknown event kind: {kind}")
 
 
 __all__ = ["ProviderMarketData"]
