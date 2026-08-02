@@ -62,6 +62,35 @@ def _merge_frames(
     return combined.loc[~combined.index.duplicated(keep="last")].sort_index()
 
 
+def is_bad_tick(
+    prospective_frame: pd.DataFrame,
+    position: int,
+    fraction: float,
+) -> str | None:
+    """Return the anomalous price field at an interior bar, if any."""
+    if position <= 0 or position >= len(prospective_frame) - 1:
+        return None
+
+    row = prospective_frame.iloc[position]
+    previous_close = float(prospective_frame.iloc[position - 1]["c"])
+    next_close = float(prospective_frame.iloc[position + 1]["c"])
+
+    high = float(row["h"])
+    if (
+        abs(high - previous_close) / previous_close > fraction
+        and abs(high - next_close) / next_close > fraction
+    ):
+        return "high"
+
+    low = float(row["l"])
+    if (
+        abs(low - previous_close) / previous_close > fraction
+        and abs(low - next_close) / next_close > fraction
+    ):
+        return "low"
+    return None
+
+
 def _quarantine_incoming(
     symbol: str,
     day: date,
@@ -78,37 +107,16 @@ def _quarantine_incoming(
     for position, timestamp in enumerate(prospective.index):
         if timestamp not in incoming_timestamps:
             continue
-        if position == 0 or position == len(prospective) - 1:
-            continue
-
-        row = prospective.iloc[position]
-        previous_close = float(prospective.iloc[position - 1]["c"])
-        next_close = float(prospective.iloc[position + 1]["c"])
-        offending_field: str | None = None
-
-        high = float(row["h"])
-        if (
-            abs(high - previous_close) / previous_close
-            > bad_tick_neighbor_fraction
-            and abs(high - next_close) / next_close
-            > bad_tick_neighbor_fraction
-        ):
-            offending_field = "high"
-            offending_value = high
-        else:
-            low = float(row["l"])
-            if (
-                abs(low - previous_close) / previous_close
-                > bad_tick_neighbor_fraction
-                and abs(low - next_close) / next_close
-                > bad_tick_neighbor_fraction
-            ):
-                offending_field = "low"
-                offending_value = low
-
+        offending_field = is_bad_tick(
+            prospective,
+            position,
+            bad_tick_neighbor_fraction,
+        )
         if offending_field is None:
             continue
 
+        field_column = "h" if offending_field == "high" else "l"
+        offending_value = float(prospective.iloc[position][field_column])
         quarantined_timestamps.append(timestamp)
         quarantined.append(
             {
@@ -129,6 +137,43 @@ def _day_return(frame: pd.DataFrame) -> float:
     return float(ordered.iloc[-1]["c"] / ordered.iloc[0]["o"] - 1.0)
 
 
+def etf_leverage_warning(
+    symbol: str,
+    day: date,
+    underlying: pd.DataFrame | None,
+    etf: pd.DataFrame | None,
+    *,
+    etf_leverage_factor: float,
+    etf_tolerance: float,
+    etf_leverage_map: dict[str, float] = _DEFAULT_ETF_LEVERAGE_MAP,
+) -> dict | None:
+    """Return one day-return leverage warning without mutating either frame."""
+    if symbol not in etf_leverage_map:
+        return None
+    if underlying is None or underlying.empty or etf is None or etf.empty:
+        return None
+
+    underlying_return = _day_return(underlying)
+    if abs(underlying_return) < 1e-9:
+        return None
+
+    ratio = _day_return(etf) / underlying_return
+    configured_factor = etf_leverage_map[symbol]
+    signed_factor = math.copysign(etf_leverage_factor, configured_factor)
+    endpoint_a = signed_factor * (1.0 - etf_tolerance)
+    endpoint_b = signed_factor * (1.0 + etf_tolerance)
+    expected_range = (min(endpoint_a, endpoint_b), max(endpoint_a, endpoint_b))
+    if expected_range[0] <= ratio <= expected_range[1]:
+        return None
+
+    return {
+        "symbol": symbol,
+        "day": day,
+        "expected_range": expected_range,
+        "actual_ratio": ratio,
+    }
+
+
 def _etf_warnings(
     data_root: Path,
     touched: set[tuple[str, date]],
@@ -143,32 +188,17 @@ def _etf_warnings(
         if symbol not in etf_leverage_map:
             continue
 
-        underlying = store.read_1m_day(data_root, underlying_symbol, day)
-        etf = store.read_1m_day(data_root, symbol, day)
-        if underlying is None or underlying.empty or etf is None or etf.empty:
-            continue
-
-        underlying_return = _day_return(underlying)
-        if abs(underlying_return) < 1e-9:
-            continue
-
-        ratio = _day_return(etf) / underlying_return
-        configured_factor = etf_leverage_map[symbol]
-        signed_factor = math.copysign(etf_leverage_factor, configured_factor)
-        endpoint_a = signed_factor * (1.0 - etf_tolerance)
-        endpoint_b = signed_factor * (1.0 + etf_tolerance)
-        expected_range = (min(endpoint_a, endpoint_b), max(endpoint_a, endpoint_b))
-        if expected_range[0] <= ratio <= expected_range[1]:
-            continue
-
-        warnings.append(
-            {
-                "symbol": symbol,
-                "day": day,
-                "expected_range": expected_range,
-                "actual_ratio": ratio,
-            }
+        warning = etf_leverage_warning(
+            symbol,
+            day,
+            store.read_1m_day(data_root, underlying_symbol, day),
+            store.read_1m_day(data_root, symbol, day),
+            etf_leverage_factor=etf_leverage_factor,
+            etf_tolerance=etf_tolerance,
+            etf_leverage_map=etf_leverage_map,
         )
+        if warning is not None:
+            warnings.append(warning)
     return warnings
 
 
@@ -294,4 +324,10 @@ def ingest_all(
     return result
 
 
-__all__ = ["ingest_all", "ingest_file", "parse_result_block"]
+__all__ = [
+    "etf_leverage_warning",
+    "ingest_all",
+    "ingest_file",
+    "is_bad_tick",
+    "parse_result_block",
+]
