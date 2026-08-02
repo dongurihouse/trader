@@ -381,7 +381,7 @@ def test_run_live_cadence_processes_only_progressively_visible_bars() -> None:
     session_start = datetime(2026, 7, 1, 13, 30, tzinfo=UTC)
     session_close = session_start + timedelta(minutes=6)
     final_frame = _frame(
-        *(session_start + timedelta(minutes=index) for index in range(1, 6))
+        *(session_start + timedelta(minutes=index) for index in range(5))
     )
     data = SwappableMarketData(FakeMarketData({"SNXX": final_frame}))
     warmups: list[tuple[str, date]] = []
@@ -397,8 +397,8 @@ def test_run_live_cadence_processes_only_progressively_visible_bars() -> None:
             data.current = FakeMarketData(
                 {
                     "SNXX": _frame(
+                        session_start,
                         session_start + timedelta(minutes=1),
-                        session_start + timedelta(minutes=2),
                     )
                 }
             )
@@ -432,12 +432,51 @@ def test_run_live_cadence_processes_only_progressively_visible_bars() -> None:
     assert telemetry.records[-1]["ts"] == "2026-07-01T13:35:00Z"
 
 
+def test_run_live_cadence_processes_most_recent_bar_in_fixed_dataset() -> None:
+    session_start = datetime(2026, 7, 1, 13, 30, tzinfo=UTC)
+    session_close = session_start + timedelta(minutes=6)
+    data = FakeMarketData(
+        {
+            "SNXX": _frame(
+                *(session_start + timedelta(minutes=index) for index in range(6))
+            )
+        }
+    )
+    warmups: list[tuple[str, date]] = []
+    algo = ScriptedAlgo("fixed-live", warmup_log=warmups)
+    telemetry = CollectingTelemetry()
+    runner = _runner(mode="paper", data=data, telemetry=telemetry, algo=algo)
+
+    summary = run_live_cadence(
+        runner,
+        clock=FakeClock(session_start),
+        market_data=data,
+        primary_symbol="SNXX",
+        cycle_minutes=6,
+        trading_day=session_start.date(),
+        session_start=session_start,
+        session_close=session_close,
+    )
+
+    expected_asofs = [
+        session_start + timedelta(minutes=index) for index in range(1, 7)
+    ]
+    assert algo.on_bar_calls == expected_asofs
+    assert summary.bars_processed == 6
+    assert [
+        record["bar_ts"] for record in telemetry.records if record["ev"] == "tick"
+    ] == [
+        (asof - timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
+        for asof in expected_asofs
+    ]
+
+
 def test_run_live_cadence_ends_session_once_after_keyboard_interrupt() -> None:
     session_start = datetime(2026, 7, 1, 13, 30, tzinfo=UTC)
     session_close = session_start + timedelta(minutes=6)
     interrupt_at = session_start + timedelta(minutes=2)
     frame = _frame(
-        *(session_start + timedelta(minutes=index) for index in range(1, 5))
+        *(session_start + timedelta(minutes=index) for index in range(4))
     )
     data = FakeMarketData({"SNXX": frame})
     warmups: list[tuple[str, date]] = []

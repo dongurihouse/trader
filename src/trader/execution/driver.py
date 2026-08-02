@@ -185,7 +185,7 @@ def run_live_cadence(
                 try:
                     visible = market_data.bars_1m(
                         primary_symbol,
-                        asof=asof + _ONE_MINUTE,
+                        asof=asof,
                         lookback_minutes=1,
                     )
                 except LookaheadError:
