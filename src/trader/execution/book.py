@@ -55,9 +55,10 @@ def _r_multiple(
     raw_entry_price: float,
     stop: float,
 ) -> float:
-    return (slipped_exit_price - slipped_entry_price) / abs(
-        raw_entry_price - stop
-    )
+    planned_dist = abs(raw_entry_price - stop)
+    if planned_dist == 0:
+        return 0.0
+    return (slipped_exit_price - slipped_entry_price) / planned_dist
 
 
 class RealBook:

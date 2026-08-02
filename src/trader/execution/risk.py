@@ -108,6 +108,22 @@ class RiskRails:
                 detail="open intents require a target price",
             )
 
+        if (
+            intent.side == "long"
+            and intent.stop >= intent.target
+        ) or (
+            intent.side == "short"
+            and intent.stop <= intent.target
+        ):
+            return Rejection(
+                intent=intent,
+                rule="degenerate_bracket",
+                detail=(
+                    f"{intent.side} bracket has no tradeable stop/target "
+                    f"spread: stop {intent.stop:.2f}, target {intent.target:.2f}"
+                ),
+            )
+
         bars = data.bars_1m(
             intent.instrument,
             asof=intent.ts,
@@ -124,14 +140,18 @@ class RiskRails:
             )
 
         entry_px = round(float(bars.iloc[-1]["c"]), 2)
-        stop_dist = abs(entry_px - intent.stop)
-        if stop_dist <= 0:
+        risk = (
+            entry_px - intent.stop
+            if intent.side == "long"
+            else intent.stop - entry_px
+        )
+        if risk <= 0:
             return Rejection(
                 intent=intent,
-                rule="no_stop_distance",
+                rule="degenerate_bracket",
                 detail=(
-                    f"entry reference price {entry_px:.2f} equals stop "
-                    f"{intent.stop:.2f}"
+                    f"{intent.side} stop {intent.stop:.2f} is not beyond "
+                    f"entry reference price {entry_px:.2f}"
                 ),
             )
 
@@ -177,7 +197,7 @@ class RiskRails:
             target=intent.target,
             risk={
                 "slot": portfolio.entries_today + 1,
-                "dollars": round(shares * stop_dist, 2),
+                "dollars": round(shares * risk, 2),
                 "equity": account.equity,
             },
             created_ts=intent.ts,

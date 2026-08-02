@@ -161,6 +161,20 @@ class NoFutureAsOfMarketData:
         return getattr(self._wrapped, name)
 
 
+class BarsForbiddenMarketData:
+    """Raise if a rail that should run before price lookup asks for bars."""
+
+    def bars_1m(
+        self,
+        symbol: str,
+        *,
+        asof: datetime,
+        lookback_minutes: int | None = None,
+    ) -> pd.DataFrame:
+        del symbol, asof, lookback_minutes
+        raise AssertionError("structural bracket rail should run before bars_1m")
+
+
 def _assert_rejection(
     result: OrderTicket | Rejection,
     intent: Intent,
@@ -296,16 +310,94 @@ def test_no_price_data_rejects_empty_visible_frame_with_visible_bar_control() ->
     assert isinstance(control, OrderTicket)
 
 
-def test_no_stop_distance_rejects_stop_equal_to_close_with_distance_control() -> None:
+@pytest.mark.parametrize(
+    ("side", "stop", "target"),
+    [
+        ("long", 101.0, 110.0),
+        ("short", 99.0, 90.0),
+    ],
+    ids=["long-stop-above-entry", "short-stop-below-entry"],
+)
+def test_degenerate_bracket_rejects_stop_on_wrong_side_of_entry_reference(
+    side: str,
+    stop: float,
+    target: float,
+) -> None:
     engine = RiskRails(_risk_config())
-    rejected_intent = _intent(stop=100.0)
-    control_intent = _intent(stop=99.99)
+    intent = _intent(side=side, stop=stop, target=target)
 
-    rejected = engine.check_and_size(rejected_intent, _portfolio(), _data(100.0))
-    control = engine.check_and_size(control_intent, _portfolio(), _data(100.0))
+    rejected = engine.check_and_size(intent, _portfolio(), _data(100.0))
 
-    _assert_rejection(rejected, rejected_intent, "no_stop_distance")
-    assert isinstance(control, OrderTicket)
+    _assert_rejection(rejected, intent, "degenerate_bracket")
+
+
+@pytest.mark.parametrize(
+    ("side", "target"),
+    [
+        ("long", 110.0),
+        ("short", 90.0),
+    ],
+    ids=["long-stop-equals-entry", "short-stop-equals-entry"],
+)
+def test_degenerate_bracket_rejects_stop_equal_to_entry_reference(
+    side: str,
+    target: float,
+) -> None:
+    engine = RiskRails(_risk_config())
+    intent = _intent(side=side, stop=100.0, target=target)
+
+    rejected = engine.check_and_size(intent, _portfolio(), _data(100.0))
+
+    _assert_rejection(rejected, intent, "degenerate_bracket")
+
+
+@pytest.mark.parametrize(
+    ("side", "stop", "target"),
+    [
+        ("long", 95.0, 95.0),
+        ("short", 105.0, 105.0),
+    ],
+    ids=["long-target-not-above-stop", "short-target-not-below-stop"],
+)
+def test_degenerate_bracket_rejects_structural_stop_target_without_price_data(
+    side: str,
+    stop: float,
+    target: float,
+) -> None:
+    engine = RiskRails(_risk_config())
+    intent = _intent(side=side, stop=stop, target=target)
+
+    rejected = engine.check_and_size(
+        intent,
+        _portfolio(),
+        BarsForbiddenMarketData(),
+    )
+
+    _assert_rejection(rejected, intent, "degenerate_bracket")
+
+
+@pytest.mark.parametrize(
+    ("side", "stop", "target", "expected_risk_dollars"),
+    [
+        ("long", 95.0, 110.0, 250.0),
+        ("short", 105.0, 90.0, 250.0),
+    ],
+    ids=["long", "short"],
+)
+def test_valid_brackets_preserve_risk_dollars(
+    side: str,
+    stop: float,
+    target: float,
+    expected_risk_dollars: float,
+) -> None:
+    engine = RiskRails(_risk_config())
+    intent = _intent(side=side, stop=stop, target=target)
+
+    result = engine.check_and_size(intent, _portfolio(), _data(100.0))
+
+    assert isinstance(result, OrderTicket)
+    assert result.shares == 50
+    assert result.risk["dollars"] == expected_risk_dollars
 
 
 def test_unsized_rejects_unaffordable_share_with_affordable_price_control() -> None:

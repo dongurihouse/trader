@@ -102,6 +102,23 @@ def _data_for_raw_opens(*raw_opens: float) -> FakeMarketData:
     )
 
 
+def _data_for_stop_gap_to_entry_open() -> FakeMarketData:
+    return FakeMarketData(
+        {
+            "SNXX": _frame(
+                (BAR_START, 100.0, 101.0, 99.5, 100.0),
+                (
+                    BAR_START + timedelta(minutes=1),
+                    99.0,
+                    100.0,
+                    98.5,
+                    99.0,
+                ),
+            )
+        }
+    )
+
+
 def _ticket(
     ticket_id: str = "ticket-1",
     *,
@@ -270,6 +287,38 @@ def test_target_exit_resolves_r_removes_position_and_drains_closed_trade() -> No
         )
     ]
     assert book.take_closed_trades() == []
+
+
+def test_real_book_records_zero_r_when_gap_entry_opens_on_stop() -> None:
+    config = _execution_config()
+    broker = SimBroker(config)
+    book = RealBook(_risk_config())
+    intent_asof = BAR_START + timedelta(minutes=1)
+    fill_asof = BAR_START + timedelta(minutes=2)
+    data = _data_for_stop_gap_to_entry_open()
+    ticket = _ticket(
+        ticket_id="gap-stop",
+        stop=99.0,
+        target=105.0,
+        created_ts=intent_asof,
+    )
+
+    book.register_ticket(ticket)
+    broker.submit(ticket)
+    fills = broker.on_bar(fill_asof, data)
+
+    assert [fill.kind for fill in fills] == ["entry", "stop"]
+    book.apply_fills(fills, data)
+
+    assert book.resolved_r_multiples("breakout") == [0.0]
+    assert book.take_closed_trades() == [
+        ClosedTrade(
+            algo_id="breakout",
+            instrument="SNXX",
+            r_multiple=0.0,
+            exit_kind="stop",
+        )
+    ]
 
 
 def test_realized_r_today_accumulates_sequential_round_trips() -> None:
@@ -607,6 +656,36 @@ def test_shadow_entry_and_exit_use_x4_slippage_and_zero_real_shares() -> None:
         )
     ]
     assert book.take_closed_trades() == []
+
+
+def test_shadow_book_records_zero_r_when_gap_entry_opens_on_stop() -> None:
+    config = _execution_config()
+    book = ShadowBook(config)
+    intent_asof = BAR_START + timedelta(minutes=1)
+    fill_asof = BAR_START + timedelta(minutes=2)
+    data = _data_for_stop_gap_to_entry_open()
+    book.open(
+        algo_id="probe-algo",
+        instrument="SNXX",
+        stop=99.0,
+        target=105.0,
+        tag="probe",
+        opened_ts=intent_asof,
+    )
+
+    fills = book.on_bar(fill_asof, data)
+
+    assert [fill.kind for fill in fills] == ["entry", "stop"]
+    assert book.resolved_r_multiples("probe-algo") == [0.0]
+    assert book.take_closed_trades() == [
+        ClosedTrade(
+            algo_id="probe-algo",
+            instrument="SNXX",
+            r_multiple=0.0,
+            exit_kind="stop",
+            tag="probe",
+        )
+    ]
 
 
 def test_shadow_concurrent_algos_resolve_independently_on_different_bars() -> None:
