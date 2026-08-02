@@ -152,14 +152,6 @@ def test_bars_1d_returns_canonical_empty_frame_for_unknown_symbol(tmp_path) -> N
     [
         pytest.param(lambda market: market.calendar(), id="calendar"),
         pytest.param(
-            lambda market: market.signal(
-                "momentum",
-                asof=datetime(2026, 7, 1, tzinfo=timezone.utc),
-                params={"window": 5},
-            ),
-            id="signal",
-        ),
-        pytest.param(
             lambda market: market.event(
                 "earnings", asof=datetime(2026, 7, 1, tzinfo=timezone.utc)
             ),

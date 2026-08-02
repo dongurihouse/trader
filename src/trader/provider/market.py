@@ -11,6 +11,7 @@ import pandas as pd
 from trader.contracts.errors import LookaheadError
 from trader.contracts.market import MarketCalendar
 from trader.provider.calendar import load_calendar
+from trader.provider.signals import SignalEngine
 from trader.provider.store import read_1d, read_1m_day
 
 
@@ -32,12 +33,18 @@ def _empty_bar_frame() -> pd.DataFrame:
 
 class ProviderMarketData:
     def __init__(
-        self, data_root: Path, *, calendar_path: Path | None = None
+        self,
+        data_root: Path,
+        *,
+        calendar_path: Path | None = None,
+        primary_symbol: str = "SNDK",
     ) -> None:
         self._data_root = Path(data_root)
         self._calendar = (
             load_calendar(calendar_path) if calendar_path is not None else None
         )
+        self._primary_symbol = primary_symbol
+        self._signals = SignalEngine(self)
 
     def _latest_1m_completion(self, symbol: str) -> datetime | None:
         symbol_dir = self._data_root / "bars" / "1m" / symbol
@@ -116,7 +123,16 @@ class ProviderMarketData:
         asof: datetime,
         params: Mapping[str, object] | None = None,
     ) -> float:
-        raise NotImplementedError("wired by a later provider task")
+        if self._calendar is None:
+            raise RuntimeError(
+                "signal() requires a calendar; provide calendar_path at construction"
+            )
+        return self._signals.get(
+            name,
+            symbol=self._primary_symbol,
+            asof=asof,
+            params=params,
+        )
 
     def event(self, kind: str, *, asof: datetime) -> dict | None:
         raise NotImplementedError("wired by a later provider task")
