@@ -86,6 +86,11 @@ class MarketData(Protocol):
 | `reason` | str | plain-English rule trace |
 | `meta` | `dict` | free-form (setup name, rules version, ...) |
 
+Reserved `meta` keys (amendment A8): `gates_pass: bool` — emitting algos stamp the
+gate/veto outcome on every candidate they produce; absent means passed. `vetoed: str` —
+the veto rule id when one bound. Execution routes `gates_pass: false` intents to the
+shadow book (tag `gate_refused`), never to the real book.
+
 ## orders.py
 
 - `@dataclass(frozen=True) OrderTicket`: `ticket_id: str`, `algo_id`, `intent_ts`,

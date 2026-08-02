@@ -143,6 +143,15 @@ refused (conversion examples on record: 29 shadow candidates -> 2 emitted trades
 13 -> 1). The console must render shadow metrics with that caveat visible, never as a
 forecast of promoted performance.
 
+Gate and veto refusals inside emitting algos are never silent (amendment A8,
+2026-08-01): when a global gate or veto blocks an emitting algo's candidate, the algo
+still returns the intent, stamped `meta.gates_pass: false` (and `meta.vetoed: <rule>`
+when a veto bound). Execution routes any intent stamped `gates_pass: false` to the
+shadow book tagged `gate_refused` — never to the real book, regardless of algo status.
+This ports dt's silent-record discipline; the refused-candidate ledger is the raw
+material of the promotion loop and must survive the rewrite. Probe algos are unaffected
+(all their intents go to the shadow book already).
+
 ## 8. Signal engine scope (provider)
 
 The signal catalog contains only signals computable from data that exists:
