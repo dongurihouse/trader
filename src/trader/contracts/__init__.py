@@ -12,6 +12,7 @@ from .serde import append_jsonl, read_jsonl, record_from_json, record_to_json
 from .telemetry import (
     AlgoErrorEvent,
     AlgoMetrics,
+    DaySkippedEvent,
     EVENT_TYPES,
     FillEvent,
     IntentEvent,
@@ -38,6 +39,7 @@ __all__ = [
     "BrokerNotConfigured",
     "Clock",
     "ContractViolation",
+    "DaySkippedEvent",
     "EVENT_TYPES",
     "Fill",
     "FillEvent",

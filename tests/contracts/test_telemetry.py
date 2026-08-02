@@ -39,6 +39,16 @@ EVENT_CASES = [
         },
     ),
     (
+        "DaySkippedEvent",
+        {
+            "ev": "day_skipped",
+            "ts": TS,
+            "session": "session-001",
+            "day": "2026-07-01",
+            "reason": "no_prev_session",
+        },
+    ),
+    (
         "IntentEvent",
         {
             "ev": "intent",
@@ -108,6 +118,7 @@ EVENT_CASES = [
             "shares": 100,
             "kind": "entry",
             "book": "real",
+            "tag": None,
         },
     ),
     (
@@ -121,6 +132,7 @@ EVENT_CASES = [
             "r_multiple": 1.5,
             "book": "shadow",
             "exit_kind": "target",
+            "tag": "probe",
         },
     ),
     (
@@ -238,6 +250,12 @@ def test_event_fields_have_exact_types() -> None:
         **common,
         "bar_ts": datetime,
     }
+    assert get_type_hints(telemetry.DaySkippedEvent) == {
+        "ev": Literal["day_skipped"],
+        **common,
+        "day": str,
+        "reason": str,
+    }
     assert get_type_hints(telemetry.IntentEvent) == {
         "ev": Literal["intent"],
         **common,
@@ -273,6 +291,7 @@ def test_event_fields_have_exact_types() -> None:
         "shares": int,
         "kind": Literal["entry", "stop", "target", "reversal", "eod"],
         "book": Literal["real", "shadow"],
+        "tag": str | None,
     }
     assert get_type_hints(telemetry.PositionClosedEvent) == {
         "ev": Literal["position_closed"],
@@ -282,6 +301,7 @@ def test_event_fields_have_exact_types() -> None:
         "r_multiple": float,
         "book": Literal["real", "shadow"],
         "exit_kind": Literal["stop", "target", "reversal", "eod"],
+        "tag": str | None,
     }
     assert get_type_hints(telemetry.MetricsEvent) == {
         "ev": Literal["metrics"],
@@ -323,6 +343,7 @@ def test_event_fields_have_exact_types() -> None:
         ("SessionStartEvent", "ev", ("session_start",)),
         ("SessionStartEvent", "mode", ("backtest", "paper", "live")),
         ("TickEvent", "ev", ("tick",)),
+        ("DaySkippedEvent", "ev", ("day_skipped",)),
         ("IntentEvent", "ev", ("intent",)),
         ("IntentEvent", "action", ("open", "close")),
         ("IntentEvent", "side", ("long", "short")),
@@ -422,6 +443,7 @@ def test_event_types_maps_exact_tags_to_event_classes() -> None:
     expected = {
         "session_start": telemetry.SessionStartEvent,
         "tick": telemetry.TickEvent,
+        "day_skipped": telemetry.DaySkippedEvent,
         "intent": telemetry.IntentEvent,
         "rejection": telemetry.RejectionEvent,
         "ticket": telemetry.TicketEvent,
@@ -433,7 +455,7 @@ def test_event_types_maps_exact_tags_to_event_classes() -> None:
     }
 
     assert telemetry.EVENT_TYPES == expected
-    assert len(telemetry.EVENT_TYPES) == 10
+    assert len(telemetry.EVENT_TYPES) == 11
     for tag, event_type in expected.items():
         assert telemetry.EVENT_TYPES[tag] is event_type
 

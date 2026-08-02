@@ -15,6 +15,7 @@ PUBLIC_NAMES = {
     "BrokerNotConfigured",
     "Clock",
     "ContractViolation",
+    "DaySkippedEvent",
     "EVENT_TYPES",
     "Fill",
     "FillEvent",
@@ -62,6 +63,7 @@ MODULE_EXPORTS = {
     "telemetry": {
         "AlgoErrorEvent",
         "AlgoMetrics",
+        "DaySkippedEvent",
         "EVENT_TYPES",
         "FillEvent",
         "IntentEvent",
