@@ -126,6 +126,19 @@ def test_group_composition_uses_all_or_any(group: dict, expected: bool) -> None:
     assert check_group(group, data, ASOF) is expected
 
 
+def test_all_group_evaluates_a_raising_clause_after_a_false_clause() -> None:
+    data = FakeMarketData(frames={}, signals={"false": 0.0})
+    group = {
+        "all": [
+            {"source": "false", "operator": ">", "value": 0.0},
+            {"source": "missing", "operator": ">", "value": 0.0},
+        ]
+    }
+
+    with pytest.raises(KeyError):
+        check_group(group, data, ASOF)
+
+
 def test_unknown_operator_fails_before_reading_a_signal() -> None:
     data = FakeMarketData(frames={}, signals={})
 
@@ -393,6 +406,20 @@ def test_unknown_scoped_algo_id_is_rejected(scope_key: str) -> None:
 
     with pytest.raises(ValueError, match="unknown"):
         RuleSet(version="test", rules=[rule], known_algo_ids={"algo-a"})
+
+
+@pytest.mark.parametrize("scope_key", ["applies_to", "except"])
+def test_empty_scope_is_rejected(scope_key: str) -> None:
+    rule = {
+        "id": "empty-scope",
+        scope_key: [],
+        "source": "signal",
+        "operator": ">",
+        "value": 0.0,
+    }
+
+    with pytest.raises(ValueError, match="non-empty"):
+        RuleSet(version="test", rules=[rule])
 
 
 def test_direction_relative_rule_fires_differently_for_each_candidate_side() -> None:

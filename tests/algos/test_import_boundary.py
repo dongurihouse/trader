@@ -22,6 +22,11 @@ FORBIDDEN_FILE_IO_PATTERNS = (
     "open(",
     ".read_text(",
     ".write_text(",
+    "datetime.now(",
+    "time.time(",
+    "pd.read_",
+    ".to_parquet(",
+    ".to_csv(",
 )
 
 

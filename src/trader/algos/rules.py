@@ -76,11 +76,17 @@ def check_group(
     """Evaluate an all/any group or a bare clause."""
     if "all" in group:
         return all(
-            check_clause(clause, data, asof, direction) for clause in group["all"]
+            [
+                check_clause(clause, data, asof, direction)
+                for clause in group["all"]
+            ]
         )
     if "any" in group:
         return any(
-            check_clause(clause, data, asof, direction) for clause in group["any"]
+            [
+                check_clause(clause, data, asof, direction)
+                for clause in group["any"]
+            ]
         )
     return check_clause(group, data, asof, direction)
 
@@ -182,8 +188,14 @@ def _scope_of(
 
     key = scope_keys[0]
     names = rule[key]
-    if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
-        raise ValueError(f"rule {rule.get('id')!r}: {key} must be a list of strings")
+    if (
+        not isinstance(names, list)
+        or not names
+        or not all(isinstance(name, str) for name in names)
+    ):
+        raise ValueError(
+            f"rule {rule.get('id')!r}: {key} must be a non-empty list of strings"
+        )
 
     named_ids = frozenset(names)
     if known_algo_ids is not None:
