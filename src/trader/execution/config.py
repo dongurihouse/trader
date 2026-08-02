@@ -72,6 +72,9 @@ class ProviderConfig:
 @dataclass(frozen=True)
 class AlgosConfig:
     rules_version: str
+    entry_cutoff_minutes_before_close: int
+    gap_min_pct: float
+    known_algo_ids: list[str]
     gates: object
     roster: list[AlgoSpec]
 

@@ -222,8 +222,6 @@ def compose_real_market_data(config: ResolvedConfig) -> MarketData:
 
 def compose_algos_from_roster(config: ResolvedConfig) -> list[RosterEntry]:
     """Resolve configured strategy factories at command runtime."""
-    # Wave 2 must firm up the exact factory convention once Wave 1-B's public
-    # trader.algos API is known. This boundary deliberately remains lazy.
     try:
         import trader.algos as algos_package
     except (ImportError, ModuleNotFoundError) as exc:
@@ -243,7 +241,7 @@ def compose_algos_from_roster(config: ResolvedConfig) -> list[RosterEntry]:
                 factory = getattr(algos_package, spec.factory)
             if not isinstance(spec.params, dict):
                 raise TypeError("algo params must be a mapping")
-            algo = factory(**spec.params)
+            algo = factory(id=spec.id, status=spec.status, params=spec.params)
         except (
             AttributeError,
             ImportError,
@@ -253,8 +251,7 @@ def compose_algos_from_roster(config: ResolvedConfig) -> list[RosterEntry]:
         ) as exc:
             raise ContractViolation(
                 f"trader.algos factory {spec.factory!r} for {spec.id!r} "
-                "could not be composed; Wave 2 must align this placeholder "
-                "with the Wave 1-B factory API"
+                "could not be composed"
             ) from exc
         roster.append(RosterEntry(algo=algo, status=spec.status))
     return roster

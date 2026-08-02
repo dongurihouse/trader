@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
-
 from trader.contracts import (
     ContractViolation,
     Intent,
@@ -112,7 +110,7 @@ class RiskRails:
 
         bars = data.bars_1m(
             intent.instrument,
-            asof=intent.ts + timedelta(minutes=1),
+            asof=intent.ts,
             lookback_minutes=1,
         )
         if bars.empty:

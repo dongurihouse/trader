@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+import sys
 
 import pandas as pd
 import pytest
@@ -521,11 +522,32 @@ def test_compose_real_market_data_wraps_missing_provider_import() -> None:
         compose_real_market_data(resolved)
 
 
-def test_compose_algos_from_roster_wraps_missing_algos_import() -> None:
+def test_compose_algos_from_roster_wraps_missing_algos_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     resolved = load_config(REPO_CONFIG_DIR)
+    monkeypatch.setitem(sys.modules, "trader.algos", None)
 
     with pytest.raises(ContractViolation, match=r"trader\.algos"):
         compose_algos_from_roster(resolved)
+
+
+def test_compose_algos_from_roster_wraps_unresolvable_factory() -> None:
+    resolved = load_config(REPO_CONFIG_DIR)
+    invalid_spec = replace(
+        resolved.algos.roster[0],
+        factory="trader.algos.declarative:MissingAlgo",
+    )
+    invalid_config = replace(
+        resolved,
+        algos=replace(resolved.algos, roster=[invalid_spec]),
+    )
+
+    with pytest.raises(
+        ContractViolation,
+        match=r"factory.*MissingAlgo.*could not be composed",
+    ):
+        compose_algos_from_roster(invalid_config)
 
 
 def test_register_parses_run_arguments_and_attaches_session_handler() -> None:

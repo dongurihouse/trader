@@ -59,6 +59,16 @@ CONFIG_DATACLASSES = (
     ConsoleConfig,
     ResolvedConfig,
 )
+EXPECTED_ALGO_IDS = [
+    "orb5",
+    "gap_play",
+    "lateday_momentum",
+    "opening_momentum",
+    "day_extreme_reversal",
+    "first_pullback",
+    "prior_level_breakout",
+    "range_compression",
+]
 
 
 @pytest.fixture
@@ -93,9 +103,12 @@ def test_loads_real_config_into_expected_typed_shape() -> None:
     assert resolved.execution.slippage_bps["SNXX"]["2026-07"] == 5
     assert resolved.risk.drawdown_stop.max_session_drawdown_r is None
     assert resolved.console.port == 8777
+    assert resolved.algos.entry_cutoff_minutes_before_close == 30
+    assert resolved.algos.gap_min_pct == 2.0
+    assert resolved.algos.known_algo_ids == EXPECTED_ALGO_IDS
     assert len(resolved.algos.roster) == 8
     assert all(isinstance(spec, AlgoSpec) for spec in resolved.algos.roster)
-    assert all(spec.params == "PORT" for spec in resolved.algos.roster)
+    assert all(isinstance(spec.params, dict) for spec in resolved.algos.roster)
     assert resolved.package_version == trader.__version__
 
 
@@ -138,6 +151,16 @@ def test_config_sha256_is_deterministic_and_changes_with_config(
             lambda data: data["rails"].update({"bogus_nested": True}),
             "risk.yaml: rails",
         ),
+        (
+            "algos.yaml",
+            lambda data: data.update({"bogus_top_level": True}),
+            "algos.yaml",
+        ),
+        (
+            "algos.yaml",
+            lambda data: data["roster"][0].update({"bogus_nested": True}),
+            "algos.yaml: roster[0]",
+        ),
     ],
 )
 def test_rejects_unknown_keys_at_every_schema_level(
@@ -151,7 +174,11 @@ def test_rejects_unknown_keys_at_every_schema_level(
     add_bogus_key(data)
     _write_yaml(config_path, data)
 
-    bad_key = "bogus_top_level" if filename == "console.yaml" else "bogus_nested"
+    bad_key = (
+        "bogus_top_level"
+        if expected_location in ("console.yaml", "algos.yaml")
+        else "bogus_nested"
+    )
     with pytest.raises(ConfigError) as exc_info:
         load_config(copied_config)
 

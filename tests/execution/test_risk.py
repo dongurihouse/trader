@@ -121,13 +121,44 @@ def _frame(*rows: tuple[datetime, float]) -> pd.DataFrame:
 def _data(
     close: float = 100.0,
     *,
-    bar_ts: datetime = INTENT_TS,
+    bar_ts: datetime = INTENT_TS - timedelta(minutes=1),
     later_close: float | None = None,
 ) -> FakeMarketData:
     rows = [(bar_ts, close)]
     if later_close is not None:
         rows.append((bar_ts + timedelta(minutes=1), later_close))
     return FakeMarketData({INSTRUMENT: _frame(*rows)})
+
+
+class NoFutureAsOfMarketData:
+    """Wrap a fake and reject any minute request after the allowed asof."""
+
+    def __init__(self, wrapped: FakeMarketData, latest_asof: datetime) -> None:
+        self._wrapped = wrapped
+        self._latest_asof = latest_asof
+        self.requests: list[tuple[str, datetime, int | None]] = []
+
+    def bars_1m(
+        self,
+        symbol: str,
+        *,
+        asof: datetime,
+        lookback_minutes: int | None = None,
+    ) -> pd.DataFrame:
+        if asof > self._latest_asof:
+            raise AssertionError(
+                f"minute request {asof.isoformat()} exceeds intent close "
+                f"{self._latest_asof.isoformat()}"
+            )
+        self.requests.append((symbol, asof, lookback_minutes))
+        return self._wrapped.bars_1m(
+            symbol,
+            asof=asof,
+            lookback_minutes=lookback_minutes,
+        )
+
+    def __getattr__(self, name: str):
+        return getattr(self._wrapped, name)
 
 
 def _assert_rejection(
@@ -374,29 +405,11 @@ def test_ticket_id_is_deterministic_across_separate_calls() -> None:
     assert first == second
 
 
-def test_market_data_request_reveals_intent_bar_without_future_bar() -> None:
-    class RecordingFakeMarketData(FakeMarketData):
-        def __init__(self) -> None:
-            super().__init__(
-                {INSTRUMENT: _frame((INTENT_TS, 100.0), (INTENT_TS + timedelta(minutes=1), 999.0))}
-            )
-            self.requests: list[tuple[str, datetime, int | None]] = []
-
-        def bars_1m(
-            self,
-            symbol: str,
-            *,
-            asof: datetime,
-            lookback_minutes: int | None = None,
-        ) -> pd.DataFrame:
-            self.requests.append((symbol, asof, lookback_minutes))
-            return super().bars_1m(
-                symbol,
-                asof=asof,
-                lookback_minutes=lookback_minutes,
-            )
-
-    data = RecordingFakeMarketData()
+def test_market_data_request_never_advances_past_intent_close() -> None:
+    data = NoFutureAsOfMarketData(
+        _data(100.0, later_close=999.0),
+        latest_asof=INTENT_TS,
+    )
 
     result = RiskRails(_risk_config()).check_and_size(
         _intent(),
@@ -406,11 +419,40 @@ def test_market_data_request_reveals_intent_bar_without_future_bar() -> None:
 
     assert isinstance(result, OrderTicket)
     assert result.shares == 50
-    assert data.requests == [(INSTRUMENT, INTENT_TS + timedelta(minutes=1), 1)]
+    assert data.requests == [(INSTRUMENT, INTENT_TS, 1)]
+
+
+def test_sizes_from_completed_intent_bar_not_following_bar() -> None:
+    t0 = INTENT_TS - timedelta(minutes=2)
+    t1 = INTENT_TS - timedelta(minutes=1)
+    t2 = INTENT_TS
+    data = FakeMarketData(
+        {
+            INSTRUMENT: _frame(
+                (t0, 100.0),
+                (t1, 101.0),
+                (t2, 102.0),
+            )
+        }
+    )
+
+    result = RiskRails(_risk_config(equity=10_100.0)).check_and_size(
+        _intent(ts=t2),
+        _portfolio(cash=10_100.0, equity=10_100.0),
+        data,
+    )
+
+    assert isinstance(result, OrderTicket)
+    assert result.shares == 50
+    assert result.risk == {
+        "slot": 1,
+        "dollars": 300.0,
+        "equity": 10_100.0,
+    }
 
 
 def test_lookahead_error_from_market_data_propagates() -> None:
-    stale_data = _data(bar_ts=INTENT_TS - timedelta(minutes=1))
+    stale_data = _data(bar_ts=INTENT_TS - timedelta(minutes=2))
 
     with pytest.raises(LookaheadError):
         RiskRails(_risk_config()).check_and_size(

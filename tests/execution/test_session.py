@@ -452,4 +452,4 @@ def test_end_session_force_flats_real_position_and_emits_final_metrics() -> None
     assert telemetry.records[8]["book"] == "real"
     assert telemetry.records[9]["book"] == "shadow"
     assert real_book.state.positions == []
-    assert summary == SessionSummary(2, 1, 0, 10_098.0)
+    assert summary == SessionSummary(2, 1, 0, 10_100.0)
