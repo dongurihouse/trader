@@ -34,6 +34,8 @@ class SessionStartEvent:
     config_sha256: str
     package_version: str
     symbols: list[str]
+    etf_price_basis: Literal["auto", "synthetic", "real"]
+    qualifying_day_counts: dict[str, int]
     roster: list[dict]
 
 
@@ -52,6 +54,17 @@ class DaySkippedEvent:
     session: str
     day: str
     reason: str
+
+
+@dataclass(frozen=True)
+class DataThinEvent:
+    ev: Literal["data_thin"]
+    ts: datetime
+    session: str
+    symbol: str
+    day: str
+    bar_count: int
+    min_intraday_bars: int
 
 
 @dataclass(frozen=True)
@@ -120,6 +133,7 @@ class FillEvent:
     shares: int
     kind: Literal["entry", "stop", "target", "reversal", "eod"]
     book: Literal["real", "shadow"]
+    price_basis: Literal["real", "synthetic"]
     tag: str | None
 
 
@@ -181,6 +195,7 @@ EVENT_TYPES: dict[str, type] = {
     "session_start": SessionStartEvent,
     "tick": TickEvent,
     "day_skipped": DaySkippedEvent,
+    "data_thin": DataThinEvent,
     "intent": IntentEvent,
     "rejection": RejectionEvent,
     "ticket": TicketEvent,
@@ -199,6 +214,7 @@ class TelemetryWriter(Protocol):
 __all__ = [
     "AlgoErrorEvent",
     "AlgoMetrics",
+    "DataThinEvent",
     "DaySkippedEvent",
     "EVENT_TYPES",
     "FillEvent",

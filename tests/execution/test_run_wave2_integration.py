@@ -128,6 +128,9 @@ def test_shipped_roster_composes_and_runs_synthetic_session() -> None:
         symbols=resolved.trader.symbols,
         config_sha256=resolved.config_sha256,
         package_version=resolved.package_version,
+        execution_config=resolved.execution,
+        traded_instruments=list(resolved.trader.instrument_map.values()),
+        timezone=resolved.trader.timezone,
     )
     bar_asofs = [
         FIRST_BAR_TS + timedelta(minutes=offset + 1)

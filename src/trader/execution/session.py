@@ -22,6 +22,7 @@ from trader.contracts import (
     AlgoMetrics,
     AlgoStatus,
     Broker,
+    DataThinEvent,
     DaySkippedEvent,
     Fill,
     FillEvent,
@@ -49,6 +50,8 @@ from trader.execution.book import (
     ShadowTag,
     build_algo_metrics,
 )
+from trader.execution.broker.sim import FillPriceResolver
+from trader.execution.config import ExecutionConfig
 
 
 class JsonlTelemetryWriter:
@@ -99,6 +102,10 @@ def _datetime_to_json(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _unique_in_order(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(values))
+
+
 class SessionRunner:
     """Run one deterministic execution session over caller-supplied bars."""
 
@@ -117,6 +124,9 @@ class SessionRunner:
         symbols: list[str],
         config_sha256: str,
         package_version: str,
+        execution_config: ExecutionConfig,
+        traded_instruments: list[str],
+        timezone: str = "America/New_York",
     ) -> None:
         self._session_id = session_id
         self._mode = mode
@@ -132,6 +142,12 @@ class SessionRunner:
         self._symbols = list(symbols)
         self._config_sha256 = config_sha256
         self._package_version = package_version
+        self._fills_config = execution_config.fills
+        self._traded_instruments = _unique_in_order(traded_instruments)
+        self._fill_prices = FillPriceResolver(
+            execution_config,
+            timezone=timezone,
+        )
         self._status_by_algo = {
             entry.algo.id: entry.status for entry in self._roster
         }
@@ -140,7 +156,12 @@ class SessionRunner:
         self._real_trades = 0
         self._shadow_trades = 0
 
-    def start_session(self, ts: datetime) -> None:
+    def start_session(
+        self,
+        ts: datetime,
+        *,
+        qualifying_day_counts: dict[str, int] | None = None,
+    ) -> None:
         self._emit(
             SessionStartEvent(
                 ev="session_start",
@@ -150,6 +171,10 @@ class SessionRunner:
                 config_sha256=self._config_sha256,
                 package_version=self._package_version,
                 symbols=self._symbols,
+                etf_price_basis=self._fills_config.etf_price_basis,
+                qualifying_day_counts={}
+                if qualifying_day_counts is None
+                else dict(qualifying_day_counts),
                 roster=[
                     {"id": entry.algo.id, "status": entry.status}
                     for entry in self._roster
@@ -168,7 +193,41 @@ class SessionRunner:
             )
         )
 
-    def start_day(self, day: date) -> None:
+    def qualifying_day_counts(self, trading_days: list[date]) -> dict[str, int]:
+        return {
+            instrument: sum(
+                1
+                for trading_day in trading_days
+                if self._intraday_bar_count(
+                    instrument,
+                    trading_day,
+                    asof=self._market_data.calendar().session_close(trading_day),
+                )
+                >= self._fills_config.min_intraday_bars
+            )
+            for instrument in self._traded_instruments
+        }
+
+    def start_day(self, day: date, *, ts: datetime | None = None) -> None:
+        event_ts = (
+            self._market_data.calendar().session_close(day)
+            if ts is None
+            else ts
+        )
+        for instrument in self._traded_instruments:
+            count = self._intraday_bar_count(instrument, day, asof=event_ts)
+            if count < self._fills_config.min_intraday_bars:
+                self._emit(
+                    DataThinEvent(
+                        ev="data_thin",
+                        ts=event_ts,
+                        session=self._session_id,
+                        symbol=instrument,
+                        day=day.isoformat(),
+                        bar_count=count,
+                        min_intraday_bars=self._fills_config.min_intraday_bars,
+                    )
+                )
         self._broker.cancel_open("new trading day")
         self._real_book.forget_unfilled_tickets()
         self._real_book.start_new_day()
@@ -179,6 +238,21 @@ class SessionRunner:
         for entry in self._roster:
             if entry.status != "disabled":
                 entry.algo.warmup(day, self._market_data)
+
+    def _intraday_bar_count(
+        self,
+        instrument: str,
+        trading_day: date,
+        *,
+        asof: datetime,
+    ) -> int:
+        count, _cacheable = self._fill_prices.intraday_bar_count(
+            self._market_data,
+            instrument=instrument,
+            asof=asof,
+            trading_day=trading_day,
+        )
+        return count
 
     def process_bar(self, asof: datetime) -> None:
         self._emit(
@@ -435,6 +509,7 @@ class SessionRunner:
                 shares=fill.shares,
                 kind=fill.kind,
                 book=fill.book,
+                price_basis=fill.price_basis,
                 tag=tag,
             )
         )

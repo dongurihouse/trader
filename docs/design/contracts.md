@@ -146,14 +146,15 @@ Every record is a flat JSON object with common envelope fields
 
 | ev | payload |
 |---|---|
-| `session_start` | `mode`, `config_sha256`, `package_version`, `symbols`, `roster: [{id,status}]` |
+| `session_start` | `mode`, `config_sha256`, `package_version`, `symbols`, `etf_price_basis`, `qualifying_day_counts: {symbol: count}`, `roster: [{id,status}]` |
 | `tick` | `bar_ts` |
 | `day_skipped` | `day`, `reason` (e.g. `no_prev_session` — PIT rule 5; ports dt's skipped_no_prev) |
+| `data_thin` | `symbol`, `day`, `bar_count`, `min_intraday_bars` |
 | `intent` | full Intent fields |
 | `rejection` | intent fields + `rule`, `detail` |
 | `ticket` | full OrderTicket fields |
 | `ticket_declined` | `ticket_id`, `algo_id`, `instrument`, `reason` (`broker_declined` \| `day_roll` \| `eod_unfilled`) — a submitted ticket that never became a position; clears the in-flight latch and consumes no day slot (A10) |
-| `fill` | full Fill fields + `tag` (`null` for real-book records; `probe`, `rejected`, or `gate_refused` for shadow records) |
+| `fill` | full Fill fields (including `price_basis`) + `tag` (`null` for real-book records; `probe`, `rejected`, or `gate_refused` for shadow records) |
 | `position_closed` | `algo_id`, `instrument`, `r_multiple`, `book`, `exit_kind`, `tag` (`null` for real-book records; `probe`, `rejected`, or `gate_refused` for shadow records) |
 | `metrics` | one AlgoMetrics object |
 | `algo_error` | `algo_id`, `error`, `traceback` |

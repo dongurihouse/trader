@@ -106,7 +106,7 @@ class FillPriceResolver:
         if mode == "synthetic":
             basis: FillPriceBasis | None = "synthetic"
         else:
-            count, cacheable = self._intraday_bar_count(
+            count, cacheable = self.intraday_bar_count(
                 data,
                 instrument=instrument,
                 asof=asof,
@@ -124,7 +124,7 @@ class FillPriceResolver:
         self._basis_by_day[cache_key] = basis
         return basis
 
-    def _intraday_bar_count(
+    def intraday_bar_count(
         self,
         data: MarketData,
         *,
@@ -160,6 +160,21 @@ class FillPriceResolver:
                 if _timestamp_day(timestamp, self._tz) == trading_day
             ),
             cacheable,
+        )
+
+    def _intraday_bar_count(
+        self,
+        data: MarketData,
+        *,
+        instrument: str,
+        asof: datetime,
+        trading_day: date,
+    ) -> tuple[int, bool]:
+        return self.intraday_bar_count(
+            data,
+            instrument=instrument,
+            asof=asof,
+            trading_day=trading_day,
         )
 
     def _latest_completed_bar(
