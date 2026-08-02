@@ -102,6 +102,18 @@ __BASE_CSS__
       font-size: 12px;
     }
 
+    .data-thin-section {
+      margin-top: 14px;
+      padding-top: 12px;
+      border-top: 1px solid var(--panel-edge);
+    }
+
+    .data-thin-section h3 {
+      margin: 0 0 8px;
+      color: var(--text);
+      font-size: 13px;
+    }
+
     .results-board {
       display: grid;
       grid-template-columns: 280px minmax(0, 1.55fr) minmax(310px, 0.95fr);
@@ -214,6 +226,22 @@ __BASE_CSS__
       overflow-wrap: anywhere;
     }
 
+    .basis-provenance-note {
+      margin: 0;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .price-basis {
+      color: var(--text);
+      font-size: 12px;
+    }
+
+    .price-basis-unrecorded {
+      color: #f7dfac;
+      font-weight: 700;
+    }
+
     #empty-state {
       margin-top: 16px;
     }
@@ -256,6 +284,10 @@ __BASE_CSS__
         <section class="panel" aria-labelledby="exec-heading">
           <h2 id="exec-heading">Executive Summary</h2>
           <div id="exec-summary" class="kpi-grid"></div>
+          <section id="data-thin-warnings" class="data-thin-section" aria-labelledby="data-thin-heading">
+            <h3 id="data-thin-heading">Data thinness</h3>
+            <div id="data-thin-warnings-body"></div>
+          </section>
         </section>
 
         <section class="panel" aria-labelledby="algo-heading">
@@ -281,6 +313,12 @@ __BASE_CSS__
         <section class="panel chart-wrap" aria-labelledby="day-heading">
           <h2 id="day-heading">Day</h2>
           <canvas id="day-chart" width="760" height="320"></canvas>
+          <p id="price-basis-note" class="price-note basis-provenance-note">
+            Fills without a recorded basis predate A12's producer-side basis telemetry.
+            Historical ETF fills in this program were derived from SNDK through the
+            leverage relation, so unrecorded ETF basis means legacy synthetic-derived
+            provenance.
+          </p>
           <div class="table-wrap">
             <table id="day-trades-table"></table>
           </div>
@@ -304,6 +342,7 @@ __BASE_CSS__
       const emptyState = document.getElementById("empty-state");
       const resultsContent = document.getElementById("results-content");
       const execSummary = document.getElementById("exec-summary");
+      const dataThinWarnings = document.getElementById("data-thin-warnings-body");
       const algoFilter = document.getElementById("algo-filter");
       const perAlgoMetrics = document.getElementById("per-algo-metrics");
       const daysList = document.getElementById("days-list");
@@ -348,6 +387,23 @@ __BASE_CSS__
         if (finiteNumber(value)) return trimNumber(value);
         if (Array.isArray(value)) return value.length ? value.join(", ") : DASH;
         return String(value);
+      }
+
+      function formatPriceBasisValue(value) {
+        return value == null ? "not recorded" : String(value);
+      }
+
+      function renderPriceBasisValue(value) {
+        const classes = value == null
+          ? "price-basis-value price-basis-unrecorded"
+          : "price-basis-value";
+        return `<span class="${classes}">${escapeHtml(formatPriceBasisValue(value))}</span>`;
+      }
+
+      function renderPriceBasisPair(trade) {
+        return '<span class="price-basis">entry: ' +
+          `${renderPriceBasisValue(trade.entry_price_basis)} / exit: ` +
+          `${renderPriceBasisValue(trade.exit_price_basis)}</span>`;
       }
 
       function formatPercent(value) {
@@ -407,6 +463,23 @@ __BASE_CSS__
           `<div class="kpi-chip"><div class="kpi-label">${escapeHtml(label)}</div>` +
           `<div class="kpi-value">${escapeHtml(formatter(summary[key]))}</div></div>`
         ).join("");
+      }
+
+      function renderDataThinWarnings() {
+        const warnings = (state.payload && state.payload.data_thin_warnings) || [];
+        if (!warnings.length) {
+          dataThinWarnings.innerHTML =
+            "<p class=\"empty\">No data-thinness warnings were recorded in this session's telemetry.</p>";
+          return;
+        }
+        const columns = ["symbol", "day", "count", "ts"];
+        dataThinWarnings.innerHTML = '<div class="table-wrap"><table>' +
+          "<thead><tr>" + columns.map((column) =>
+            `<th>${escapeHtml(column)}</th>`).join("") + "</tr></thead><tbody>" +
+          warnings.map((warning) =>
+            "<tr>" + columns.map((column) =>
+              `<td>${escapeHtml(formatValue(warning[column]))}</td>`).join("") + "</tr>"
+          ).join("") + "</tbody></table></div>";
       }
 
       function renderAlgoFilter() {
@@ -539,6 +612,7 @@ __BASE_CSS__
           "algo_id",
           "side",
           "instrument",
+          "basis",
           "entry_ts",
           "entry_price",
           "exit_ts",
@@ -551,10 +625,12 @@ __BASE_CSS__
           (trades.length ? trades.map((trade) => {
             const selected = trade.id === state.selectedTradeId ? ' class="is-selected"' : "";
             return `<tr data-trade="${escapeHtml(trade.id)}"${selected}>` +
-              columns.map((column) =>
-                `<td>${escapeHtml(formatValue(trade[column]))}</td>`).join("") +
+              columns.map((column) => {
+                if (column === "basis") return `<td>${renderPriceBasisPair(trade)}</td>`;
+                return `<td>${escapeHtml(formatValue(trade[column]))}</td>`;
+              }).join("") +
               "</tr>";
-          }).join("") : '<tr><td class="empty" colspan="9">No trades for this day.</td></tr>') +
+          }).join("") : `<tr><td class="empty" colspan="${columns.length}">No trades for this day.</td></tr>`) +
           "</tbody>";
         for (const row of tradesTable.querySelectorAll("tbody tr[data-trade]")) {
           row.addEventListener("click", () => {
@@ -600,23 +676,31 @@ __BASE_CSS__
           : "no rule trace available";
 
         const detailRows = [
-          ["Algo", trade.algo_id],
-          ["Side", trade.side],
-          ["Instrument", trade.instrument],
-          ["Entry", trade.entry_price],
-          ["Stop", trade.stop],
-          ["Target", trade.target],
-          ["Exit", trade.exit_price],
-          ["Exit kind", trade.exit_kind],
-          ["Risk", `|entry - stop| = ${trimNumber(risk)}`],
-          ["Planned reward", `|target - entry| = ${trimNumber(plannedReward)}`],
-          ["Realized R", trade.r_multiple],
-          ["Entry ts", trade.entry_ts],
-          ["Exit ts", trade.exit_ts],
+          {label: "Algo", value: trade.algo_id},
+          {label: "Side", value: trade.side},
+          {label: "Instrument", value: trade.instrument},
+          {label: "Entry", value: trade.entry_price},
+          {
+            label: "Entry price basis:",
+            html: `<span class="price-basis">${renderPriceBasisValue(trade.entry_price_basis)}</span>`,
+          },
+          {label: "Stop", value: trade.stop},
+          {label: "Target", value: trade.target},
+          {label: "Exit", value: trade.exit_price},
+          {
+            label: "Exit price basis:",
+            html: `<span class="price-basis">${renderPriceBasisValue(trade.exit_price_basis)}</span>`,
+          },
+          {label: "Exit kind", value: trade.exit_kind},
+          {label: "Risk", value: `|entry - stop| = ${trimNumber(risk)}`},
+          {label: "Planned reward", value: `|target - entry| = ${trimNumber(plannedReward)}`},
+          {label: "Realized R", value: trade.r_multiple},
+          {label: "Entry ts", value: trade.entry_ts},
+          {label: "Exit ts", value: trade.exit_ts},
         ];
-        tradeDetail.innerHTML = '<div class="detail-grid">' + detailRows.map(([label, value]) =>
-          `<div><div class="detail-label">${escapeHtml(label)}</div>` +
-          `<div class="detail-value">${escapeHtml(formatValue(value))}</div></div>`
+        tradeDetail.innerHTML = '<div class="detail-grid">' + detailRows.map((row) =>
+          `<div><div class="detail-label">${escapeHtml(row.label)}</div>` +
+          `<div class="detail-value">${row.html || escapeHtml(formatValue(row.value))}</div></div>`
         ).join("") + '</div><div class="price-note">' +
           "Entry, stop, target, and exit are the traded instrument's own prices " +
           "(SNXX/SNDQ when used), not SNDK; the candle chart is SNDK." +
@@ -804,6 +888,7 @@ __BASE_CSS__
           const session = payload.session || {};
           sessionLabel.textContent = `${formatValue(session.id)} · ${formatValue(session.mode)}`;
           renderExecSummary();
+          renderDataThinWarnings();
           renderAlgoFilter();
           renderPerAlgoMetrics();
           renderColumns();

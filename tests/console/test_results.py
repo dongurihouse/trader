@@ -87,9 +87,10 @@ def _fill(
     price: float,
     kind: str,
     book: str,
+    price_basis: str | None = None,
     tag: str | None = None,
 ) -> dict:
-    return {
+    record = {
         "ev": "fill",
         "ts": ts,
         "session": "paper-20260701-000000",
@@ -100,6 +101,9 @@ def _fill(
         "book": book,
         "tag": tag,
     }
+    if price_basis is not None:
+        record["price_basis"] = price_basis
+    return record
 
 
 def _closed(
@@ -533,10 +537,12 @@ def test_build_results_payload_joins_real_trades_and_summarizes_session(
         "day": "2026-07-01",
         "entry_ts": "2026-07-01T13:33:00Z",
         "entry_price": 100.0,
+        "entry_price_basis": None,
         "stop": 99.0,
         "target": 104.0,
         "exit_ts": "2026-07-01T14:05:00Z",
         "exit_price": 103.0,
+        "exit_price_basis": None,
         "exit_kind": "target",
         "r_multiple": 1.5,
         "confidence": 0.82,
@@ -553,6 +559,90 @@ def test_build_results_payload_joins_real_trades_and_summarizes_session(
     }
     assert payload["trades"][1]["r_multiple"] == -1.0
     assert payload["trades"][1]["rule_trace"]["uncalibrated"] is True
+    assert payload["data_thin_warnings"] == []
+
+
+def test_build_results_payload_carries_recorded_fill_price_basis(
+    tmp_path: Path,
+) -> None:
+    from trader.console.results import build_results_payload
+
+    records = _rich_telemetry()
+    for record in records:
+        if record.get("ev") != "fill" or record.get("ticket_id") != "orb5-ticket-1":
+            continue
+        if record["kind"] == "entry":
+            record["price_basis"] = "synthetic"
+        else:
+            record["price_basis"] = "real"
+    session_dir = tmp_path / "paper-20260701-000000"
+    _write_jsonl(session_dir / "telemetry.jsonl", records)
+
+    payload = build_results_payload(session_dir)
+
+    first_trade = payload["trades"][0]
+    assert first_trade["entry_price_basis"] == "synthetic"
+    assert first_trade["exit_price_basis"] == "real"
+
+
+def test_build_results_payload_uses_none_for_unrecorded_fill_price_basis(
+    tmp_path: Path,
+) -> None:
+    from trader.console.results import build_results_payload
+
+    session_dir = tmp_path / "paper-20260701-000000"
+    _write_jsonl(session_dir / "telemetry.jsonl", _rich_telemetry())
+
+    payload = build_results_payload(session_dir)
+
+    for trade in payload["trades"]:
+        assert trade["entry_price_basis"] is None
+        assert trade["exit_price_basis"] is None
+
+
+def test_build_results_payload_collects_data_thin_warnings(
+    tmp_path: Path,
+) -> None:
+    from trader.console.results import build_results_payload
+
+    records = _rich_telemetry()
+    records.insert(
+        1,
+        {
+            "ev": "data_thin",
+            "ts": "2026-07-02T13:25:30Z",
+            "session": "paper-20260701-000000",
+            "symbol": "SNXX",
+            "day": "2026-07-02",
+            "count": 1,
+        },
+    )
+    session_dir = tmp_path / "paper-20260701-000000"
+    _write_jsonl(session_dir / "telemetry.jsonl", records)
+
+    payload = build_results_payload(session_dir)
+
+    assert payload["data_thin_warnings"] == [
+        {
+            "symbol": "SNXX",
+            "day": "2026-07-02",
+            "count": 1,
+            "ts": "2026-07-02T13:25:30Z",
+        }
+    ]
+
+
+def test_build_results_payload_uses_empty_data_thin_warnings_when_none_recorded(
+    tmp_path: Path,
+) -> None:
+    from trader.console.results import build_results_payload
+
+    session_dir = tmp_path / "paper-20260701-000000"
+    _write_jsonl(session_dir / "telemetry.jsonl", _rich_telemetry())
+
+    payload = build_results_payload(session_dir)
+
+    assert payload["data_thin_warnings"] == []
 
 
 def test_build_results_payload_uses_latest_metrics_and_zero_trade_roster_rows(

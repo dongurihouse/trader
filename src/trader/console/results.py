@@ -6,6 +6,11 @@ break the view of a recorded run. The one deliberate exception in this module
 is ``build_day_candles``: charts may read the static, git-ignored
 ``data/bars/1m/<SYMBOL>/<YYYY-MM-DD>.parquet`` file directly with pandas. That
 reader intentionally does not import ``trader.provider``.
+
+The results payload also preserves amendment A12 fill-pricing provenance from
+raw telemetry dictionaries when present. Sessions recorded before the producer
+emitted per-fill ``price_basis`` or ``data_thin`` events render those values as
+not recorded rather than treating absence as a clean or real-price assertion.
 """
 
 from __future__ import annotations
@@ -51,9 +56,11 @@ def build_results_payload(session_dir: Path) -> dict:
         "days": [{"day", "status", "reason"}, ...],
         "trades": [{
             "id", "algo_id", "side", "instrument", "day", "entry_ts",
-            "entry_price", "stop", "target", "exit_ts", "exit_price",
-            "exit_kind", "r_multiple", "confidence", "reason", "rule_trace"
+            "entry_price", "entry_price_basis", "stop", "target", "exit_ts",
+            "exit_price", "exit_price_basis", "exit_kind", "r_multiple",
+            "confidence", "reason", "rule_trace"
         }, ...],
+        "data_thin_warnings": [{"symbol", "day", "count", "ts"}, ...],
         "per_algo_metrics": [{
             "algo_id", "book", "status", "n_real", "n_shadow", "wins",
             "win_rate", "mean_r", "expectancy_r", "profit_factor",
@@ -66,7 +73,12 @@ def build_results_payload(session_dir: Path) -> dict:
     "gates_pass", "vetoed", "uncalibrated"}``. Roster algos with no metrics
     produce one ``per_algo_metrics`` row with ``book`` set to ``None``,
     count fields set to zero, ratio fields set to ``None``, and ``cum_r`` set
-    to ``0.0``.
+    to ``0.0``. ``entry_price_basis`` and ``exit_price_basis`` are the string
+    value recorded on the corresponding fill, expected to be ``"real"`` or
+    ``"synthetic"`` once the producer exists; ``None`` means not recorded,
+    which predates the fill-pricing-basis producer implementation. An empty
+    ``data_thin_warnings`` list means no ``data_thin`` telemetry was recorded
+    for the session, not that intraday ETF data was independently verified.
     """
     session_dir = Path(session_dir)
     events = _read_events(session_dir)
@@ -110,6 +122,7 @@ def build_results_payload(session_dir: Path) -> dict:
         "shadow_caveat": SHADOW_CAVEAT_TEXT,
         "days": days,
         "trades": trades,
+        "data_thin_warnings": _build_data_thin_warnings(events),
         "per_algo_metrics": _build_per_algo_metrics(events, algos),
     }
 
@@ -254,10 +267,12 @@ def _build_trades(events: list[dict]) -> list[dict]:
                 "day": _parse_utc(str(entry_fill["ts"])).date().isoformat(),
                 "entry_ts": entry_fill.get("ts"),
                 "entry_price": entry_fill.get("price"),
+                "entry_price_basis": entry_fill.get("price_basis"),
                 "stop": ticket.get("stop"),
                 "target": ticket.get("target"),
                 "exit_ts": exit_fill.get("ts"),
                 "exit_price": exit_fill.get("price"),
+                "exit_price_basis": exit_fill.get("price_basis"),
                 "exit_kind": exit_fill.get("kind"),
                 "r_multiple": closed.get("r_multiple"),
                 "confidence": intent.get("confidence") if intent else None,
@@ -267,6 +282,31 @@ def _build_trades(events: list[dict]) -> list[dict]:
         )
 
     return sorted(trades, key=lambda trade: _parse_utc(str(trade["exit_ts"])))
+
+
+def _build_data_thin_warnings(events: list[dict]) -> list[dict]:
+    warnings: list[tuple[int, dict]] = []
+    for index, record in enumerate(events):
+        if record.get("ev") != "data_thin":
+            continue
+        warnings.append(
+            (
+                index,
+                {
+                    "symbol": record.get("symbol"),
+                    "day": record.get("day"),
+                    "count": record.get("count"),
+                    "ts": record.get("ts"),
+                },
+            )
+        )
+
+    if all(warning["ts"] is not None for _, warning in warnings):
+        warnings = sorted(
+            warnings,
+            key=lambda item: (str(item[1]["ts"]), item[0]),
+        )
+    return [warning for _, warning in warnings]
 
 
 def _rule_trace(intent: dict | None) -> dict | None:
