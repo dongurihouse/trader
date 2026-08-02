@@ -9,6 +9,14 @@ live_orders: false           # api broker interlock 1 of 2; interlock 2 is env T
 fills:
   # Entry timing and stop/target tie-breaks are normative broker constants.
   commission: 0.0            # broker charges none on these symbols (measured, carried from dt)
+  # How ETF fill prices are obtained — see architecture.md §9a (amendment A12).
+  # auto      real ETF minute bars on days that have them, synthetic otherwise (default)
+  # synthetic always derive from SNDK through the leverage relation (the predecessor's method)
+  # real      require real ETF minute bars; refuse to trade a day that lacks them
+  etf_price_basis: auto
+  # A (symbol, day) needs at least this many stored minute bars to count as intraday.
+  # Measured 2026-08-02: only 1 of 125 SNXX days and 1 of 69 SNDQ days clear this.
+  min_intraday_bars: 100
 
 # One-way slippage in basis points by symbol-era (ported verbatim from dt backtest/replay.py).
 # A missing symbol-month is an error, never a silent default.
