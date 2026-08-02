@@ -114,6 +114,8 @@ def _first_bar_asof(
 def run_backtest(
     runner: SessionRunner,
     *,
+    market_data: MarketData,
+    primary_symbol: str,
     trading_days: list[date],
     rth_open: time,
     rth_close: time,
@@ -134,8 +136,39 @@ def run_backtest(
     summary: SessionSummary
 
     try:
+        calendar = market_data.calendar()
         local_timezone = ZoneInfo(timezone)
         for trading_day in trading_days:
+            day_first_asof = _first_bar_asof(
+                trading_day,
+                rth_open=rth_open,
+                rth_close=rth_close,
+                timezone_name=timezone,
+            )
+            prev = calendar.prev_session(trading_day)
+            if prev is None:
+                runner.record_day_skipped(
+                    trading_day,
+                    ts=day_first_asof,
+                    reason="no_prev_session",
+                )
+                continue
+            try:
+                previous_bars = market_data.bars_1m(
+                    primary_symbol,
+                    asof=calendar.session_close(prev),
+                    lookback_minutes=1440,
+                )
+            except LookaheadError:
+                previous_bars = None
+            if previous_bars is None or previous_bars.empty:
+                runner.record_day_skipped(
+                    trading_day,
+                    ts=day_first_asof,
+                    reason="no_prev_session",
+                )
+                continue
+
             runner.start_day(trading_day)
             asof = datetime.combine(
                 trading_day,
@@ -362,6 +395,8 @@ def run_session_command(args) -> int | None:
             rth_close = time.fromisoformat(resolved.trader.session.rth_close)
             summary = run_backtest(
                 runner,
+                market_data=market_data,
+                primary_symbol=resolved.trader.primary_symbol,
                 trading_days=trading_days,
                 rth_open=rth_open,
                 rth_close=rth_close,

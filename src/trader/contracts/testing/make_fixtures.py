@@ -9,6 +9,7 @@ from trader.contracts.intents import Intent
 from trader.contracts.serde import append_jsonl, record_to_json
 from trader.contracts.telemetry import (
     AlgoErrorEvent,
+    DaySkippedEvent,
     FillEvent,
     IntentEvent,
     MetricsEvent,
@@ -116,6 +117,13 @@ def generate_fixtures(output_dir: Path) -> None:
             ts=datetime(2026, 7, 1, 13, 31, tzinfo=timezone.utc),
             session=session,
             bar_ts=datetime(2026, 7, 1, 13, 30, tzinfo=timezone.utc),
+        ),
+        DaySkippedEvent(
+            ev="day_skipped",
+            ts=datetime(2026, 7, 1, 13, 31, 1, tzinfo=timezone.utc),
+            session=session,
+            day="2026-06-30",
+            reason="no_prev_session",
         ),
         IntentEvent(
             ev="intent",

@@ -46,6 +46,15 @@ class TickEvent:
 
 
 @dataclass(frozen=True)
+class DaySkippedEvent:
+    ev: Literal["day_skipped"]
+    ts: datetime
+    session: str
+    day: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class IntentEvent:
     ev: Literal["intent"]
     ts: datetime
@@ -171,6 +180,7 @@ class SessionEndEvent:
 EVENT_TYPES: dict[str, type] = {
     "session_start": SessionStartEvent,
     "tick": TickEvent,
+    "day_skipped": DaySkippedEvent,
     "intent": IntentEvent,
     "rejection": RejectionEvent,
     "ticket": TicketEvent,
@@ -189,6 +199,7 @@ class TelemetryWriter(Protocol):
 __all__ = [
     "AlgoErrorEvent",
     "AlgoMetrics",
+    "DaySkippedEvent",
     "EVENT_TYPES",
     "FillEvent",
     "IntentEvent",

@@ -22,6 +22,7 @@ from trader.contracts import (
     AlgoMetrics,
     AlgoStatus,
     Broker,
+    DaySkippedEvent,
     Fill,
     FillEvent,
     Intent,
@@ -153,6 +154,17 @@ class SessionRunner:
                     {"id": entry.algo.id, "status": entry.status}
                     for entry in self._roster
                 ],
+            )
+        )
+
+    def record_day_skipped(self, day: date, ts: datetime, reason: str) -> None:
+        self._emit(
+            DaySkippedEvent(
+                ev="day_skipped",
+                ts=ts,
+                session=self._session_id,
+                day=day.isoformat(),
+                reason=reason,
             )
         )
 

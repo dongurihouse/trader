@@ -18,6 +18,7 @@ from trader.contracts.orders import (
 from trader.contracts.telemetry import (
     AlgoErrorEvent,
     AlgoMetrics,
+    DaySkippedEvent,
     FillEvent,
     IntentEvent,
     MetricsEvent,
@@ -155,6 +156,13 @@ RECORDS = [
         ts=TS,
         session="session-001",
         bar_ts=BAR_TS,
+    ),
+    DaySkippedEvent(
+        ev="day_skipped",
+        ts=TS,
+        session="session-001",
+        day="2026-07-01",
+        reason="no_prev_session",
     ),
     IntentEvent(
         ev="intent",

@@ -54,10 +54,12 @@ class ScriptedAlgo:
         *,
         warmup_log: list[tuple[str, date]],
         interrupt_at: datetime | None = None,
+        emit_intents: bool = False,
     ) -> None:
         self.id = algo_id
         self._warmup_log = warmup_log
         self._interrupt_at = interrupt_at
+        self._emit_intents = emit_intents
         self.on_bar_calls: list[datetime] = []
 
     def warmup(self, day: date, data: MarketData) -> None:
@@ -69,6 +71,23 @@ class ScriptedAlgo:
         self.on_bar_calls.append(asof)
         if asof == self._interrupt_at:
             raise KeyboardInterrupt
+        if self._emit_intents:
+            return [
+                Intent(
+                    algo_id=self.id,
+                    ts=asof,
+                    action="close",
+                    side=None,
+                    signal_symbol="SNXX",
+                    instrument="SNXX",
+                    entry="market_next_open",
+                    stop=None,
+                    target=None,
+                    confidence=None,
+                    reason="scripted close",
+                    meta={},
+                )
+            ]
         return []
 
 
@@ -137,6 +156,22 @@ def _frame(*bar_starts: datetime) -> pd.DataFrame:
         ],
         index=pd.DatetimeIndex(bar_starts, name="ts"),
     )
+
+
+def _records_on_day(records: list[dict], ev: str, day: date) -> list[dict]:
+    day_text = day.isoformat()
+    result = []
+    for record in records:
+        if record["ev"] != ev:
+            continue
+        if ev == "day_skipped":
+            if record["day"] == day_text:
+                result.append(record)
+            continue
+        timestamp = record["bar_ts"] if ev == "tick" else record["ts"]
+        if timestamp.startswith(day_text):
+            result.append(record)
+    return result
 
 
 def _risk_config() -> RiskConfig:
@@ -310,11 +345,13 @@ def test_select_broker_rejects_unknown_live_name(tmp_path: Path) -> None:
 def test_run_backtest_drives_every_bar_and_uses_first_bar_for_session_start() -> None:
     first_day = date(2026, 7, 1)
     second_day = date(2026, 7, 2)
+    warmup_open = datetime(2026, 6, 30, 13, 30, tzinfo=UTC)
     first_open = datetime(2026, 7, 1, 13, 30, tzinfo=UTC)
     second_open = datetime(2026, 7, 2, 13, 30, tzinfo=UTC)
     data = FakeMarketData(
         {
             "SNXX": _frame(
+                *(warmup_open + timedelta(minutes=index) for index in range(3)),
                 *(first_open + timedelta(minutes=index) for index in range(3)),
                 *(second_open + timedelta(minutes=index) for index in range(3)),
             )
@@ -332,6 +369,8 @@ def test_run_backtest_drives_every_bar_and_uses_first_bar_for_session_start() ->
 
     summary = run_backtest(
         runner,
+        market_data=data,
+        primary_symbol="SNXX",
         trading_days=[first_day, second_day],
         rth_open=time(9, 30),
         rth_close=time(9, 33),
@@ -352,17 +391,139 @@ def test_run_backtest_drives_every_bar_and_uses_first_bar_for_session_start() ->
     )
     assert telemetry.records[0]["ev"] == "session_start"
     assert telemetry.records[0]["ts"] == "2026-07-01T13:31:00Z"
+    assert [
+        record for record in telemetry.records if record["ev"] == "day_skipped"
+    ] == []
     assert telemetry.records[-1]["ev"] == "session_end"
     assert telemetry.records[-1]["ts"] == "2026-07-02T13:33:00Z"
 
 
+def test_run_backtest_skips_day_when_previous_session_missing_from_calendar() -> None:
+    first_day = date(2026, 7, 1)
+    second_day = date(2026, 7, 2)
+    first_open = datetime(2026, 7, 1, 13, 30, tzinfo=UTC)
+    second_open = datetime(2026, 7, 2, 13, 30, tzinfo=UTC)
+    data = FakeMarketData(
+        {
+            "SNXX": _frame(
+                *(first_open + timedelta(minutes=index) for index in range(3)),
+                *(second_open + timedelta(minutes=index) for index in range(3)),
+            )
+        }
+    )
+    warmups: list[tuple[str, date]] = []
+    algo = ScriptedAlgo("scripted", warmup_log=warmups, emit_intents=True)
+    telemetry = CollectingTelemetry()
+    runner = _runner(
+        mode="backtest",
+        data=data,
+        telemetry=telemetry,
+        algo=algo,
+    )
+
+    summary = run_backtest(
+        runner,
+        market_data=data,
+        primary_symbol="SNXX",
+        trading_days=[first_day, second_day],
+        rth_open=time(9, 30),
+        rth_close=time(9, 33),
+        timezone="America/New_York",
+    )
+
+    assert _records_on_day(telemetry.records, "day_skipped", first_day) == [
+        {
+            "ev": "day_skipped",
+            "ts": "2026-07-01T13:31:00Z",
+            "session": "backtest-fixed-session",
+            "day": "2026-07-01",
+            "reason": "no_prev_session",
+        }
+    ]
+    assert warmups == [("scripted", second_day)]
+    assert algo.on_bar_calls == [
+        second_open + timedelta(minutes=index) for index in range(1, 4)
+    ]
+    for ev in ("tick", "intent", "fill"):
+        assert _records_on_day(telemetry.records, ev, first_day) == []
+    assert len(_records_on_day(telemetry.records, "tick", second_day)) == 3
+    assert len(_records_on_day(telemetry.records, "intent", second_day)) == 3
+    assert summary == SessionSummary(
+        bars_processed=3,
+        real_trades=0,
+        shadow_trades=0,
+        final_equity=10_000.0,
+    )
+    assert telemetry.records[-1]["ev"] == "session_end"
+    assert telemetry.records[-1]["ts"] == "2026-07-02T13:33:00Z"
+
+
+def test_run_backtest_skips_day_when_previous_session_has_no_primary_bars() -> None:
+    previous_day = date(2026, 7, 1)
+    trading_day = date(2026, 7, 2)
+    previous_open = datetime(2026, 7, 1, 13, 30, tzinfo=UTC)
+    trading_open = datetime(2026, 7, 2, 13, 30, tzinfo=UTC)
+    data = FakeMarketData(
+        {
+            "SNXX": _frame(
+                *(trading_open + timedelta(minutes=index) for index in range(3))
+            ),
+            "CAL": _frame(previous_open),
+        }
+    )
+    warmups: list[tuple[str, date]] = []
+    algo = ScriptedAlgo("scripted", warmup_log=warmups, emit_intents=True)
+    telemetry = CollectingTelemetry()
+    runner = _runner(
+        mode="backtest",
+        data=data,
+        telemetry=telemetry,
+        algo=algo,
+    )
+
+    summary = run_backtest(
+        runner,
+        market_data=data,
+        primary_symbol="SNXX",
+        trading_days=[trading_day],
+        rth_open=time(9, 30),
+        rth_close=time(9, 33),
+        timezone="America/New_York",
+    )
+
+    assert data.calendar().prev_session(trading_day) == previous_day
+    assert _records_on_day(telemetry.records, "day_skipped", trading_day) == [
+        {
+            "ev": "day_skipped",
+            "ts": "2026-07-02T13:31:00Z",
+            "session": "backtest-fixed-session",
+            "day": "2026-07-02",
+            "reason": "no_prev_session",
+        }
+    ]
+    assert warmups == []
+    assert algo.on_bar_calls == []
+    for ev in ("tick", "intent", "fill"):
+        assert _records_on_day(telemetry.records, ev, trading_day) == []
+    assert summary == SessionSummary(
+        bars_processed=0,
+        real_trades=0,
+        shadow_trades=0,
+        final_equity=10_000.0,
+    )
+    assert telemetry.records[-1]["ev"] == "session_end"
+    assert telemetry.records[-1]["ts"] == "2026-07-02T13:31:00Z"
+
+
 def test_run_backtest_ends_session_once_after_keyboard_interrupt() -> None:
     day = date(2026, 7, 1)
+    warmup_open = datetime(2026, 6, 30, 13, 30, tzinfo=UTC)
     market_open = datetime(2026, 7, 1, 13, 30, tzinfo=UTC)
     interrupt_at = market_open + timedelta(minutes=2)
     data = FakeMarketData(
         {
             "SNXX": _frame(
+                *(warmup_open + timedelta(minutes=index) for index in range(3)),
                 *(market_open + timedelta(minutes=index) for index in range(3))
             )
         }
@@ -383,6 +544,8 @@ def test_run_backtest_ends_session_once_after_keyboard_interrupt() -> None:
 
     summary = run_backtest(
         runner,
+        market_data=data,
+        primary_symbol="SNXX",
         trading_days=[day],
         rth_open=time(9, 30),
         rth_close=time(9, 33),
