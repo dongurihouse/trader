@@ -12,6 +12,7 @@ import threading
 import time
 from urllib.parse import parse_qs, urlparse
 
+from trader.console import workbench_provider
 from trader.console.config import ConsoleConfig
 from trader.console.dashboard import render_dashboard_html
 from trader.console.sessions import list_sessions, resolve_session_dir
@@ -87,6 +88,23 @@ class _ConsoleRequestHandler(BaseHTTPRequestHandler):
                 return
 
             self._stream_events(session_dir / "telemetry.jsonl")
+            return
+
+        if parsed.path == "/api/workbench/provider":
+            query_params = {
+                key: values[0]
+                for key, values in parse_qs(parsed.query).items()
+            }
+            status, payload = workbench_provider.handle_query(
+                query_params,
+                data_root=self.server.config.data_root,
+                config_dir=self.server.config.config_dir,
+            )
+            self._send_json(status, payload)
+            return
+
+        if parsed.path == "/workbench/provider":
+            self._send_html(200, workbench_provider.render_provider_workbench_html())
             return
 
         if parsed.path == "/":
