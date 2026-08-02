@@ -139,6 +139,39 @@ not file layout.
   `/Users/xup/dh/dt/backtest/evaluate.py`.
 - E4 `trader console` CLI: serve newest or named session; follow live file growth.
 
+### 1-E console v2 — workbench and results (branch `console-v2`, Dev directive 2026-08-02)
+
+Per amendment A11. Four requirements, in the Dev's words: the live dashboard shows
+running events and logs; each component can be exercised individually from the dashboard;
+for example a provider test takes typed parameters (ticker, date, signal or event name)
+and returns the corresponding data; and the latest backtest results are browsable the way
+dt's dashboard worked — executive summary plus drill-down.
+
+- V1 live view: a running session's events stream in as they happen (intents, tickets,
+  fills, rejections with their rule, algo errors), plus a raw log pane showing the
+  telemetry lines themselves. Auto-follows the newest session; reconnects if the stream
+  drops; shows a clear idle state when no session is running.
+- V2 workbench — provider panel: operator enters symbol, date/asof, and picks an
+  operation (1-minute bars, daily bars, a named signal from the registry, an event kind,
+  calendar lookups such as previous session or session close). Results render as a table
+  plus the raw JSON. Errors — including `LookaheadError` — render as readable messages,
+  never a traceback, and a lookahead refusal is a legitimate, well-labelled outcome.
+- V3 workbench — algos panel: pick any roster algo, pick a stored day, run it over that
+  day and show every candidate it produced with the rule trace (which clauses fired,
+  gate/veto verdict, `gates_pass` stamp) and the resulting bracket.
+- V4 workbench — execution panel: hand-enter an intent (algo, side, instrument, entry,
+  stop, target) plus account state, and show the risk decision: accepted with the sizing
+  arithmetic, or rejected naming the rail. Simulation only, per A11's safety rules.
+- V5 results view, modeled on dt's dashboard (read
+  `/Users/xup/dh/dt/research/build_dashboard.py` and
+  `/Users/xup/dh/dt/docs/runbooks/dashboard.md` for the layout that worked): executive
+  summary — window, sessions, trades, win rate, mean R, profit factor, cumulative R, max
+  drawdown, final equity — over a master-detail drill-down: days list → that day's chart
+  and trades → single-trade detail. A global algo filter applies across all panes.
+  Per-algo metrics carry `n_real`, `n_shadow`, and the shadow caveat per architecture §7.
+- V6 session picker: switch between past sessions, defaulting to the most recent
+  backtest; the results view always states which session it is showing.
+
 ## Wave 2 — integration (one agent, after all Wave 1 merges)
 
 - I1 copy a five-session slice of real bars (all seven symbols) from
