@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from trader.provider.badticks import classify_bad_ticks
 from trader.provider import store
 
 
@@ -94,99 +95,87 @@ def _daily_bar(day: date, minute_bars: pd.DataFrame) -> pd.DataFrame | None:
     )
 
 
-def _deviates(value: float, reference: float, fraction: float) -> bool:
+def _distance_from_reference(value: float, reference: float) -> float:
     if reference == 0.0:
-        return value != 0.0
-    return abs(value - reference) / abs(reference) > fraction
+        return abs(value - reference)
+    return abs(value - reference) / abs(reference)
 
 
-def _gather_references(
-    position: int,
-    size: int,
-    closes: list[float],
-    excluded: set[int],
-) -> list[float]:
-    """Return up to two close references per side, skipping exclusions."""
+def _contiguous_runs(positions: list[int]) -> list[list[int]]:
+    runs: list[list[int]] = []
+    for position in positions:
+        if not runs or position != runs[-1][-1] + 1:
+            runs.append([position])
+            continue
+        runs[-1].append(position)
+    return runs
+
+
+def _close_reference_for_run(
+    frame: pd.DataFrame,
+    run: list[int],
+    quarantined_positions: set[int],
+) -> float:
+    start = run[0]
+    stop = run[-1] + 1
+
+    left_start = start
+    while left_start > 0 and left_start - 1 not in quarantined_positions:
+        left_start -= 1
+    left = frame.iloc[left_start:start]
+
+    right_stop = stop
+    while right_stop < len(frame) and right_stop not in quarantined_positions:
+        right_stop += 1
+    right = frame.iloc[stop:right_stop]
+
     references: list[float] = []
-    step = 1
-    while len(references) < 2 and position - step >= 0:
-        candidate = position - step
-        if candidate not in excluded:
-            references.append(closes[candidate])
-        step += 1
-
-    left_count = len(references)
-    step = 1
-    while len(references) - left_count < 2 and position + step < size:
-        candidate = position + step
-        if candidate not in excluded:
-            references.append(closes[candidate])
-        step += 1
-    return references
+    if not left.empty:
+        references.append(float(median(left["c"])))
+    if not right.empty:
+        references.append(float(median(right["c"])))
+    if not references:
+        return float(frame.iloc[start]["c"])
+    return sum(references) / len(references)
 
 
-def bad_tick_fields(
-    prospective_frame: pd.DataFrame,
-    fraction: float,
-) -> list[str | None]:
-    """Classify anomalous high/low fields across one ordered trading day."""
-    frame = prospective_frame
-    size = len(frame)
-    closes = [float(value) for value in frame["c"]]
-    highs = [float(value) for value in frame["h"]]
-    lows = [float(value) for value in frame["l"]]
-    flagged_field: dict[int, str] = {}
+def bad_tick_manifest_entries(
+    symbol: str,
+    day: date,
+    merged_frame: pd.DataFrame,
+    quarantined_timestamps: list[pd.Timestamp],
+) -> list[dict]:
+    """Build backward-compatible per-bar quarantine manifest entries."""
+    if not quarantined_timestamps:
+        return []
 
-    for _ in range(10):
-        excluded = set(flagged_field)
-        new_flagged_field: dict[int, str] = {}
-        for position in range(size):
-            references = _gather_references(
-                position,
-                size,
-                closes,
-                excluded,
+    position_by_timestamp = {
+        timestamp: position for position, timestamp in enumerate(merged_frame.index)
+    }
+    quarantined_positions = {
+        position_by_timestamp[timestamp]
+        for timestamp in quarantined_timestamps
+        if timestamp in position_by_timestamp
+    }
+    entries: list[dict] = []
+    for run in _contiguous_runs(sorted(quarantined_positions)):
+        reference = _close_reference_for_run(merged_frame, run, quarantined_positions)
+        for position in run:
+            row = merged_frame.iloc[position]
+            high_distance = _distance_from_reference(float(row["h"]), reference)
+            low_distance = _distance_from_reference(float(row["l"]), reference)
+            field = "high" if high_distance >= low_distance else "low"
+            column = "h" if field == "high" else "l"
+            entries.append(
+                {
+                    "timestamp": merged_frame.index[position],
+                    "symbol": symbol,
+                    "day": day,
+                    "field": field,
+                    "value": float(row[column]),
+                }
             )
-            if len(references) < 2:
-                if position in flagged_field:
-                    new_flagged_field[position] = flagged_field[position]
-                continue
-
-            reference = median(references)
-            if _deviates(highs[position], reference, fraction):
-                new_flagged_field[position] = "high"
-            elif _deviates(lows[position], reference, fraction):
-                new_flagged_field[position] = "low"
-
-        # If every position is excluded, sticky deferral cannot recover false
-        # positives caused by a short split-level frame. Re-anchor that fully
-        # starved state to the day's close median before continuing iteration.
-        if size and len(new_flagged_field) == size:
-            day_reference = median(closes)
-            new_flagged_field = {}
-            for position in range(size):
-                if _deviates(highs[position], day_reference, fraction):
-                    new_flagged_field[position] = "high"
-                elif _deviates(lows[position], day_reference, fraction):
-                    new_flagged_field[position] = "low"
-
-        if new_flagged_field == flagged_field:
-            flagged_field = new_flagged_field
-            break
-        flagged_field = new_flagged_field
-
-    return [flagged_field.get(position) for position in range(size)]
-
-
-def is_bad_tick(
-    prospective_frame: pd.DataFrame,
-    position: int,
-    fraction: float,
-) -> str | None:
-    """Return one position's result from the per-day bad-tick classifier."""
-    if position < 0 or position >= len(prospective_frame):
-        return None
-    return bad_tick_fields(prospective_frame, fraction)[position]
+    return entries
 
 
 def _quarantine_day(
@@ -195,49 +184,28 @@ def _quarantine_day(
     existing: pd.DataFrame | None,
     incoming: pd.DataFrame,
     bad_tick_neighbor_fraction: float,
-) -> tuple[pd.DataFrame, list[dict], dict | None]:
+    max_bad_run_bars: int,
+    quarantine_abort_fraction: float,
+) -> tuple[pd.DataFrame, list[dict], list[dict]]:
     """Classify a merged day and return the frame that is safe to store."""
     prospective = _merge_frames(existing, incoming)
-    fields = bad_tick_fields(prospective, bad_tick_neighbor_fraction)
-    flagged_count = sum(field is not None for field in fields)
-    flagged_fraction = flagged_count / len(prospective)
-    if flagged_fraction > 0.5:
-        return (
-            prospective,
-            [],
-            {
-                "symbol": symbol,
-                "day": day,
-                "reason": (
-                    "bad-tick classifier flagged more than half the day's bars "
-                    f"-- {flagged_count} of {len(prospective)} positions"
-                ),
-            },
-        )
-
-    quarantined_timestamps: list[pd.Timestamp] = []
-    quarantined: list[dict] = []
-
-    for position, timestamp in enumerate(prospective.index):
-        offending_field = fields[position]
-        if offending_field is None:
-            continue
-
-        field_column = "h" if offending_field == "high" else "l"
-        offending_value = float(prospective.iloc[position][field_column])
-        quarantined_timestamps.append(timestamp)
-        quarantined.append(
-            {
-                "timestamp": timestamp,
-                "symbol": symbol,
-                "day": day,
-                "field": offending_field,
-                "value": offending_value,
-            }
-        )
+    quarantined_timestamps, validation_errors = classify_bad_ticks(
+        prospective,
+        bad_tick_neighbor_fraction=bad_tick_neighbor_fraction,
+        max_bad_run_bars=max_bad_run_bars,
+        quarantine_abort_fraction=quarantine_abort_fraction,
+        symbol=symbol,
+        day=day,
+    )
+    quarantined = bad_tick_manifest_entries(
+        symbol,
+        day,
+        prospective,
+        quarantined_timestamps,
+    )
 
     surviving = prospective.drop(index=quarantined_timestamps)
-    return surviving, quarantined, None
+    return surviving, quarantined, validation_errors
 
 
 def _day_return(frame: pd.DataFrame) -> float:
@@ -317,6 +285,8 @@ def ingest_file(
     etf_leverage_factor: float = 2.0,
     etf_tolerance: float = 0.25,
     bad_tick_neighbor_fraction: float = 0.05,
+    max_bad_run_bars: int = 3,
+    quarantine_abort_fraction: float = 0.05,
     etf_leverage_map: dict[str, float] = _DEFAULT_ETF_LEVERAGE_MAP,
     underlying_symbol: str = "SNDK",
 ) -> dict:
@@ -345,12 +315,14 @@ def ingest_file(
     validation_errors: list[dict] = []
     for (symbol, day), incoming in incoming_by_day.items():
         existing = store.read_1m_day(data_root, symbol, day)
-        merged, day_quarantine, validation_error = _quarantine_day(
+        merged, day_quarantine, day_validation_errors = _quarantine_day(
             symbol,
             day,
             existing,
             incoming,
             bad_tick_neighbor_fraction,
+            max_bad_run_bars,
+            quarantine_abort_fraction,
         )
         store.write_1m_day(data_root, symbol, day, merged)
         daily_bar = _daily_bar(day, merged)
@@ -362,8 +334,7 @@ def ingest_file(
                 _merge_frames(existing_daily, daily_bar),
             )
         quarantined.extend(day_quarantine)
-        if validation_error is not None:
-            validation_errors.append(validation_error)
+        validation_errors.extend(day_validation_errors)
 
     touched = set(incoming_by_day)
     result_summary = {
@@ -394,6 +365,8 @@ def ingest_all(
     etf_leverage_factor: float = 2.0,
     etf_tolerance: float = 0.25,
     bad_tick_neighbor_fraction: float = 0.05,
+    max_bad_run_bars: int = 3,
+    quarantine_abort_fraction: float = 0.05,
     etf_leverage_map: dict[str, float] = _DEFAULT_ETF_LEVERAGE_MAP,
     underlying_symbol: str = "SNDK",
 ) -> dict:
@@ -410,6 +383,8 @@ def ingest_all(
             etf_leverage_factor=etf_leverage_factor,
             etf_tolerance=etf_tolerance,
             bad_tick_neighbor_fraction=bad_tick_neighbor_fraction,
+            max_bad_run_bars=max_bad_run_bars,
+            quarantine_abort_fraction=quarantine_abort_fraction,
             etf_leverage_map=etf_leverage_map,
             underlying_symbol=underlying_symbol,
         )
@@ -451,10 +426,9 @@ def ingest_all(
 
 
 __all__ = [
-    "bad_tick_fields",
+    "bad_tick_manifest_entries",
     "etf_leverage_warning",
     "ingest_all",
     "ingest_file",
-    "is_bad_tick",
     "parse_result_block",
 ]

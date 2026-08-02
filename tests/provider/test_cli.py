@@ -43,6 +43,8 @@ def test_register_adds_provider_commands_with_handlers_and_defaults() -> None:
     assert ingest.etf_leverage_factor == 2.0
     assert ingest.etf_tolerance == 0.25
     assert ingest.bad_tick_neighbor_fraction == 0.05
+    assert ingest.max_bad_run_bars == 3
+    assert ingest.quarantine_abort_fraction == 0.05
 
     validate = parser.parse_args(
         [
@@ -60,6 +62,8 @@ def test_register_adds_provider_commands_with_handlers_and_defaults() -> None:
     assert validate.etf_leverage_factor == 2.0
     assert validate.etf_tolerance == 0.25
     assert validate.bad_tick_neighbor_fraction == 0.05
+    assert validate.max_bad_run_bars == 3
+    assert validate.quarantine_abort_fraction == 0.05
     assert validate.underlying_symbol == "SNDK"
 
 
@@ -133,6 +137,8 @@ def test_ingest_handler_uses_existing_ingest_pipeline(tmp_path, capsys) -> None:
         etf_leverage_factor=2.0,
         etf_tolerance=0.25,
         bad_tick_neighbor_fraction=0.05,
+        max_bad_run_bars=3,
+        quarantine_abort_fraction=0.05,
     )
 
     assert handle_ingest(args) == 0
@@ -153,10 +159,10 @@ def _stored_frame(*, bad_high: bool = False, leveraged: bool = False) -> pd.Data
         highs = [50.5, 50.75, 51.0]
         lows = [49.5, 49.75, 50.0]
     else:
-        opens = [100.0, 100.0, 101.0]
-        closes = [100.0, 101.0, 102.0]
-        highs = [101.0, 180.0 if bad_high else 102.0, 103.0]
-        lows = [99.0, 99.5, 100.5]
+        opens = [100.0, 180.0 if bad_high else 101.0, 102.0]
+        closes = [100.0, 180.0 if bad_high else 101.0, 102.0]
+        highs = [101.0, 180.5 if bad_high else 102.0, 103.0]
+        lows = [99.0, 179.5 if bad_high else 100.5, 101.5]
     return pd.DataFrame(
         {
             "o": opens,
@@ -176,7 +182,11 @@ def _stored_frame(*, bad_high: bool = False, leveraged: bool = False) -> pd.Data
     )
 
 
-def _validate_args(data_root: Path) -> argparse.Namespace:
+def _validate_args(
+    data_root: Path,
+    *,
+    quarantine_abort_fraction: float = 0.05,
+) -> argparse.Namespace:
     return argparse.Namespace(
         data_root=str(data_root),
         symbols="SNDK,SNXX",
@@ -185,6 +195,8 @@ def _validate_args(data_root: Path) -> argparse.Namespace:
         etf_leverage_factor=2.0,
         etf_tolerance=0.25,
         bad_tick_neighbor_fraction=0.05,
+        max_bad_run_bars=3,
+        quarantine_abort_fraction=quarantine_abort_fraction,
         underlying_symbol="SNDK",
     )
 
@@ -209,11 +221,13 @@ def test_validate_handler_reports_findings_without_writing_store(
     stored_paths = sorted((tmp_path / "bars" / "1m").rglob("*.parquet"))
     original_bytes = {path: path.read_bytes() for path in stored_paths}
 
-    assert handle_validate(_validate_args(tmp_path)) == 1
+    assert handle_validate(
+        _validate_args(tmp_path, quarantine_abort_fraction=0.5)
+    ) == 1
 
     output = capsys.readouterr().out
     assert "2026-07-01 SNDK bad_tick" in output
-    assert "field=high value=180.0" in output
+    assert "field=high value=180.5" in output
     assert "2026-07-01 SNXX leverage_warning" in output
     assert "expected_range=(1.5, 2.5) actual_ratio=0.5" in output
     assert {path: path.read_bytes() for path in stored_paths} == original_bytes
@@ -223,17 +237,58 @@ def test_validate_handler_reports_bad_ticks_at_day_edges(tmp_path, capsys) -> No
     day = date(2026, 7, 1)
     frame = pd.DataFrame(
         {
-            "o": [100.0, 100.0, 100.5],
-            "h": [180.0, 101.0, 102.0],
-            "l": [99.0, 40.0, 40.0],
-            "c": [100.0, 100.5, 101.0],
-            "v": [100.0, 100.0, 100.0],
+            "o": [180.0, 100.0, 100.2, 100.1, 100.3, 40.0],
+            "h": [180.5, 100.5, 100.7, 100.6, 100.8, 40.5],
+            "l": [179.5, 99.5, 99.7, 99.6, 99.8, 39.5],
+            "c": [180.0, 100.0, 100.2, 100.1, 100.3, 40.0],
+            "v": [100.0, 100.0, 100.0, 100.0, 100.0, 100.0],
         },
         index=pd.DatetimeIndex(
             [
                 "2026-07-01T13:30:00Z",
                 "2026-07-01T13:31:00Z",
                 "2026-07-01T13:32:00Z",
+                "2026-07-01T13:33:00Z",
+                "2026-07-01T13:34:00Z",
+                "2026-07-01T13:35:00Z",
+            ],
+            name="t",
+        ),
+    )
+    write_1m_day(tmp_path, "SNDK", day, frame)
+
+    assert handle_validate(
+        _validate_args(tmp_path, quarantine_abort_fraction=0.5)
+    ) == 1
+
+    assert capsys.readouterr().out.splitlines() == [
+        "2026-07-01 SNDK bad_tick "
+        "timestamp=2026-07-01T13:30:00+00:00 field=high value=180.5",
+        "2026-07-01 SNDK bad_tick "
+        "timestamp=2026-07-01T13:35:00+00:00 field=low value=39.5",
+    ]
+
+
+def test_validate_handler_reports_bad_tick_validation_errors(
+    tmp_path, capsys
+) -> None:
+    day = date(2026, 7, 1)
+    frame = pd.DataFrame(
+        {
+            "o": [100.0, 180.0, 180.1, 180.2, 180.3, 100.2],
+            "h": [100.5, 180.5, 180.6, 180.7, 180.8, 100.7],
+            "l": [99.5, 179.5, 179.6, 179.7, 179.8, 99.7],
+            "c": [100.0, 180.0, 180.1, 180.2, 180.3, 100.2],
+            "v": [100.0, 100.0, 100.0, 100.0, 100.0, 100.0],
+        },
+        index=pd.DatetimeIndex(
+            [
+                "2026-07-01T13:30:00Z",
+                "2026-07-01T13:31:00Z",
+                "2026-07-01T13:32:00Z",
+                "2026-07-01T13:33:00Z",
+                "2026-07-01T13:34:00Z",
+                "2026-07-01T13:35:00Z",
             ],
             name="t",
         ),
@@ -243,12 +298,10 @@ def test_validate_handler_reports_bad_ticks_at_day_edges(tmp_path, capsys) -> No
     assert handle_validate(_validate_args(tmp_path)) == 1
 
     assert capsys.readouterr().out.splitlines() == [
-        "2026-07-01 SNDK bad_tick "
-        "timestamp=2026-07-01T13:30:00+00:00 field=high value=180.0",
-        "2026-07-01 SNDK bad_tick "
-        "timestamp=2026-07-01T13:31:00+00:00 field=low value=40.0",
-        "2026-07-01 SNDK bad_tick "
-        "timestamp=2026-07-01T13:32:00+00:00 field=low value=40.0",
+        "2026-07-01 SNDK validation_error "
+        "reason=rule 4: candidate run exceeds max_bad_run_bars=3; "
+        "span 2026-07-01 13:31:00+00:00 to "
+        "2026-07-01 13:34:00+00:00 (4 bars)",
     ]
 
 

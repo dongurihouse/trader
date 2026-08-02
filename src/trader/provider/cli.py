@@ -7,6 +7,7 @@ from datetime import date, timedelta
 from pathlib import Path
 import sys
 
+from trader.provider.badticks import classify_bad_ticks
 from trader.provider import ingest as provider_ingest
 from trader.provider import relay, store
 from trader.provider.calendar import load_calendar
@@ -60,6 +61,8 @@ def handle_ingest(args: argparse.Namespace) -> int:
         etf_leverage_factor=args.etf_leverage_factor,
         etf_tolerance=args.etf_tolerance,
         bad_tick_neighbor_fraction=args.bad_tick_neighbor_fraction,
+        max_bad_run_bars=args.max_bad_run_bars,
+        quarantine_abort_fraction=args.quarantine_abort_fraction,
     )
     for symbol in sorted(
         summary.keys() - {"quarantined", "validation_errors", "etf_warnings"}
@@ -99,20 +102,30 @@ def handle_validate(args: argparse.Namespace) -> int:
             if frame is None or frame.empty:
                 continue
             ordered = frame.sort_index()
-            fields = provider_ingest.bad_tick_fields(
+            quarantined_timestamps, validation_errors = classify_bad_ticks(
                 ordered,
-                args.bad_tick_neighbor_fraction,
+                bad_tick_neighbor_fraction=args.bad_tick_neighbor_fraction,
+                max_bad_run_bars=args.max_bad_run_bars,
+                quarantine_abort_fraction=args.quarantine_abort_fraction,
+                symbol=symbol,
+                day=day,
             )
-            for position, field in enumerate(fields):
-                if field is None:
-                    continue
-                column = "h" if field == "high" else "l"
-                timestamp = ordered.index[position]
-                value = float(ordered.iloc[position][column])
+            for entry in provider_ingest.bad_tick_manifest_entries(
+                symbol,
+                day,
+                ordered,
+                quarantined_timestamps,
+            ):
                 print(
                     f"{day.isoformat()} {symbol} bad_tick "
-                    f"timestamp={timestamp.isoformat()} "
-                    f"field={field} value={value}"
+                    f"timestamp={entry['timestamp'].isoformat()} "
+                    f"field={entry['field']} value={entry['value']}"
+                )
+                found = True
+            for error in validation_errors:
+                print(
+                    f"{day.isoformat()} {symbol} validation_error "
+                    f"reason={error['reason']}"
                 )
                 found = True
 
@@ -169,6 +182,12 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         type=float,
         default=0.05,
     )
+    ingest.add_argument("--max-bad-run-bars", type=int, default=3)
+    ingest.add_argument(
+        "--quarantine-abort-fraction",
+        type=float,
+        default=0.05,
+    )
     ingest.set_defaults(func=handle_ingest)
 
     validate = subparsers.add_parser(
@@ -183,6 +202,12 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     validate.add_argument("--etf-tolerance", type=float, default=0.25)
     validate.add_argument(
         "--bad-tick-neighbor-fraction",
+        type=float,
+        default=0.05,
+    )
+    validate.add_argument("--max-bad-run-bars", type=int, default=3)
+    validate.add_argument(
+        "--quarantine-abort-fraction",
         type=float,
         default=0.05,
     )

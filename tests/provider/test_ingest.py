@@ -14,6 +14,7 @@ from trader.provider.store import read_1d, read_1m_day, write_1m_day
 
 BAR_COLUMNS = ["o", "h", "l", "c", "v"]
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "raw"
+LOOSE_QUARANTINE_ABORT_FRACTION = 0.5
 
 
 def _payload(results: list[dict]) -> dict:
@@ -103,7 +104,87 @@ def test_parse_result_block_returns_typed_empty_frame_when_all_bars_drop() -> No
 
 
 def test_ingest_file_quarantines_bad_tick_and_accepts_matching_etf(tmp_path) -> None:
-    summary = ingest_file(FIXTURE_ROOT / "sample_dump.json", tmp_path)
+    path = tmp_path / "sample-a9-dump.json"
+    data_root = tmp_path / "store"
+    _write_dump(
+        path,
+        [
+            _result(
+                "SNDK",
+                [
+                    _bar(
+                        "2026-07-01T13:30:00Z",
+                        open_price=100.0,
+                        close_price=100.0,
+                        high_price=101.0,
+                        low_price=99.0,
+                        volume=1000,
+                    ),
+                    {
+                        **_bar(
+                            "2026-07-01T13:31:00Z",
+                            open_price=100.0,
+                            close_price=100.5,
+                            high_price=101.0,
+                            low_price=99.5,
+                            volume=100,
+                        ),
+                        "interpolated": True,
+                    },
+                    _bar(
+                        "2026-07-01T13:32:00Z",
+                        open_price=160.0,
+                        close_price=160.0,
+                        high_price=160.5,
+                        low_price=159.5,
+                        volume=1100,
+                    ),
+                    _bar(
+                        "2026-07-01T13:33:00Z",
+                        open_price=101.0,
+                        close_price=102.0,
+                        high_price=103.0,
+                        low_price=100.5,
+                        volume=1200,
+                    ),
+                ],
+            ),
+            _result(
+                "SNXX",
+                [
+                    _bar(
+                        "2026-07-01T13:30:00Z",
+                        open_price=50.0,
+                        close_price=50.0,
+                        high_price=50.5,
+                        low_price=49.5,
+                        volume=2000,
+                    ),
+                    _bar(
+                        "2026-07-01T13:31:00Z",
+                        open_price=50.0,
+                        close_price=51.0,
+                        high_price=51.5,
+                        low_price=49.8,
+                        volume=2100,
+                    ),
+                    _bar(
+                        "2026-07-01T13:32:00Z",
+                        open_price=51.0,
+                        close_price=52.0,
+                        high_price=52.5,
+                        low_price=50.8,
+                        volume=2200,
+                    ),
+                ],
+            ),
+        ],
+    )
+    summary = ingest_file(
+        path,
+        data_root,
+        quarantine_abort_fraction=LOOSE_QUARANTINE_ABORT_FRACTION,
+    )
 
     assert summary["SNDK"] == {
         "bars": 3,
@@ -122,11 +203,11 @@ def test_ingest_file_quarantines_bad_tick_and_accepts_matching_etf(tmp_path) -> 
             "symbol": "SNDK",
             "day": date(2026, 7, 1),
             "field": "high",
-            "value": 160.0,
+            "value": 160.5,
         }
     ]
 
-    stored = read_1m_day(tmp_path, "SNDK", date(2026, 7, 1))
+    stored = read_1m_day(data_root, "SNDK", date(2026, 7, 1))
     assert stored is not None
     assert list(stored.index) == [
         pd.Timestamp("2026-07-01T13:30:00Z"),
@@ -185,7 +266,12 @@ def test_ingest_file_quarantines_two_consecutive_bad_ticks(tmp_path) -> None:
         ],
     )
 
-    summary = ingest_file(path, data_root, bad_tick_neighbor_fraction=0.05)
+    summary = ingest_file(
+        path,
+        data_root,
+        bad_tick_neighbor_fraction=0.05,
+        quarantine_abort_fraction=LOOSE_QUARANTINE_ABORT_FRACTION,
+    )
 
     assert summary["quarantined"] == [
         {
@@ -282,7 +368,12 @@ def test_ingest_file_quarantines_bad_run_ending_at_last_bar(tmp_path) -> None:
         ],
     )
 
-    summary = ingest_file(path, data_root, bad_tick_neighbor_fraction=0.05)
+    summary = ingest_file(
+        path,
+        data_root,
+        bad_tick_neighbor_fraction=0.05,
+        quarantine_abort_fraction=LOOSE_QUARANTINE_ABORT_FRACTION,
+    )
 
     assert summary["quarantined"] == [
         {
@@ -380,7 +471,12 @@ def test_ingest_file_quarantines_bad_run_starting_at_first_bar(tmp_path) -> None
         ],
     )
 
-    summary = ingest_file(path, data_root, bad_tick_neighbor_fraction=0.05)
+    summary = ingest_file(
+        path,
+        data_root,
+        bad_tick_neighbor_fraction=0.05,
+        quarantine_abort_fraction=LOOSE_QUARANTINE_ABORT_FRACTION,
+    )
 
     assert summary["quarantined"] == [
         {
@@ -754,17 +850,21 @@ def test_revision_of_existing_bar_is_retroactively_quarantined_not_reverted(
                 [
                     _bar(
                         "2026-07-03T13:31:00Z",
-                        open_price=100,
-                        close_price=100.5,
-                        high_price=180,
-                        low_price=99,
+                        open_price=180,
+                        close_price=180,
+                        high_price=180.5,
+                        low_price=179.5,
                     )
                 ],
             )
         ],
     )
 
-    summary = ingest_file(path, tmp_path)
+    summary = ingest_file(
+        path,
+        tmp_path,
+        quarantine_abort_fraction=LOOSE_QUARANTINE_ABORT_FRACTION,
+    )
 
     assert summary["SNDK"]["bars"] == 1
     assert summary["quarantined"] == [
@@ -773,7 +873,7 @@ def test_revision_of_existing_bar_is_retroactively_quarantined_not_reverted(
             "symbol": "SNDK",
             "day": day,
             "field": "high",
-            "value": 180.0,
+            "value": 180.5,
         }
     ]
     stored = read_1m_day(tmp_path, "SNDK", day)
@@ -790,10 +890,10 @@ def test_ingest_file_retroactively_quarantines_preexisting_bad_tick(
     day = date(2026, 7, 4)
     existing = pd.DataFrame(
         {
-            "o": [100.0, 100.0, 100.0],
-            "h": [101.0, 180.0, 102.0],
-            "l": [99.0, 99.0, 99.0],
-            "c": [100.0, 100.5, 101.0],
+            "o": [100.0, 180.0, 100.0],
+            "h": [101.0, 180.5, 102.0],
+            "l": [99.0, 179.5, 99.0],
+            "c": [100.0, 180.0, 101.0],
             "v": [100.0, 100.0, 100.0],
         },
         index=pd.DatetimeIndex(
@@ -823,7 +923,11 @@ def test_ingest_file_retroactively_quarantines_preexisting_bad_tick(
         ],
     )
 
-    summary = ingest_file(path, tmp_path)
+    summary = ingest_file(
+        path,
+        tmp_path,
+        quarantine_abort_fraction=LOOSE_QUARANTINE_ABORT_FRACTION,
+    )
 
     assert summary["quarantined"] == [
         {
@@ -831,7 +935,7 @@ def test_ingest_file_retroactively_quarantines_preexisting_bad_tick(
             "symbol": "SNDK",
             "day": day,
             "field": "high",
-            "value": 180.0,
+            "value": 180.5,
         }
     ]
     stored = read_1m_day(tmp_path, "SNDK", day)
@@ -846,7 +950,8 @@ def test_ingest_file_retroactively_quarantines_preexisting_bad_tick(
 def test_ingest_file_aborts_quarantine_when_more_than_half_day_is_flagged(
     tmp_path,
 ) -> None:
-    path = tmp_path / "low-and-edges.json"
+    path = tmp_path / "majority-full-field-runs.json"
+    day = date(2026, 7, 7)
     _write_dump(
         path,
         [
@@ -855,52 +960,93 @@ def test_ingest_file_aborts_quarantine_when_more_than_half_day_is_flagged(
                 [
                     _bar(
                         "2026-07-07T13:30:00Z",
-                        open_price=100,
-                        close_price=100,
-                        high_price=180,
-                        low_price=99,
+                        open_price=100.0,
+                        close_price=100.0,
+                        high_price=100.5,
+                        low_price=99.5,
                     ),
                     _bar(
                         "2026-07-07T13:31:00Z",
-                        open_price=100,
-                        close_price=100.5,
-                        high_price=101,
-                        low_price=40,
+                        open_price=180.0,
+                        close_price=180.0,
+                        high_price=180.5,
+                        low_price=179.5,
                     ),
                     _bar(
                         "2026-07-07T13:32:00Z",
-                        open_price=100.5,
-                        close_price=101,
-                        high_price=102,
-                        low_price=40,
+                        open_price=180.1,
+                        close_price=180.1,
+                        high_price=180.6,
+                        low_price=179.6,
+                    ),
+                    _bar(
+                        "2026-07-07T13:33:00Z",
+                        open_price=100.1,
+                        close_price=100.1,
+                        high_price=100.6,
+                        low_price=99.6,
+                    ),
+                    _bar(
+                        "2026-07-07T13:34:00Z",
+                        open_price=40.0,
+                        close_price=40.0,
+                        high_price=40.5,
+                        low_price=39.5,
+                    ),
+                    _bar(
+                        "2026-07-07T13:35:00Z",
+                        open_price=40.1,
+                        close_price=40.1,
+                        high_price=40.6,
+                        low_price=39.6,
+                    ),
+                    _bar(
+                        "2026-07-07T13:36:00Z",
+                        open_price=100.2,
+                        close_price=100.2,
+                        high_price=100.7,
+                        low_price=99.7,
                     ),
                 ],
             )
         ],
     )
 
-    summary = ingest_file(path, tmp_path)
+    summary = ingest_file(
+        path,
+        tmp_path,
+        quarantine_abort_fraction=LOOSE_QUARANTINE_ABORT_FRACTION,
+    )
 
     assert summary["quarantined"] == []
     assert summary["validation_errors"] == [
         {
             "symbol": "SNDK",
-            "day": date(2026, 7, 7),
+            "day": day,
+            "rule": "rule 5",
+            "span_start": pd.Timestamp("2026-07-07T13:30:00Z"),
+            "span_end": pd.Timestamp("2026-07-07T13:36:00Z"),
+            "bar_count": 7,
             "reason": (
-                "bad-tick classifier flagged more than half the day's bars "
-                "-- 3 of 3 positions"
+                "rule 5: quarantine abort: 4 of 7 bars flagged (57.143%), "
+                "exceeding quarantine_abort_fraction=0.5; span "
+                "2026-07-07 13:30:00+00:00 to "
+                "2026-07-07 13:36:00+00:00 (7 bars)"
             ),
         },
     ]
-    stored = read_1m_day(tmp_path, "SNDK", date(2026, 7, 7))
+    stored = read_1m_day(tmp_path, "SNDK", day)
     assert stored is not None
     assert list(stored.index) == [
         pd.Timestamp("2026-07-07T13:30:00Z"),
         pd.Timestamp("2026-07-07T13:31:00Z"),
         pd.Timestamp("2026-07-07T13:32:00Z"),
+        pd.Timestamp("2026-07-07T13:33:00Z"),
+        pd.Timestamp("2026-07-07T13:34:00Z"),
+        pd.Timestamp("2026-07-07T13:35:00Z"),
+        pd.Timestamp("2026-07-07T13:36:00Z"),
     ]
-    assert stored["h"].tolist() == [180.0, 101.0, 102.0]
-    assert stored["l"].tolist() == [99.0, 40.0, 40.0]
+    assert stored["c"].tolist() == [100.0, 180.0, 180.1, 100.1, 40.0, 40.1, 100.2]
 
 
 def test_ingest_file_quarantines_multiple_positions_including_both_day_edges(
@@ -911,10 +1057,10 @@ def test_ingest_file_quarantines_multiple_positions_including_both_day_edges(
     bars = [
         _bar(
             "2026-07-24T13:30:00Z",
-            open_price=100.0,
-            close_price=100.0,
-            high_price=180.0,
-            low_price=99.0,
+            open_price=180.0,
+            close_price=180.0,
+            high_price=180.5,
+            low_price=179.5,
         ),
         _bar(
             "2026-07-24T13:31:00Z",
@@ -939,17 +1085,17 @@ def test_ingest_file_quarantines_multiple_positions_including_both_day_edges(
         ),
         _bar(
             "2026-07-24T13:34:00Z",
-            open_price=100.5,
-            close_price=100.5,
-            high_price=101.0,
-            low_price=40.0,
-        ),
-        _bar(
-            "2026-07-24T13:35:00Z",
             open_price=100.4,
             close_price=100.4,
             high_price=100.9,
             low_price=99.9,
+        ),
+        _bar(
+            "2026-07-24T13:35:00Z",
+            open_price=40.0,
+            close_price=40.0,
+            high_price=40.5,
+            low_price=39.5,
         ),
         _bar(
             "2026-07-24T13:36:00Z",
@@ -960,15 +1106,41 @@ def test_ingest_file_quarantines_multiple_positions_including_both_day_edges(
         ),
         _bar(
             "2026-07-24T13:37:00Z",
-            open_price=101.0,
-            close_price=101.0,
-            high_price=102.0,
-            low_price=40.0,
+            open_price=100.3,
+            close_price=100.3,
+            high_price=100.8,
+            low_price=99.8,
+        ),
+        _bar(
+            "2026-07-24T13:38:00Z",
+            open_price=100.1,
+            close_price=100.1,
+            high_price=100.6,
+            low_price=99.6,
+        ),
+        _bar(
+            "2026-07-24T13:39:00Z",
+            open_price=100.4,
+            close_price=100.4,
+            high_price=100.9,
+            low_price=99.9,
+        ),
+        _bar(
+            "2026-07-24T13:40:00Z",
+            open_price=180.0,
+            close_price=180.0,
+            high_price=180.5,
+            low_price=179.5,
         ),
     ]
     _write_dump(path, [_result("SNDK", bars)])
 
-    summary = ingest_file(path, tmp_path, bad_tick_neighbor_fraction=0.05)
+    summary = ingest_file(
+        path,
+        tmp_path,
+        bad_tick_neighbor_fraction=0.05,
+        quarantine_abort_fraction=LOOSE_QUARANTINE_ABORT_FRACTION,
+    )
 
     assert summary["quarantined"] == [
         {
@@ -976,21 +1148,21 @@ def test_ingest_file_quarantines_multiple_positions_including_both_day_edges(
             "symbol": "SNDK",
             "day": day,
             "field": "high",
-            "value": 180.0,
+            "value": 180.5,
         },
         {
-            "timestamp": pd.Timestamp("2026-07-24T13:34:00Z"),
+            "timestamp": pd.Timestamp("2026-07-24T13:35:00Z"),
             "symbol": "SNDK",
             "day": day,
             "field": "low",
-            "value": 40.0,
+            "value": 39.5,
         },
         {
-            "timestamp": pd.Timestamp("2026-07-24T13:37:00Z"),
+            "timestamp": pd.Timestamp("2026-07-24T13:40:00Z"),
             "symbol": "SNDK",
             "day": day,
-            "field": "low",
-            "value": 40.0,
+            "field": "high",
+            "value": 180.5,
         },
     ]
     assert summary["validation_errors"] == []
@@ -1000,8 +1172,11 @@ def test_ingest_file_quarantines_multiple_positions_including_both_day_edges(
         pd.Timestamp("2026-07-24T13:31:00Z"),
         pd.Timestamp("2026-07-24T13:32:00Z"),
         pd.Timestamp("2026-07-24T13:33:00Z"),
-        pd.Timestamp("2026-07-24T13:35:00Z"),
+        pd.Timestamp("2026-07-24T13:34:00Z"),
         pd.Timestamp("2026-07-24T13:36:00Z"),
+        pd.Timestamp("2026-07-24T13:37:00Z"),
+        pd.Timestamp("2026-07-24T13:38:00Z"),
+        pd.Timestamp("2026-07-24T13:39:00Z"),
     ]
 
 
@@ -1094,6 +1269,7 @@ def test_later_batch_retroactively_quarantines_stored_run_and_recomputes_daily(
         second_path,
         data_root,
         bad_tick_neighbor_fraction=0.05,
+        quarantine_abort_fraction=LOOSE_QUARANTINE_ABORT_FRACTION,
     )
 
     assert second_summary["quarantined"] == [
@@ -1227,24 +1403,52 @@ def test_ingest_all_aggregates_validation_errors_without_treating_them_as_symbol
                 [
                     _bar(
                         "2026-07-26T13:30:00Z",
-                        open_price=100,
-                        close_price=100,
-                        high_price=180,
-                        low_price=99,
+                        open_price=100.0,
+                        close_price=100.0,
+                        high_price=100.5,
+                        low_price=99.5,
                     ),
                     _bar(
                         "2026-07-26T13:31:00Z",
-                        open_price=100,
-                        close_price=100.5,
-                        high_price=101,
-                        low_price=40,
+                        open_price=180.0,
+                        close_price=180.0,
+                        high_price=180.5,
+                        low_price=179.5,
                     ),
                     _bar(
                         "2026-07-26T13:32:00Z",
-                        open_price=100.5,
-                        close_price=101,
-                        high_price=102,
-                        low_price=40,
+                        open_price=180.1,
+                        close_price=180.1,
+                        high_price=180.6,
+                        low_price=179.6,
+                    ),
+                    _bar(
+                        "2026-07-26T13:33:00Z",
+                        open_price=100.1,
+                        close_price=100.1,
+                        high_price=100.6,
+                        low_price=99.6,
+                    ),
+                    _bar(
+                        "2026-07-26T13:34:00Z",
+                        open_price=40.0,
+                        close_price=40.0,
+                        high_price=40.5,
+                        low_price=39.5,
+                    ),
+                    _bar(
+                        "2026-07-26T13:35:00Z",
+                        open_price=40.1,
+                        close_price=40.1,
+                        high_price=40.6,
+                        low_price=39.6,
+                    ),
+                    _bar(
+                        "2026-07-26T13:36:00Z",
+                        open_price=100.2,
+                        close_price=100.2,
+                        high_price=100.7,
+                        low_price=99.7,
                     ),
                 ],
             )
@@ -1266,15 +1470,25 @@ def test_ingest_all_aggregates_validation_errors_without_treating_them_as_symbol
         ],
     )
 
-    summary = ingest_all(raw_root, tmp_path / "store")
+    summary = ingest_all(
+        raw_root,
+        tmp_path / "store",
+        quarantine_abort_fraction=LOOSE_QUARANTINE_ABORT_FRACTION,
+    )
 
     assert summary["validation_errors"] == [
         {
             "symbol": "SNDK",
             "day": day,
+            "rule": "rule 5",
+            "span_start": pd.Timestamp("2026-07-26T13:30:00Z"),
+            "span_end": pd.Timestamp("2026-07-26T13:36:00Z"),
+            "bar_count": 7,
             "reason": (
-                "bad-tick classifier flagged more than half the day's bars "
-                "-- 3 of 3 positions"
+                "rule 5: quarantine abort: 4 of 7 bars flagged (57.143%), "
+                "exceeding quarantine_abort_fraction=0.5; span "
+                "2026-07-26 13:30:00+00:00 to "
+                "2026-07-26 13:36:00+00:00 (7 bars)"
             ),
         }
     ]
