@@ -235,6 +235,47 @@ correctness comes from the PIT rules in §4.
   16:27Z printed at 1615.00 against a 1430-1442 tape); ingest must quarantine, not
   ingest, such bars.
 
+## 10a. Bad-tick policy (amendment A9, 2026-08-02 — normative)
+
+Two review rounds produced detectors that were locally reasonable and globally wrong (a
+neighbour-pair rule that missed runs at day edges; then a median-vote classifier that
+inverted whenever the bad run was a majority of the frame, deleting good bars and keeping
+corrupt ones). The cause was using a *vote* where the phenomenon is an *excursion*. The
+policy below replaces threshold tuning with a definition.
+
+**Definition.** A bad tick is a SHORT excursion that RETURNS: a contiguous run of bars
+whose prices depart from the local level while the level immediately before the run and
+immediately after the run agree with each other. A level that shifts and stays is a
+regime change (gap, halt-and-reopen, genuine repricing) and is never a bad tick,
+regardless of how large the move is or how much of the session it covers.
+
+**Rules.**
+1. Detection considers maximal contiguous candidate runs, never a global vote. No
+   statistic computed over the whole frame may decide any individual bar's fate.
+2. A run is quarantined only when all hold: (a) its length is at most
+   `max_bad_run_bars`; (b) the reference level before it and the reference level after it
+   agree within `bad_tick_neighbor_fraction`; (c) the run itself deviates from that
+   agreed level beyond the same fraction, in both high and low.
+3. Day-frame edges: a run touching the first or last bar has a reference on one side
+   only. It may still be quarantined, but only when the available reference side is
+   strictly longer than the run — never when the run is the majority of the frame.
+4. A candidate run longer than `max_bad_run_bars` is NEVER quarantined. It is recorded as
+   a validation error naming the symbol, day, and span, for the Dev to judge. Wholesale
+   corruption is escalated, never silently repaired.
+5. Total quarantine per (symbol, day) is capped at `quarantine_abort_fraction` of the
+   frame, measured against the ORIGINAL frame size. Exceeding it aborts quarantining for
+   that day and records a validation error. This cap is a backstop only; rules 2-4 must
+   make it unreachable in normal operation.
+6. Bias rule, decisive on any ambiguity: prefer keeping a suspect bar over deleting a
+   good one. Deleted data is unrecoverable and silently corrupts every downstream signal;
+   a retained suspect bar is visible, reviewable, and fixable later. Any tie, any
+   insufficient-context case, any detector disagreement resolves toward retention plus a
+   validation error.
+7. Retroactive re-evaluation stands (from the prior fix): each ingest classifies the full
+   merged frame — stored plus incoming — so a bar whose context was insufficient earlier
+   is judged once the surrounding bars arrive, and the derived daily bar is recomputed
+   from the surviving frame.
+
 ## 11. Migration and decommissioning
 
 1. Data: copy bar stores, raw dumps, events/options captures, news archive, and calendar
