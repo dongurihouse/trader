@@ -270,10 +270,24 @@ class SessionRunner:
                     self._reject(decision)
                     continue
 
+                try:
+                    self._broker.submit(decision)
+                except Exception as exc:
+                    self._emit(
+                        AlgoErrorEvent(
+                            ev="algo_error",
+                            ts=asof,
+                            session=self._session_id,
+                            algo_id=decision.algo_id,
+                            error=f"broker submit failed: {exc}",
+                            traceback=traceback.format_exc(),
+                        )
+                    )
+                    continue
+
                 self._emit_ticket(decision, asof)
                 self._real_book.register_ticket(decision)
                 self._real_entry_in_flight = True
-                self._broker.submit(decision)
 
         self._bars_processed += 1
 

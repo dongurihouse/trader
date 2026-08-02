@@ -24,7 +24,7 @@ from trader.contracts import (
 )
 from trader.contracts.testing import CollectingTelemetry, FakeMarketData
 from trader.execution.book import RealBook, ShadowBook
-from trader.execution.broker import ManualBroker, SimBroker
+from trader.execution.broker import ApiBroker, ManualBroker, SimBroker
 from trader.execution.broker.manual import Style, record_fill
 from trader.execution.config import (
     AccountConfig,
@@ -489,6 +489,122 @@ def test_last_bar_pending_ticket_does_not_consume_slot_or_block_next_day() -> No
         for record in real_fills
     ] == [(True, "entry")]
     assert real_book.state.entries_today == 1
+
+
+def test_api_broker_submit_failure_emits_error_without_ticket_or_in_flight() -> None:
+    first_intent_ts = BAR_START + timedelta(minutes=1)
+    later_intent_ts = BAR_START + timedelta(minutes=2)
+    data = FakeMarketData(
+        {
+            "SNXX": _frame(
+                (BAR_START, 100.0, 101.0, 99.0, 100.0),
+                (BAR_START + timedelta(minutes=1), 100.0, 101.0, 99.0, 100.0),
+            )
+        }
+    )
+    first = ScriptedAlgo(
+        "api-first",
+        {first_intent_ts: [_intent("api-first", first_intent_ts)]},
+    )
+    same_bar = ScriptedAlgo(
+        "api-same-bar",
+        {first_intent_ts: [_intent("api-same-bar", first_intent_ts)]},
+    )
+    later = ScriptedAlgo(
+        "api-later",
+        {later_intent_ts: [_intent("api-later", later_intent_ts)]},
+    )
+    telemetry = CollectingTelemetry()
+    runner, real_book, _shadow_book = _runner(
+        data=data,
+        telemetry=telemetry,
+        roster=[
+            RosterEntry(first, "emitting"),
+            RosterEntry(same_bar, "emitting"),
+            RosterEntry(later, "emitting"),
+        ],
+        broker=ApiBroker(_execution_config()),
+    )
+    entries_before = real_book.state.entries_today
+
+    runner.start_day(BAR_START.date())
+    try:
+        runner.process_bar(first_intent_ts)
+        runner.process_bar(later_intent_ts)
+    except Exception as exc:
+        pytest.fail(f"process_bar raised {exc!r}")
+
+    errors = [
+        record for record in telemetry.records if record["ev"] == "algo_error"
+    ]
+    assert [record["algo_id"] for record in errors] == [
+        "api-first",
+        "api-same-bar",
+        "api-later",
+    ]
+    for record in errors:
+        assert record["error"].startswith(
+            "broker submit failed: API broker is not configured:"
+        )
+        assert "no adapter is wired" in record["error"]
+        assert "BrokerNotConfigured" in record["traceback"]
+    assert not any(record["ev"] == "ticket" for record in telemetry.records)
+    assert not any(
+        record["ev"] == "rejection"
+        and record["rule"] == "position_in_flight"
+        for record in telemetry.records
+    )
+    assert real_book.state.entries_today == entries_before == 0
+    assert real_book.state.positions == []
+    assert real_book.forget_unfilled_tickets() == {}
+    assert runner._real_entry_in_flight is False
+
+
+def test_successful_submit_registers_ticket_and_sets_in_flight_latch() -> None:
+    intent_ts = BAR_START + timedelta(minutes=1)
+    data = FakeMarketData(
+        {
+            "SNXX": _frame(
+                (BAR_START, 100.0, 101.0, 99.0, 100.0),
+            )
+        }
+    )
+    accepted = ScriptedAlgo(
+        "sim-accepted",
+        {intent_ts: [_intent("sim-accepted", intent_ts)]},
+    )
+    blocked = ScriptedAlgo(
+        "sim-blocked",
+        {intent_ts: [_intent("sim-blocked", intent_ts)]},
+    )
+    telemetry = CollectingTelemetry()
+    runner, real_book, _shadow_book = _runner(
+        data=data,
+        telemetry=telemetry,
+        roster=[
+            RosterEntry(accepted, "emitting"),
+            RosterEntry(blocked, "emitting"),
+        ],
+    )
+
+    runner.start_day(BAR_START.date())
+    runner.process_bar(intent_ts)
+
+    tickets = [
+        record for record in telemetry.records if record["ev"] == "ticket"
+    ]
+    rejections = [
+        record for record in telemetry.records if record["ev"] == "rejection"
+    ]
+    pending = real_book.forget_unfilled_tickets()
+    assert [record["algo_id"] for record in tickets] == ["sim-accepted"]
+    assert [(record["algo_id"], record["rule"]) for record in rejections] == [
+        ("sim-blocked", "position_in_flight")
+    ]
+    assert list(pending) == [tickets[0]["ticket_id"]]
+    assert real_book.state.entries_today == 0
+    assert real_book.state.positions == []
+    assert runner._real_entry_in_flight is True
 
 
 def test_end_session_discards_pending_real_ticket_and_clears_in_flight() -> None:
