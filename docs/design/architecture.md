@@ -39,6 +39,26 @@ import provider (to construct `MarketData`) and instantiate algos from the roste
 via their factory strings — but it consumes both strictly through the contract types.
 This is what makes each component buildable and testable completely separately.
 
+Amendment A11 (2026-08-02, Dev directive) — the console gains a **workbench**, and with
+it the one sanctioned exception to the dependency rule. The console has two halves, kept
+strictly apart:
+
+- **Observation** (unchanged): every live and historical view reads only
+  `data/sessions/<id>/telemetry.jsonl` and config. It imports no sibling package. A
+  broken component can never break the view of a run.
+- **Workbench** (new): an operator-driven panel that invokes one component at a time with
+  parameters the operator types, and renders what came back — provider queries (bars,
+  a named signal, an event kind, calendar lookups), a single algo run over a chosen day
+  with its rule trace, and a risk/sizing decision for a hand-entered intent. Sibling
+  imports here are lazy and per-request, so an import failure degrades that one panel
+  rather than the server.
+
+Workbench safety rules, binding: it may call only read-only or simulated paths; it never
+constructs a live broker, never touches the api broker, never writes to the bar store or
+any session directory, and never mutates config. Its only side effect is reading data and
+returning it. Anything that would place, modify, or record an order is out of scope for
+the workbench by construction, not by convention.
+
 ## 3. Repository layout
 
 ```
