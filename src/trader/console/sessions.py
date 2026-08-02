@@ -15,6 +15,18 @@ def list_sessions(data_root: Path) -> list[str]:
     return sorted(session_ids, key=_session_sort_key)
 
 
+def default_results_session_id(data_root: Path) -> str | None:
+    """Return the default session id for post-session results, if one exists."""
+    session_ids = list_sessions(data_root)
+    if not session_ids:
+        return None
+
+    for session_id in reversed(session_ids):
+        if session_id.startswith("backtest-"):
+            return session_id
+    return session_ids[-1]
+
+
 def _session_sort_key(session_id: str) -> tuple[int, str, str, str]:
     parts = session_id.rsplit("-", 2)
     if len(parts) == 3:

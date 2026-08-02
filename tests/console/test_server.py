@@ -148,8 +148,10 @@ def test_load_console_config_resolves_relative_data_root(tmp_path: Path) -> None
         host="127.0.0.1",
         port=8777,
         data_root=(tmp_path / "relative-data").resolve(),
+        config_dir=config_dir.resolve(),
     )
     assert config.data_root.is_absolute()
+    assert config.config_dir.is_absolute()
 
 
 @pytest.mark.parametrize(
@@ -341,7 +343,7 @@ def test_console_server_accepts_loopback_hosts(
 ) -> None:
     monkeypatch.setattr(ConsoleServer, "server_bind", lambda _server: None)
     monkeypatch.setattr(ConsoleServer, "server_activate", lambda _server: None)
-    config = ConsoleConfig(host=host, port=0, data_root=tmp_path)
+    config = ConsoleConfig(host=host, port=0, data_root=tmp_path, config_dir=tmp_path)
 
     server = ConsoleServer(config)
     try:
@@ -360,7 +362,7 @@ def test_console_server_rejects_non_loopback_hosts_before_binding(
         raise AssertionError("invalid host reached socket binding")
 
     monkeypatch.setattr(ConsoleServer, "server_bind", fail_if_binding_attempted)
-    config = ConsoleConfig(host=host, port=0, data_root=tmp_path)
+    config = ConsoleConfig(host=host, port=0, data_root=tmp_path, config_dir=tmp_path)
 
     with pytest.raises(ValueError, match=re.escape(host)):
         ConsoleServer(config)
@@ -371,7 +373,12 @@ def test_console_server_names_occupied_port(tmp_path: Path) -> None:
         listener.bind(("127.0.0.1", 0))
         listener.listen()
         port = listener.getsockname()[1]
-        config = ConsoleConfig(host="127.0.0.1", port=port, data_root=tmp_path)
+        config = ConsoleConfig(
+            host="127.0.0.1",
+            port=port,
+            data_root=tmp_path,
+            config_dir=tmp_path,
+        )
 
         with pytest.raises(RuntimeError) as exc_info:
             ConsoleServer(config)

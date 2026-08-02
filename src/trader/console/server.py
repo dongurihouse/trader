@@ -3,18 +3,32 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager, contextmanager
+from datetime import date
 import errno
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
+from pathlib import Path
 import socket
 import threading
 import time
 from urllib.parse import parse_qs, urlparse
 
+import yaml
+
+from trader.console import (
+    results,
+    workbench_algos,
+    workbench_execution,
+    workbench_provider,
+)
 from trader.console.config import ConsoleConfig
 from trader.console.dashboard import render_dashboard_html
-from trader.console.sessions import list_sessions, resolve_session_dir
+from trader.console.sessions import (
+    default_results_session_id,
+    list_sessions,
+    resolve_session_dir,
+)
 from trader.console.telemetry_feed import read_new_lines
 
 
@@ -89,6 +103,134 @@ class _ConsoleRequestHandler(BaseHTTPRequestHandler):
             self._stream_events(session_dir / "telemetry.jsonl")
             return
 
+        if parsed.path == "/api/results":
+            query_params = {
+                key: values[0]
+                for key, values in parse_qs(parsed.query).items()
+            }
+            try:
+                session_dir = _resolve_results_session_dir(
+                    self.server.config.data_root,
+                    query_params.get("session"),
+                )
+                payload = results.build_results_payload(session_dir)
+            except (FileNotFoundError, ValueError) as exc:
+                self._send_json(404, {"error": str(exc)})
+                return
+
+            self._send_json(200, payload)
+            return
+
+        if parsed.path == "/api/results/day":
+            query_params = {
+                key: values[0]
+                for key, values in parse_qs(parsed.query).items()
+            }
+            try:
+                _resolve_results_session_dir(
+                    self.server.config.data_root,
+                    query_params.get("session"),
+                )
+            except FileNotFoundError as exc:
+                self._send_json(404, {"error": str(exc)})
+                return
+
+            raw_day = query_params.get("day")
+            if raw_day is None or raw_day == "":
+                self._send_json(400, {"error": "missing required param 'day'"})
+                return
+            try:
+                parsed_day = date.fromisoformat(raw_day.strip())
+            except ValueError:
+                self._send_json(400, {"error": f"unparseable day: {raw_day!r}"})
+                return
+
+            try:
+                symbol = _read_primary_symbol(self.server.config.config_dir)
+                candles = results.build_day_candles(
+                    self.server.config.data_root,
+                    symbol,
+                    parsed_day,
+                )
+            except Exception as exc:  # Keep the HTTP boundary traceback-free.
+                self._send_json(500, {"error": str(exc)})
+                return
+
+            self._send_json(
+                200,
+                {
+                    "day": parsed_day.isoformat(),
+                    "symbol": symbol,
+                    "candles": candles,
+                },
+            )
+            return
+
+        if parsed.path == "/api/workbench/provider":
+            query_params = {
+                key: values[0]
+                for key, values in parse_qs(parsed.query).items()
+            }
+            status, payload = workbench_provider.handle_query(
+                query_params,
+                data_root=self.server.config.data_root,
+                config_dir=self.server.config.config_dir,
+            )
+            self._send_json(status, payload)
+            return
+
+        if parsed.path == "/api/workbench/algos":
+            query_params = {
+                key: values[0]
+                for key, values in parse_qs(parsed.query).items()
+            }
+            status, payload = workbench_algos.handle_query(
+                query_params,
+                data_root=self.server.config.data_root,
+                config_dir=self.server.config.config_dir,
+            )
+            self._send_json(status, payload)
+            return
+
+        if parsed.path == "/api/workbench/execution":
+            query_params = {
+                key: values[0]
+                for key, values in parse_qs(parsed.query).items()
+            }
+            status, payload = workbench_execution.handle_query(
+                query_params,
+                data_root=self.server.config.data_root,
+                config_dir=self.server.config.config_dir,
+            )
+            self._send_json(status, payload)
+            return
+
+        if parsed.path == "/workbench/provider":
+            self._send_html(200, workbench_provider.render_provider_workbench_html())
+            return
+
+        if parsed.path == "/workbench/algos":
+            self._send_html(
+                200,
+                workbench_algos.render_algos_workbench_html(
+                    config_dir=self.server.config.config_dir
+                ),
+            )
+            return
+
+        if parsed.path == "/workbench/execution":
+            self._send_html(
+                200,
+                workbench_execution.render_execution_workbench_html(
+                    config_dir=self.server.config.config_dir
+                ),
+            )
+            return
+
+        if parsed.path == "/results":
+            self._send_html(200, results.render_results_html())
+            return
+
         if parsed.path == "/":
             self._send_html(200, render_dashboard_html())
             return
@@ -141,6 +283,22 @@ class _ConsoleRequestHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: object) -> None:
         return
+
+
+def _resolve_results_session_dir(data_root: Path, session_id: str | None) -> Path:
+    if session_id is None:
+        session_id = default_results_session_id(data_root)
+        if session_id is None:
+            raise FileNotFoundError(f"no sessions found under {data_root / 'sessions'}")
+    return resolve_session_dir(data_root, session_id)
+
+
+def _read_primary_symbol(config_dir: Path) -> str:
+    trader_path = Path(config_dir) / "trader.yaml"
+    values = yaml.safe_load(trader_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(values, dict) or "primary_symbol" not in values:
+        raise KeyError(f"missing required key 'primary_symbol' in {trader_path}")
+    return str(values["primary_symbol"])
 
 
 @contextmanager

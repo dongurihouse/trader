@@ -15,6 +15,7 @@ class ConsoleConfig:
     host: str
     port: int
     data_root: Path
+    config_dir: Path
 
 
 def load_console_config(
@@ -38,6 +39,7 @@ def load_console_config(
         host=str(host),
         port=int(port),
         data_root=data_root.resolve(),
+        config_dir=config_dir.resolve(),
     )
 
 
