@@ -74,7 +74,7 @@ class MarketData(Protocol):
 | field | type | notes |
 |---|---|---|
 | `algo_id` | str | roster id |
-| `ts` | datetime | the completed bar that produced it |
+| `ts` | datetime | the asof at which the completed bar was evaluated — the bar's CLOSE time (design ruling 2026-08-01: the producing bar spans [ts-1min, ts), so its Bar.ts open-time is ts-1min; any consumer needing that bar queries `bars_1m(asof=intent.ts)`, never `ts+1min`) |
 | `action` | `Literal["open", "close"]` | |
 | `side` | `Side \| None` | required for open, None for close |
 | `signal_symbol` | str | e.g. SNDK |
@@ -85,6 +85,11 @@ class MarketData(Protocol):
 | `confidence` | `float \| None` | uncalibrated unless stated |
 | `reason` | str | plain-English rule trace |
 | `meta` | `dict` | free-form (setup name, rules version, ...) |
+
+Reserved `meta` keys (amendment A8): `gates_pass: bool` — emitting algos stamp the
+gate/veto outcome on every candidate they produce; absent means passed. `vetoed: str` —
+the veto rule id when one bound. Execution routes `gates_pass: false` intents to the
+shadow book (tag `gate_refused`), never to the real book.
 
 ## orders.py
 
@@ -143,6 +148,7 @@ Every record is a flat JSON object with common envelope fields
 |---|---|
 | `session_start` | `mode`, `config_sha256`, `package_version`, `symbols`, `roster: [{id,status}]` |
 | `tick` | `bar_ts` |
+| `day_skipped` | `day`, `reason` (e.g. `no_prev_session` — PIT rule 5; ports dt's skipped_no_prev) |
 | `intent` | full Intent fields |
 | `rejection` | intent fields + `rule`, `detail` |
 | `ticket` | full OrderTicket fields |

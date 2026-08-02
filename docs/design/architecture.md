@@ -113,6 +113,19 @@ end of session: force-flat both books, write final metrics + state.json + report
   exit, metrics snapshot, algo error, session_end) is appended to
   `data/sessions/<session_id>/telemetry.jsonl` as it happens. The console only ever reads
   this file; it never touches component internals.
+- Reversal exits (added 2026-08-01; ported dt semantics — omitting them was a design
+  gap): when a position is open and an opposite-direction open intent arrives, the
+  position is scheduled to exit at the next bar's open (fill kind `reversal`); the
+  reversal cooldown (risk.yaml) runs from the exit and blocks re-entry; the mute-state
+  reversal category applies; shadow episodes track reversal independently per episode.
+  The exact trigger population and edge semantics port from dt `engine/core.py`
+  (lines 11-15, 182-194 and the shadow machinery) — where trader's component split
+  leaves any ambiguity, dt's observed behavior governs, and the port must record what
+  dt actually does on each ambiguous point.
+- Day roll and session end (clarified 2026-08-01): `start_day` resets BOTH books —
+  pending unfilled entries (real and shadow) are cancelled, never carried into a later
+  day; `end_session` force-flats BOTH books, shadow episodes included (fill kind
+  `eod`), exactly as §5's loop sketch states.
 
 ## 6. Data root layout (file contracts)
 
@@ -142,6 +155,15 @@ shadow leaderboards overstate: the apparent edge concentrated in candidates the 
 refused (conversion examples on record: 29 shadow candidates -> 2 emitted trades;
 13 -> 1). The console must render shadow metrics with that caveat visible, never as a
 forecast of promoted performance.
+
+Gate and veto refusals inside emitting algos are never silent (amendment A8,
+2026-08-01): when a global gate or veto blocks an emitting algo's candidate, the algo
+still returns the intent, stamped `meta.gates_pass: false` (and `meta.vetoed: <rule>`
+when a veto bound). Execution routes any intent stamped `gates_pass: false` to the
+shadow book tagged `gate_refused` — never to the real book, regardless of algo status.
+This ports dt's silent-record discipline; the refused-candidate ledger is the raw
+material of the promotion loop and must survive the rewrite. Probe algos are unaffected
+(all their intents go to the shadow book already).
 
 ## 8. Signal engine scope (provider)
 
