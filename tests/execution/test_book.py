@@ -603,6 +603,7 @@ def test_shadow_entry_and_exit_use_x4_slippage_and_zero_real_shares() -> None:
             instrument="SNXX",
             r_multiple=pytest.approx(0.8975),
             exit_kind="target",
+            tag="probe",
         )
     ]
     assert book.take_closed_trades() == []

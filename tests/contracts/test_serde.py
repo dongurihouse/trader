@@ -215,6 +215,7 @@ RECORDS = [
         shares=100,
         kind="entry",
         book="real",
+        tag=None,
     ),
     PositionClosedEvent(
         ev="position_closed",
@@ -225,6 +226,7 @@ RECORDS = [
         r_multiple=1.5,
         book="shadow",
         exit_kind="target",
+        tag="probe",
     ),
     MetricsEvent(
         ev="metrics",

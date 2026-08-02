@@ -111,6 +111,7 @@ class FillEvent:
     shares: int
     kind: Literal["entry", "stop", "target", "reversal", "eod"]
     book: Literal["real", "shadow"]
+    tag: str | None
 
 
 @dataclass(frozen=True)
@@ -123,6 +124,7 @@ class PositionClosedEvent:
     r_multiple: float
     book: Literal["real", "shadow"]
     exit_kind: Literal["stop", "target", "reversal", "eod"]
+    tag: str | None
 
 
 @dataclass(frozen=True)

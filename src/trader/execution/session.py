@@ -45,6 +45,7 @@ from trader.execution.book import (
     ClosedTrade,
     RealBook,
     ShadowBook,
+    ShadowTag,
     build_algo_metrics,
 )
 
@@ -152,6 +153,9 @@ class SessionRunner:
     def start_day(self, day: date) -> None:
         self._broker.cancel_open("new trading day")
         self._real_book.start_new_day()
+        # Day roll cancels only unfilled shadow entries. Filled shadow episodes
+        # are kept explicit; callers invoke start_day only when the real book is flat.
+        self._shadow_book.cancel_pending()
         self._real_entry_in_flight = False
         for entry in self._roster:
             if entry.status != "disabled":
@@ -170,7 +174,7 @@ class SessionRunner:
         real_fills = self._broker.on_bar(asof, self._market_data)
         self._real_book.apply_fills(real_fills, self._market_data)
         for fill in real_fills:
-            self._emit_fill(fill)
+            self._emit_fill(fill, tag=None)
         if any(fill.kind == "entry" for fill in real_fills):
             self._real_entry_in_flight = False
         for closed in self._real_book.take_closed_trades():
@@ -178,7 +182,7 @@ class SessionRunner:
 
         shadow_fills = self._shadow_book.on_bar(asof, self._market_data)
         for fill in shadow_fills:
-            self._emit_fill(fill)
+            self._emit_fill(fill, tag=self._shadow_book.fill_tag(fill))
         for closed in self._shadow_book.take_closed_trades():
             self._emit_closed_trade(closed, "shadow", asof)
 
@@ -208,6 +212,10 @@ class SessionRunner:
                     # no shipped algo emits close intents pending a later wave.
                     # V1 therefore records this intent without speculating about
                     # closing machinery for a path nothing currently exercises.
+                    continue
+
+                if intent.meta.get("gates_pass") is False:
+                    self._open_shadow(intent, "gate_refused")
                     continue
 
                 if entry.status == "probe":
@@ -254,16 +262,16 @@ class SessionRunner:
         )
         self._real_book.apply_fills(real_fills, self._market_data)
         for fill in real_fills:
-            self._emit_fill(fill)
+            self._emit_fill(fill, tag=None)
         for closed in self._real_book.take_closed_trades():
             self._emit_closed_trade(closed, "real", asof)
 
-        # This is a deliberate, documented v1 scope reduction: ShadowBook has no
-        # force-flat operation, so an episode open exactly at session end is
-        # dropped without a resolved outcome, like dt's pending entry with no
-        # next bar. Shadow metrics already carry a heavy no-execution-feedback
-        # caveat, so one missing trailing boundary sample does not change their
-        # purpose.
+        shadow_fills = self._shadow_book.force_flat(asof, self._market_data)
+        for fill in shadow_fills:
+            self._emit_fill(fill, tag=self._shadow_book.fill_tag(fill))
+        for closed in self._shadow_book.take_closed_trades():
+            self._emit_closed_trade(closed, "shadow", asof)
+
         summary = SessionSummary(
             bars_processed=self._bars_processed,
             real_trades=self._real_trades,
@@ -305,12 +313,13 @@ class SessionRunner:
                 detail=rejection.detail,
             )
         )
-        self._open_shadow(rejection.intent, "rejected")
+        if rejection.intent.stop is not None and rejection.intent.target is not None:
+            self._open_shadow(rejection.intent, "rejected")
 
     def _open_shadow(
         self,
         intent: Intent,
-        tag: Literal["probe", "rejected"],
+        tag: ShadowTag,
     ) -> None:
         self._shadow_book.open(
             algo_id=intent.algo_id,
@@ -341,7 +350,7 @@ class SessionRunner:
             )
         )
 
-    def _emit_fill(self, fill: Fill) -> None:
+    def _emit_fill(self, fill: Fill, *, tag: str | None) -> None:
         self._emit(
             FillEvent(
                 ev="fill",
@@ -352,6 +361,7 @@ class SessionRunner:
                 shares=fill.shares,
                 kind=fill.kind,
                 book=fill.book,
+                tag=tag,
             )
         )
 
@@ -371,6 +381,7 @@ class SessionRunner:
                 r_multiple=closed.r_multiple,
                 book=book,
                 exit_kind=closed.exit_kind,
+                tag=closed.tag,
             )
         )
         if book == "real":

@@ -108,6 +108,7 @@ EVENT_CASES = [
             "shares": 100,
             "kind": "entry",
             "book": "real",
+            "tag": None,
         },
     ),
     (
@@ -121,6 +122,7 @@ EVENT_CASES = [
             "r_multiple": 1.5,
             "book": "shadow",
             "exit_kind": "target",
+            "tag": "probe",
         },
     ),
     (
@@ -273,6 +275,7 @@ def test_event_fields_have_exact_types() -> None:
         "shares": int,
         "kind": Literal["entry", "stop", "target", "reversal", "eod"],
         "book": Literal["real", "shadow"],
+        "tag": str | None,
     }
     assert get_type_hints(telemetry.PositionClosedEvent) == {
         "ev": Literal["position_closed"],
@@ -282,6 +285,7 @@ def test_event_fields_have_exact_types() -> None:
         "r_multiple": float,
         "book": Literal["real", "shadow"],
         "exit_kind": Literal["stop", "target", "reversal", "eod"],
+        "tag": str | None,
     }
     assert get_type_hints(telemetry.MetricsEvent) == {
         "ev": Literal["metrics"],

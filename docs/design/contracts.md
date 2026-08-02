@@ -152,8 +152,8 @@ Every record is a flat JSON object with common envelope fields
 | `intent` | full Intent fields |
 | `rejection` | intent fields + `rule`, `detail` |
 | `ticket` | full OrderTicket fields |
-| `fill` | full Fill fields |
-| `position_closed` | `algo_id`, `instrument`, `r_multiple`, `book`, `exit_kind` |
+| `fill` | full Fill fields + `tag` (`null` for real-book records; `probe`, `rejected`, or `gate_refused` for shadow records) |
+| `position_closed` | `algo_id`, `instrument`, `r_multiple`, `book`, `exit_kind`, `tag` (`null` for real-book records; `probe`, `rejected`, or `gate_refused` for shadow records) |
 | `metrics` | one AlgoMetrics object |
 | `algo_error` | `algo_id`, `error`, `traceback` |
 | `session_end` | `bars_processed`, `real_trades`, `shadow_trades`, `final_equity` |

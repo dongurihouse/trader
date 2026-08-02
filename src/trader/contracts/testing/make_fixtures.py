@@ -176,6 +176,7 @@ def generate_fixtures(output_dir: Path) -> None:
             shares=100,
             kind="entry",
             book="real",
+            tag=None,
         ),
         FillEvent(
             ev="fill",
@@ -186,6 +187,7 @@ def generate_fixtures(output_dir: Path) -> None:
             shares=100,
             kind="target",
             book="real",
+            tag=None,
         ),
         PositionClosedEvent(
             ev="position_closed",
@@ -196,6 +198,7 @@ def generate_fixtures(output_dir: Path) -> None:
             r_multiple=1.5,
             book="real",
             exit_kind="target",
+            tag=None,
         ),
         MetricsEvent(
             ev="metrics",

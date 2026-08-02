@@ -12,7 +12,15 @@ from datetime import date, datetime, timedelta, timezone
 import pandas as pd
 import pytest
 
-from trader.contracts import Intent, MarketData
+from trader.contracts import (
+    AlgoStatus,
+    Intent,
+    MarketData,
+    OrderTicket,
+    PortfolioState,
+    Rejection,
+    RiskEngine,
+)
 from trader.contracts.testing import CollectingTelemetry, FakeMarketData
 from trader.execution.book import RealBook, ShadowBook
 from trader.execution.broker import SimBroker
@@ -79,8 +87,9 @@ def _intent(
     algo_id: str,
     ts: datetime,
     *,
-    stop: float = 95.0,
-    target: float = 105.0,
+    stop: float | None = 95.0,
+    target: float | None = 105.0,
+    meta: dict | None = None,
 ) -> Intent:
     return Intent(
         algo_id=algo_id,
@@ -94,7 +103,7 @@ def _intent(
         target=target,
         confidence=0.9,
         reason="scripted fixture",
-        meta={"case": algo_id},
+        meta={"case": algo_id} if meta is None else meta,
     )
 
 
@@ -129,7 +138,7 @@ def _risk_config() -> RiskConfig:
     )
 
 
-def _execution_config() -> ExecutionConfig:
+def _execution_config(*, slippage_bps: float = 0.0) -> ExecutionConfig:
     return ExecutionConfig(
         broker="sim",
         live_orders=False,
@@ -138,7 +147,7 @@ def _execution_config() -> ExecutionConfig:
             stop_wins_ties=True,
             commission=0.0,
         ),
-        slippage_bps={"SNXX": {"2026-07": 0.0}},
+        slippage_bps={"SNXX": {"2026-07": slippage_bps}},
     )
 
 
@@ -147,9 +156,11 @@ def _runner(
     data: FakeMarketData,
     telemetry: CollectingTelemetry,
     roster: list[RosterEntry],
+    risk: RiskEngine | None = None,
+    slippage_bps: float = 0.0,
 ) -> tuple[SessionRunner, RealBook, ShadowBook]:
     risk_config = _risk_config()
-    execution_config = _execution_config()
+    execution_config = _execution_config(slippage_bps=slippage_bps)
     real_book = RealBook(risk_config)
     shadow_book = ShadowBook(execution_config)
     runner = SessionRunner(
@@ -157,7 +168,7 @@ def _runner(
         mode="backtest",
         market_data=data,
         broker=SimBroker(execution_config),
-        risk=RiskRails(risk_config),
+        risk=risk if risk is not None else RiskRails(risk_config),
         real_book=real_book,
         shadow_book=shadow_book,
         telemetry=telemetry,
@@ -167,6 +178,17 @@ def _runner(
         package_version="0.1.0",
     )
     return runner, real_book, shadow_book
+
+
+class _FailIfCalledRisk:
+    def check_and_size(
+        self,
+        intent: Intent,
+        portfolio: PortfolioState,
+        data: MarketData,
+    ) -> OrderTicket | Rejection:
+        del intent, portfolio, data
+        raise AssertionError("gate-refused intents must bypass RiskRails")
 
 
 def test_session_runner_executes_real_and_shadow_paths_in_exact_order() -> None:
@@ -453,3 +475,423 @@ def test_end_session_force_flats_real_position_and_emits_final_metrics() -> None
     assert telemetry.records[9]["book"] == "shadow"
     assert real_book.state.positions == []
     assert summary == SessionSummary(2, 1, 0, 10_100.0)
+
+
+@pytest.mark.parametrize("status", ["emitting", "probe"])
+def test_gate_refused_intent_routes_to_tagged_shadow_before_status_or_risk(
+    status: AlgoStatus,
+) -> None:
+    intent_ts = BAR_START + timedelta(minutes=1)
+    shadow_fill_ts = intent_ts + timedelta(minutes=1)
+    data = FakeMarketData(
+        {
+            "SNXX": _frame(
+                (BAR_START, 100.0, 101.0, 99.0, 100.0),
+                (
+                    BAR_START + timedelta(minutes=1),
+                    100.0,
+                    106.0,
+                    99.0,
+                    105.0,
+                ),
+            )
+        }
+    )
+    intent = _intent(
+        "gate-refused",
+        intent_ts,
+        meta={
+            "case": "gate-refused",
+            "gates_pass": False,
+            "vetoed": "veto-entry-cutoff",
+        },
+    )
+    algo = ScriptedAlgo("gate-refused", {intent_ts: [intent]})
+    telemetry = CollectingTelemetry()
+    runner, real_book, shadow_book = _runner(
+        data=data,
+        telemetry=telemetry,
+        roster=[RosterEntry(algo, status)],
+        risk=_FailIfCalledRisk(),
+    )
+
+    runner.start_day(BAR_START.date())
+    runner.process_bar(intent_ts)
+    runner.process_bar(shadow_fill_ts)
+
+    assert [record["ev"] for record in telemetry.records].count("intent") == 1
+    assert next(
+        record for record in telemetry.records if record["ev"] == "intent"
+    )["meta"] == intent.meta
+    assert not any(record["ev"] == "ticket" for record in telemetry.records)
+    assert not any(
+        record["ev"] == "fill" and record["book"] == "real"
+        for record in telemetry.records
+    )
+    assert real_book.state.positions == []
+    shadow_fills = [
+        record
+        for record in telemetry.records
+        if record["ev"] == "fill" and record["book"] == "shadow"
+    ]
+    assert [(record["kind"], record["tag"]) for record in shadow_fills] == [
+        ("entry", "gate_refused"),
+        ("target", "gate_refused"),
+    ]
+    shadow_closes = [
+        record
+        for record in telemetry.records
+        if record["ev"] == "position_closed" and record["book"] == "shadow"
+    ]
+    assert [record["tag"] for record in shadow_closes] == ["gate_refused"]
+    assert shadow_book.resolved_r_multiples("gate-refused") == pytest.approx([1.0])
+
+
+@pytest.mark.parametrize(
+    ("stop", "target"),
+    [(None, 105.0), (95.0, None)],
+)
+def test_incomplete_gate_refusal_is_recorded_but_dropped_without_shadow_fill(
+    stop: float | None,
+    target: float | None,
+) -> None:
+    intent_ts = BAR_START + timedelta(minutes=1)
+    next_asof = intent_ts + timedelta(minutes=1)
+    data = FakeMarketData(
+        {
+            "SNXX": _frame(
+                (BAR_START, 100.0, 101.0, 99.0, 100.0),
+                (
+                    BAR_START + timedelta(minutes=1),
+                    100.0,
+                    106.0,
+                    99.0,
+                    105.0,
+                ),
+            )
+        }
+    )
+    intent = _intent(
+        "incomplete-gate-refusal",
+        intent_ts,
+        stop=stop,
+        target=target,
+        meta={"gates_pass": False},
+    )
+    algo = ScriptedAlgo(
+        "incomplete-gate-refusal",
+        {intent_ts: [intent]},
+    )
+    telemetry = CollectingTelemetry()
+    runner, real_book, shadow_book = _runner(
+        data=data,
+        telemetry=telemetry,
+        roster=[RosterEntry(algo, "emitting")],
+        risk=_FailIfCalledRisk(),
+    )
+
+    runner.start_day(BAR_START.date())
+    runner.process_bar(intent_ts)
+    runner.process_bar(next_asof)
+
+    assert [record["ev"] for record in telemetry.records].count("intent") == 1
+    assert not any(record["ev"] == "ticket" for record in telemetry.records)
+    assert not any(record["ev"] == "fill" for record in telemetry.records)
+    assert real_book.state.positions == []
+    assert shadow_book.resolved_r_multiples("incomplete-gate-refusal") == []
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [
+        pytest.param({"case": "control"}, id="gates-pass-absent"),
+        pytest.param(
+            {"case": "control", "gates_pass": True},
+            id="gates-pass-true",
+        ),
+    ],
+)
+def test_non_refused_emitting_intent_reaches_real_book(meta: dict) -> None:
+    intent_ts = BAR_START + timedelta(minutes=1)
+    entry_ts = intent_ts + timedelta(minutes=1)
+    data = FakeMarketData(
+        {
+            "SNXX": _frame(
+                (BAR_START, 100.0, 101.0, 99.0, 100.0),
+                (
+                    BAR_START + timedelta(minutes=1),
+                    100.0,
+                    101.0,
+                    99.0,
+                    100.0,
+                ),
+            )
+        }
+    )
+    algo = ScriptedAlgo(
+        "control",
+        {intent_ts: [_intent("control", intent_ts, meta=meta)]},
+    )
+    telemetry = CollectingTelemetry()
+    runner, real_book, shadow_book = _runner(
+        data=data,
+        telemetry=telemetry,
+        roster=[RosterEntry(algo, "emitting")],
+    )
+
+    runner.start_day(BAR_START.date())
+    runner.process_bar(intent_ts)
+    runner.process_bar(entry_ts)
+
+    assert [record["ev"] for record in telemetry.records].count("ticket") == 1
+    real_fills = [
+        record
+        for record in telemetry.records
+        if record["ev"] == "fill" and record["book"] == "real"
+    ]
+    assert [(record["kind"], record["tag"]) for record in real_fills] == [
+        ("entry", None)
+    ]
+    assert len(real_book.state.positions) == 1
+    assert shadow_book.resolved_r_multiples("control") == []
+
+
+def test_end_session_force_flats_filled_shadow_episode() -> None:
+    intent_ts = BAR_START + timedelta(minutes=1)
+    entry_ts = intent_ts + timedelta(minutes=1)
+    data = FakeMarketData(
+        {
+            "SNXX": _frame(
+                (BAR_START, 100.0, 101.0, 99.0, 100.0),
+                (
+                    BAR_START + timedelta(minutes=1),
+                    100.0,
+                    103.0,
+                    99.0,
+                    102.0,
+                ),
+            )
+        }
+    )
+    algo = ScriptedAlgo(
+        "truncated-probe",
+        {intent_ts: [_intent("truncated-probe", intent_ts)]},
+    )
+    telemetry = CollectingTelemetry()
+    runner, _real_book, shadow_book = _runner(
+        data=data,
+        telemetry=telemetry,
+        roster=[RosterEntry(algo, "probe")],
+        slippage_bps=25.0,
+    )
+
+    runner.start_day(BAR_START.date())
+    runner.process_bar(intent_ts)
+    runner.process_bar(entry_ts)
+    summary = runner.end_session(entry_ts)
+
+    shadow_fills = [
+        record
+        for record in telemetry.records
+        if record["ev"] == "fill" and record["book"] == "shadow"
+    ]
+    assert [(record["kind"], record["tag"]) for record in shadow_fills] == [
+        ("entry", "probe"),
+        ("eod", "probe"),
+    ]
+    shadow_closes = [
+        record
+        for record in telemetry.records
+        if record["ev"] == "position_closed" and record["book"] == "shadow"
+    ]
+    assert len(shadow_closes) == 1
+    assert shadow_closes[0]["exit_kind"] == "eod"
+    assert shadow_closes[0]["tag"] == "probe"
+    assert shadow_fills[-1]["price"] == pytest.approx(101.745)
+    assert shadow_closes[0]["r_multiple"] == pytest.approx(0.299)
+    assert shadow_book.resolved_r_multiples("truncated-probe") == pytest.approx(
+        [0.299]
+    )
+    assert summary.shadow_trades == 1
+    assert telemetry.records[-1]["shadow_trades"] == 1
+
+
+def test_start_day_drops_pending_shadow_without_cross_day_fill() -> None:
+    day_one_intent_ts = BAR_START + timedelta(minutes=1)
+    day_two_bar = BAR_START + timedelta(days=1)
+    day_two_asof = day_two_bar + timedelta(minutes=1)
+    data = FakeMarketData(
+        {
+            "SNXX": _frame(
+                (BAR_START, 100.0, 101.0, 99.0, 100.0),
+                (day_two_bar, 50.0, 51.0, 49.0, 50.0),
+            )
+        }
+    )
+    algo = ScriptedAlgo(
+        "overnight-probe",
+        {day_one_intent_ts: [_intent("overnight-probe", day_one_intent_ts)]},
+    )
+    telemetry = CollectingTelemetry()
+    runner, _real_book, shadow_book = _runner(
+        data=data,
+        telemetry=telemetry,
+        roster=[RosterEntry(algo, "probe")],
+    )
+
+    runner.start_day(BAR_START.date())
+    runner.process_bar(day_one_intent_ts)
+    runner.start_day(day_two_bar.date())
+    runner.process_bar(day_two_asof)
+
+    assert not any(record["ev"] == "fill" for record in telemetry.records)
+    assert shadow_book.resolved_r_multiples("overnight-probe") == []
+
+
+def test_end_session_drops_shadow_pending_without_fill_or_outcome() -> None:
+    intent_ts = BAR_START + timedelta(minutes=1)
+    data = FakeMarketData(
+        {
+            "SNXX": _frame(
+                (BAR_START, 100.0, 101.0, 99.0, 100.0),
+            )
+        }
+    )
+    algo = ScriptedAlgo(
+        "unfilled-probe",
+        {intent_ts: [_intent("unfilled-probe", intent_ts)]},
+    )
+    telemetry = CollectingTelemetry()
+    runner, _real_book, shadow_book = _runner(
+        data=data,
+        telemetry=telemetry,
+        roster=[RosterEntry(algo, "probe")],
+    )
+
+    runner.start_day(BAR_START.date())
+    runner.process_bar(intent_ts)
+    summary = runner.end_session(intent_ts)
+
+    assert not any(record["ev"] == "fill" for record in telemetry.records)
+    assert not any(
+        record["ev"] == "position_closed" for record in telemetry.records
+    )
+    assert shadow_book.resolved_r_multiples("unfilled-probe") == []
+    assert summary.shadow_trades == 0
+
+
+@pytest.mark.parametrize(
+    ("stop", "target", "rule"),
+    [(None, None, "no_stop"), (95.0, None, "no_target")],
+)
+def test_incomplete_bracket_rejection_never_opens_shadow_episode(
+    stop: float | None,
+    target: float | None,
+    rule: str,
+) -> None:
+    asofs = [BAR_START + timedelta(minutes=index) for index in range(1, 4)]
+    intent_ts = asofs[0]
+    data = FakeMarketData(
+        {
+            "SNXX": _frame(
+                (BAR_START, 100.0, 101.0, 99.0, 100.0),
+                (
+                    BAR_START + timedelta(minutes=1),
+                    100.0,
+                    101.0,
+                    99.0,
+                    100.0,
+                ),
+                (
+                    BAR_START + timedelta(minutes=2),
+                    100.0,
+                    101.0,
+                    99.0,
+                    100.0,
+                ),
+            )
+        }
+    )
+    algo = ScriptedAlgo(
+        "stopless",
+        {intent_ts: [_intent("stopless", intent_ts, stop=stop, target=target)]},
+    )
+    telemetry = CollectingTelemetry()
+    runner, _real_book, shadow_book = _runner(
+        data=data,
+        telemetry=telemetry,
+        roster=[RosterEntry(algo, "emitting")],
+    )
+
+    runner.start_day(BAR_START.date())
+    for asof in asofs:
+        runner.process_bar(asof)
+    summary = runner.end_session(asofs[-1])
+
+    rejections = [
+        record for record in telemetry.records if record["ev"] == "rejection"
+    ]
+    assert [record["rule"] for record in rejections] == [rule]
+    assert not any(
+        record["ev"] == "fill" and record["book"] == "shadow"
+        for record in telemetry.records
+    )
+    assert shadow_book.resolved_r_multiples("stopless") == []
+    assert summary.shadow_trades == 0
+
+
+def test_bracketed_risk_rejection_opens_tagged_shadow_episode() -> None:
+    intent_ts = BAR_START + timedelta(minutes=1)
+    shadow_fill_ts = intent_ts + timedelta(minutes=1)
+    data = FakeMarketData(
+        {
+            "SNXX": _frame(
+                (BAR_START, 100.0, 101.0, 99.0, 100.0),
+                (
+                    BAR_START + timedelta(minutes=1),
+                    100.0,
+                    106.0,
+                    99.0,
+                    105.0,
+                ),
+            )
+        }
+    )
+    algo = ScriptedAlgo(
+        "bracketed-rejection",
+        {intent_ts: [_intent("bracketed-rejection", intent_ts)]},
+    )
+    telemetry = CollectingTelemetry()
+    runner, real_book, shadow_book = _runner(
+        data=data,
+        telemetry=telemetry,
+        roster=[RosterEntry(algo, "emitting")],
+    )
+
+    runner.start_day(BAR_START.date())
+    real_book.state.entries_today = _risk_config().rails.max_entries_per_day
+    runner.process_bar(intent_ts)
+    runner.process_bar(shadow_fill_ts)
+
+    rejections = [
+        record for record in telemetry.records if record["ev"] == "rejection"
+    ]
+    assert [record["rule"] for record in rejections] == ["max_entries_per_day"]
+    shadow_fills = [
+        record
+        for record in telemetry.records
+        if record["ev"] == "fill" and record["book"] == "shadow"
+    ]
+    assert [(record["kind"], record["tag"]) for record in shadow_fills] == [
+        ("entry", "rejected"),
+        ("target", "rejected"),
+    ]
+    shadow_closes = [
+        record
+        for record in telemetry.records
+        if record["ev"] == "position_closed" and record["book"] == "shadow"
+    ]
+    assert [record["tag"] for record in shadow_closes] == ["rejected"]
+    assert shadow_book.resolved_r_multiples("bracketed-rejection") == pytest.approx(
+        [1.0]
+    )

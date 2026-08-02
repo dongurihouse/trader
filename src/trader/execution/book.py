@@ -22,6 +22,7 @@ from .config import ExecutionConfig, RiskConfig
 
 
 _ExitKind = Literal["stop", "target", "reversal", "eod"]
+ShadowTag = Literal["probe", "rejected", "gate_refused"]
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ class ClosedTrade:
     instrument: str
     r_multiple: float
     exit_kind: _ExitKind
+    tag: ShadowTag | None = None
 
 
 def _raw_entry_price(
@@ -221,9 +223,9 @@ class _ShadowEpisode:
     episode_id: str
     algo_id: str
     instrument: str
-    stop: float
-    target: float
-    tag: Literal["probe", "rejected"]
+    stop: float | None
+    target: float | None
+    tag: ShadowTag
     opened_ts: datetime
 
 
@@ -257,6 +259,7 @@ class ShadowBook:
         self._recently_closed: list[ClosedTrade] = []
         self._resolved_rs: dict[str, list[float]] = {}
         self._per_bar_counts: dict[tuple[str, datetime], int] = {}
+        self._episode_tags: dict[str, ShadowTag] = {}
         self._last_asof: datetime | None = None
 
     def open(
@@ -264,9 +267,9 @@ class ShadowBook:
         *,
         algo_id: str,
         instrument: str,
-        stop: float,
-        target: float,
-        tag: Literal["probe", "rejected"],
+        stop: float | None,
+        target: float | None,
+        tag: ShadowTag,
         opened_ts: datetime,
     ) -> None:
         counter_key = (algo_id, opened_ts)
@@ -283,12 +286,26 @@ class ShadowBook:
             tag=tag,
             opened_ts=opened_ts,
         )
+        self._episode_tags[episode.episode_id] = tag
         self._pending.append(
             _PendingShadow(
                 episode=episode,
                 eligible_after=self._last_asof,
             )
         )
+
+    def fill_tag(self, fill: Fill) -> ShadowTag:
+        """Return the refusal/probe tag for a shadow fill."""
+        tag = self._episode_tags[fill.ticket_id]
+        if fill.kind != "entry":
+            self._episode_tags.pop(fill.ticket_id)
+        return tag
+
+    def cancel_pending(self) -> None:
+        """Drop shadow intents that never reached their next-open fill."""
+        for pending in self._pending:
+            self._episode_tags.pop(pending.episode.episode_id, None)
+        self._pending = []
 
     def on_bar(self, asof: datetime, data: MarketData) -> list[Fill]:
         self._last_asof = asof
@@ -298,6 +315,11 @@ class ShadowBook:
 
         for pending in self._pending:
             episode = pending.episode
+            if episode.stop is None or episode.target is None:
+                # The intent event remains the refused-candidate ledger entry,
+                # but an incomplete bracket has no simulatable shadow outcome.
+                self._episode_tags.pop(episode.episode_id, None)
+                continue
             if asof <= episode.opened_ts or (
                 pending.eligible_after is not None
                 and asof <= pending.eligible_after
@@ -359,8 +381,8 @@ class ShadowBook:
 
             bar = bars.iloc[0]
             exit_result = check_exit(
-                stop=episode.stop,
-                target=episode.target,
+                stop=cast(float, episode.stop),
+                target=cast(float, episode.target),
                 bar_open=float(bar["o"]),
                 bar_low=float(bar["l"]),
                 bar_high=float(bar["h"]),
@@ -376,44 +398,88 @@ class ShadowBook:
             else:
                 exit_kind, raw_exit_price = exit_result
 
-            bps = slippage_bps_for(
-                self._execution_config,
-                episode.instrument,
-                asof,
-                tz=self._timezone,
-            )
-            exit_price = round(
-                apply_slippage(raw_exit_price, "sell", bps),
-                4,
-            )
             fills.append(
-                Fill(
-                    ticket_id=episode.episode_id,
-                    ts=asof,
-                    price=exit_price,
-                    shares=0,
-                    kind=exit_kind,
-                    book="shadow",
+                self._close_position(
+                    position,
+                    asof=asof,
+                    raw_exit_price=raw_exit_price,
+                    exit_kind=exit_kind,
                 )
             )
-            r_multiple = _r_multiple(
-                slipped_exit_price=exit_price,
-                slipped_entry_price=position.entry_price,
-                raw_entry_price=self._raw_entries.pop(episode.episode_id),
-                stop=episode.stop,
-            )
-            closed = ClosedTrade(
-                algo_id=episode.algo_id,
-                instrument=episode.instrument,
-                r_multiple=r_multiple,
-                exit_kind=exit_kind,
-            )
-            self._recently_closed.append(closed)
-            self._resolved_rs.setdefault(episode.algo_id, []).append(r_multiple)
 
         self._pending = still_pending
         self._positions = still_open
         return fills
+
+    def force_flat(self, asof: datetime, data: MarketData) -> list[Fill]:
+        """Drop unfilled episodes and close filled episodes at the last close."""
+        self.cancel_pending()
+        fills: list[Fill] = []
+        for position in self._positions:
+            episode = position.episode
+            bars = data.bars_1m(
+                episode.instrument,
+                asof=asof,
+                lookback_minutes=1,
+            )
+            if bars.empty:
+                raise RuntimeError(
+                    "cannot force-flat a filled shadow episode without a known bar"
+                )
+            fills.append(
+                self._close_position(
+                    position,
+                    asof=asof,
+                    raw_exit_price=float(bars.iloc[-1]["c"]),
+                    exit_kind="eod",
+                )
+            )
+        self._positions = []
+        return fills
+
+    def _close_position(
+        self,
+        position: _OpenShadow,
+        *,
+        asof: datetime,
+        raw_exit_price: float,
+        exit_kind: _ExitKind,
+    ) -> Fill:
+        episode = position.episode
+        bps = slippage_bps_for(
+            self._execution_config,
+            episode.instrument,
+            asof,
+            tz=self._timezone,
+        )
+        exit_price = round(
+            apply_slippage(raw_exit_price, "sell", bps),
+            4,
+        )
+        fill = Fill(
+            ticket_id=episode.episode_id,
+            ts=asof,
+            price=exit_price,
+            shares=0,
+            kind=exit_kind,
+            book="shadow",
+        )
+        r_multiple = _r_multiple(
+            slipped_exit_price=exit_price,
+            slipped_entry_price=position.entry_price,
+            raw_entry_price=self._raw_entries.pop(episode.episode_id),
+            stop=cast(float, episode.stop),
+        )
+        closed = ClosedTrade(
+            algo_id=episode.algo_id,
+            instrument=episode.instrument,
+            r_multiple=r_multiple,
+            exit_kind=exit_kind,
+            tag=episode.tag,
+        )
+        self._recently_closed.append(closed)
+        self._resolved_rs.setdefault(episode.algo_id, []).append(r_multiple)
+        return fill
 
     def take_closed_trades(self) -> list[ClosedTrade]:
         closed = self._recently_closed
@@ -519,6 +585,7 @@ def build_algo_metrics(
 __all__ = [
     "ClosedTrade",
     "RealBook",
+    "ShadowTag",
     "ShadowBook",
     "build_algo_metrics",
 ]
