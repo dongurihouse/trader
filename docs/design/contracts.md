@@ -148,6 +148,7 @@ Every record is a flat JSON object with common envelope fields
 |---|---|
 | `session_start` | `mode`, `config_sha256`, `package_version`, `symbols`, `roster: [{id,status}]` |
 | `tick` | `bar_ts` |
+| `day_skipped` | `day`, `reason` (e.g. `no_prev_session` — PIT rule 5; ports dt's skipped_no_prev) |
 | `intent` | full Intent fields |
 | `rejection` | intent fields + `rule`, `detail` |
 | `ticket` | full OrderTicket fields |
