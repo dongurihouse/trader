@@ -102,6 +102,26 @@ def _data_for_raw_opens(*raw_opens: float) -> FakeMarketData:
     )
 
 
+def _data_for_raw_entry_at(
+    entry_ts: datetime,
+    *,
+    raw_open: float = 100.0,
+) -> FakeMarketData:
+    return FakeMarketData(
+        {
+            "SNXX": _frame(
+                (
+                    entry_ts - timedelta(minutes=1),
+                    raw_open,
+                    raw_open + 1.0,
+                    raw_open - 1.0,
+                    raw_open,
+                )
+            )
+        }
+    )
+
+
 def _data_for_stop_gap_to_entry_open() -> FakeMarketData:
     return FakeMarketData(
         {
@@ -545,6 +565,33 @@ def test_losing_eod_leaves_consecutive_stop_streak_unchanged() -> None:
     assert book.state.muted_until == SESSION_CLOSE
 
 
+def test_losing_reversal_increments_losing_stop_streak_and_sets_cooldown() -> None:
+    book = RealBook(
+        _risk_config(
+            mute_after_consecutive_stops=99,
+            mute_after_cumulative_day_r=-99.0,
+            reversal_cooldown_minutes=17,
+        )
+    )
+    data = _data_for_raw_opens(100.0)
+    exit_ts = BAR_START + timedelta(minutes=4)
+
+    _apply_real_round_trip(
+        book,
+        data,
+        _ticket("ticket-reversal-loss"),
+        entry_ts=BAR_START + timedelta(minutes=1),
+        entry_price=100.25,
+        exit_ts=exit_ts,
+        exit_price=94.75,
+        exit_kind="reversal",
+    )
+
+    assert book.state.realized_r_today == pytest.approx(-1.1)
+    assert book._consecutive_losing_stops == 1
+    assert book.state.muted_until == exit_ts + timedelta(minutes=17)
+
+
 def test_reversal_sets_cooldown_even_for_winning_exit() -> None:
     book = RealBook(
         _risk_config(
@@ -553,60 +600,80 @@ def test_reversal_sets_cooldown_even_for_winning_exit() -> None:
             reversal_cooldown_minutes=10,
         )
     )
-    data = _data_for_raw_opens(100.0)
+    data = _data_for_raw_opens(100.0, 100.0)
+    loss_ts = BAR_START + timedelta(minutes=2)
     exit_ts = BAR_START + timedelta(minutes=5)
 
     _apply_real_round_trip(
         book,
         data,
-        _ticket(),
+        _ticket("ticket-stop-loss"),
         entry_ts=BAR_START + timedelta(minutes=1),
+        entry_price=100.25,
+        exit_ts=loss_ts,
+        exit_price=94.75,
+        exit_kind="stop",
+    )
+    assert book._consecutive_losing_stops == 1
+
+    _apply_real_round_trip(
+        book,
+        data,
+        _ticket("ticket-reversal-win", created_ts=loss_ts),
+        entry_ts=BAR_START + timedelta(minutes=2),
         entry_price=100.25,
         exit_ts=exit_ts,
         exit_price=100.50,
         exit_kind="reversal",
     )
 
-    assert book.state.realized_r_today > 0
+    assert book.resolved_r_multiples("breakout")[-1] > 0
+    assert book._consecutive_losing_stops == 0
     assert book.state.muted_until == exit_ts + timedelta(minutes=10)
 
 
-def test_reversal_cooldown_does_not_shorten_existing_day_mute() -> None:
+@pytest.mark.parametrize(
+    ("exit_ts", "expected_deadline"),
+    [
+        pytest.param(
+            BAR_START + timedelta(minutes=4),
+            SESSION_CLOSE,
+            id="day-mute-later",
+        ),
+        pytest.param(
+            SESSION_CLOSE - timedelta(minutes=5),
+            SESSION_CLOSE + timedelta(minutes=5),
+            id="cooldown-later",
+        ),
+    ],
+)
+def test_losing_reversal_uses_later_same_exit_mute_deadline(
+    exit_ts: datetime,
+    expected_deadline: datetime,
+) -> None:
     book = RealBook(
         _risk_config(
-            mute_after_consecutive_stops=99,
-            mute_after_cumulative_day_r=-1.0,
+            mute_after_consecutive_stops=1,
+            mute_after_cumulative_day_r=-99.0,
             reversal_cooldown_minutes=10,
         )
     )
-    data = _data_for_raw_opens(100.0, 100.0)
-    _apply_real_round_trip(
-        book,
-        data,
-        _ticket("ticket-loss"),
-        entry_ts=BAR_START + timedelta(minutes=1),
-        entry_price=100.25,
-        exit_ts=BAR_START + timedelta(minutes=1),
-        exit_price=94.0,
-        exit_kind="eod",
-    )
-    assert book.state.muted_until == SESSION_CLOSE
+    entry_ts = exit_ts - timedelta(minutes=1)
+    data = _data_for_raw_entry_at(entry_ts)
 
     _apply_real_round_trip(
         book,
         data,
-        _ticket(
-            "ticket-reversal",
-            created_ts=BAR_START + timedelta(minutes=1),
-        ),
-        entry_ts=BAR_START + timedelta(minutes=2),
+        _ticket("ticket-reversal-loss", created_ts=entry_ts - timedelta(minutes=1)),
+        entry_ts=entry_ts,
         entry_price=100.25,
-        exit_ts=BAR_START + timedelta(minutes=4),
-        exit_price=100.50,
+        exit_ts=exit_ts,
+        exit_price=94.75,
         exit_kind="reversal",
     )
 
-    assert book.state.muted_until == SESSION_CLOSE
+    assert book._consecutive_losing_stops == 1
+    assert book.state.muted_until == expected_deadline
 
 
 def test_start_new_day_resets_rails_but_preserves_resolved_history() -> None:

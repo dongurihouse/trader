@@ -1138,6 +1138,127 @@ def test_gate_refused_opposite_intent_still_arms_real_reversal() -> None:
     )
 
 
+def test_reversal_cooldown_globally_rejects_original_and_new_direction_intents() -> None:
+    long_intent_ts = BAR_START + timedelta(minutes=1)
+    long_entry_ts = BAR_START + timedelta(minutes=2)
+    reversal_intent_ts = BAR_START + timedelta(minutes=3)
+    reversal_exit_ts = BAR_START + timedelta(minutes=4)
+    cooldown_deadline = reversal_exit_ts + timedelta(minutes=10)
+    rows = []
+    for index in range(14):
+        bar_ts = BAR_START + timedelta(minutes=index)
+        open_ = (
+            102.0
+            if bar_ts == reversal_exit_ts - timedelta(minutes=1)
+            else 100.0
+        )
+        rows.append((bar_ts, open_, open_ + 1.0, open_ - 1.0, open_))
+    data = FakeMarketData({"SNXX": _frame(*rows)})
+    holder = ScriptedAlgo(
+        "holder",
+        {long_intent_ts: [_intent("holder", long_intent_ts)]},
+    )
+    reverser = ScriptedAlgo(
+        "reverser",
+        {
+            reversal_intent_ts: [
+                _intent(
+                    "reverser",
+                    reversal_intent_ts,
+                    side="short",
+                    meta={"case": "reverser"},
+                )
+            ]
+        },
+    )
+    cooldown_original = ScriptedAlgo(
+        "cooldown-original",
+        {
+            reversal_exit_ts: [
+                _intent(
+                    "cooldown-original",
+                    reversal_exit_ts,
+                    side="long",
+                )
+            ]
+        },
+    )
+    cooldown_new = ScriptedAlgo(
+        "cooldown-new",
+        {
+            reversal_exit_ts: [
+                _intent(
+                    "cooldown-new",
+                    reversal_exit_ts,
+                    side="short",
+                    meta={"case": "cooldown-new"},
+                )
+            ]
+        },
+    )
+    after_cooldown = ScriptedAlgo(
+        "after-cooldown",
+        {cooldown_deadline: [_intent("after-cooldown", cooldown_deadline)]},
+    )
+    telemetry = CollectingTelemetry()
+    runner, real_book, shadow_book = _runner(
+        data=data,
+        telemetry=telemetry,
+        roster=[
+            RosterEntry(holder, "emitting"),
+            RosterEntry(reverser, "emitting"),
+            RosterEntry(cooldown_original, "emitting"),
+            RosterEntry(cooldown_new, "emitting"),
+            RosterEntry(after_cooldown, "emitting"),
+        ],
+    )
+
+    runner.start_day(BAR_START.date())
+    for asof in (
+        long_intent_ts,
+        long_entry_ts,
+        reversal_intent_ts,
+        reversal_exit_ts,
+        cooldown_deadline,
+    ):
+        runner.process_bar(asof)
+
+    rejections = [
+        record for record in telemetry.records if record["ev"] == "rejection"
+    ]
+    assert [
+        (record["algo_id"], record["side"], record["rule"])
+        for record in rejections
+    ] == [
+        ("reverser", "short", "position_in_flight"),
+        ("cooldown-original", "long", "muted"),
+        ("cooldown-new", "short", "muted"),
+    ]
+    real_fills = [
+        record
+        for record in telemetry.records
+        if record["ev"] == "fill" and record["book"] == "real"
+    ]
+    assert [(record["kind"], record["price"]) for record in real_fills] == [
+        ("entry", 100.0),
+        ("reversal", 102.0),
+    ]
+    assert real_book.state.positions == []
+    assert real_book.state.muted_until == cooldown_deadline
+    assert real_book.resolved_r_multiples("holder") == pytest.approx([0.4])
+    assert shadow_book.resolved_r_multiples("cooldown-original") == []
+    assert shadow_book.resolved_r_multiples("cooldown-new") == []
+    tickets = [record for record in telemetry.records if record["ev"] == "ticket"]
+    assert [record["algo_id"] for record in tickets] == [
+        "holder",
+        "after-cooldown",
+    ]
+    assert not any(
+        record["ev"] == "rejection" and record["algo_id"] == "after-cooldown"
+        for record in telemetry.records
+    )
+
+
 def test_probe_opposite_intent_does_not_trigger_real_reversal() -> None:
     long_intent_ts = BAR_START + timedelta(minutes=1)
     long_entry_ts = BAR_START + timedelta(minutes=2)
