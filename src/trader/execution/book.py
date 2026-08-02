@@ -45,15 +45,20 @@ class ClosedTrade:
 def _raw_entry_price(
     data: MarketData,
     *,
+    prices: FillPriceResolver,
     instrument: str,
     entry_fill_ts: datetime,
 ) -> float:
-    bars = data.bars_1m(
-        instrument,
+    bar = prices.bar(
+        data,
+        instrument=instrument,
         asof=entry_fill_ts,
-        lookback_minutes=1,
     )
-    return float(bars.iloc[0]["o"])
+    if bar is None:
+        raise RuntimeError(
+            "cannot resolve raw entry price for a filled real-book entry"
+        )
+    return bar.o
 
 
 def _r_multiple(
@@ -75,6 +80,7 @@ class RealBook:
     def __init__(
         self,
         risk_config: RiskConfig,
+        execution_config: ExecutionConfig,
         *,
         commission: float = 0.0,
         timezone: str = "America/New_York",
@@ -91,6 +97,10 @@ class RealBook:
         self._risk_config = risk_config
         self._commission = commission
         self._tz = ZoneInfo(timezone)
+        self._prices = FillPriceResolver(
+            execution_config,
+            timezone=timezone,
+        )
         self._tickets: dict[str, OrderTicket] = {}
         self._positions_by_ticket: dict[str, PositionState] = {}
         self._raw_entries: dict[str, float] = {}
@@ -143,6 +153,7 @@ class RealBook:
         self._positions_by_ticket[fill.ticket_id] = position
         self._raw_entries[fill.ticket_id] = _raw_entry_price(
             data,
+            prices=self._prices,
             instrument=ticket.instrument,
             entry_fill_ts=fill.ts,
         )

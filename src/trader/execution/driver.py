@@ -366,10 +366,16 @@ def run_session_command(args) -> int | None:
     except ContractViolation as exc:
         _print_run_error(str(exc))
         return 2
-    risk = RiskRails(resolved.risk)
+    risk = RiskRails(
+        resolved.risk,
+        resolved.execution,
+        timezone=resolved.trader.timezone,
+    )
     real_book = RealBook(
         resolved.risk,
+        resolved.execution,
         commission=resolved.execution.fills.commission,
+        timezone=resolved.trader.timezone,
     )
     shadow_book = ShadowBook(resolved.execution)
     market_data = compose_real_market_data(resolved)

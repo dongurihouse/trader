@@ -197,14 +197,16 @@ def _runner(
         if execution_config is None
         else execution_config
     )
-    real_book = RealBook(risk_config)
+    real_book = RealBook(risk_config, execution_config)
     shadow_book = ShadowBook(execution_config)
     runner = SessionRunner(
         session_id="backtest-20260701-scripted",
         mode="backtest",
         market_data=data,
         broker=SimBroker(execution_config) if broker is None else broker,
-        risk=risk if risk is not None else RiskRails(risk_config),
+        risk=risk
+        if risk is not None
+        else RiskRails(risk_config, execution_config),
         real_book=real_book,
         shadow_book=shadow_book,
         telemetry=telemetry,
@@ -399,7 +401,7 @@ class _FailIfCalledRisk:
 class _FailForAlgoRisk:
     def __init__(self, blocked_algo_id: str) -> None:
         self._blocked_algo_id = blocked_algo_id
-        self._delegate = RiskRails(_risk_config())
+        self._delegate = RiskRails(_risk_config(), _execution_config())
 
     def check_and_size(
         self,

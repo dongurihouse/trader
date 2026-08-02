@@ -114,9 +114,14 @@ def test_shipped_roster_composes_and_runs_synthetic_session() -> None:
             resolved.execution,
             timezone=resolved.trader.timezone,
         ),
-        risk=RiskRails(resolved.risk),
+        risk=RiskRails(
+            resolved.risk,
+            resolved.execution,
+            timezone=resolved.trader.timezone,
+        ),
         real_book=RealBook(
             resolved.risk,
+            resolved.execution,
             timezone=resolved.trader.timezone,
         ),
         shadow_book=ShadowBook(
