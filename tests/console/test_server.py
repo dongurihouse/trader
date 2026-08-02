@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 import json
 from pathlib import Path
+import re
 import socket
 import time
 
@@ -106,6 +107,18 @@ def _get_json(server: ConsoleServer, path: str) -> tuple[int, dict, dict[str, st
         connection.close()
 
 
+def _get_status(server: ConsoleServer, path: str) -> int:
+    connection = http.client.HTTPConnection(
+        server.server_address[0], server.server_address[1], timeout=1.0
+    )
+    try:
+        connection.request("GET", path)
+        response = connection.getresponse()
+        return response.status
+    finally:
+        connection.close()
+
+
 def _open_sse(server: ConsoleServer, session_id: str) -> tuple[socket.socket, _SSEReader]:
     sock = socket.create_connection(server.server_address, timeout=1.0)
     sock.settimeout(0.1)
@@ -181,12 +194,95 @@ def test_sessions_are_sorted_and_resolve_named_or_newest(tmp_path: Path) -> None
     assert resolve_session_dir(tmp_path, None) == sessions_dir / "paper-20260703-093000"
 
 
+def test_sessions_sort_by_timestamp_across_modes_and_resolve_newest(
+    tmp_path: Path,
+) -> None:
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    for session_id in (
+        "paper-20260731-093000",
+        "backtest-20260801-090000",
+        "cross-ticker-20260731-100000",
+        "fixture-session-001",
+    ):
+        (sessions_dir / session_id).mkdir()
+
+    assert list_sessions(tmp_path) == [
+        "fixture-session-001",
+        "paper-20260731-093000",
+        "cross-ticker-20260731-100000",
+        "backtest-20260801-090000",
+    ]
+    assert resolve_session_dir(tmp_path, None) == (
+        sessions_dir / "backtest-20260801-090000"
+    )
+
+
 def test_resolve_session_dir_names_missing_session(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="does-not-exist"):
         resolve_session_dir(tmp_path, "does-not-exist")
 
     with pytest.raises(FileNotFoundError, match="no sessions"):
         resolve_session_dir(tmp_path, None)
+
+
+@pytest.mark.parametrize(
+    "session_id",
+    ["../outside", "nested/session", r"nested\session", ".", ".."],
+)
+def test_resolve_session_dir_rejects_non_simple_session_ids(
+    tmp_path: Path, session_id: str
+) -> None:
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    (tmp_path / "outside").mkdir()
+    (sessions_dir / "nested" / "session").mkdir(parents=True)
+    (sessions_dir / r"nested\session").mkdir()
+
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        resolve_session_dir(tmp_path, session_id)
+
+
+def test_resolve_session_dir_rejects_absolute_session_id(tmp_path: Path) -> None:
+    (tmp_path / "sessions").mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        resolve_session_dir(tmp_path, str(outside))
+
+
+def test_resolve_session_dir_rejects_symlink_outside_sessions(tmp_path: Path) -> None:
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (sessions_dir / "linked-session").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        resolve_session_dir(tmp_path, "linked-session")
+
+
+def test_resolve_session_dir_rejects_newest_symlink_outside_sessions(
+    tmp_path: Path,
+) -> None:
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (sessions_dir / "paper-20260801-090000").symlink_to(
+        outside, target_is_directory=True
+    )
+
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        resolve_session_dir(tmp_path, None)
+
+
+def test_resolve_session_dir_accepts_simple_session_id(tmp_path: Path) -> None:
+    session_dir = tmp_path / "sessions" / "fixture-session-001"
+    session_dir.mkdir(parents=True)
+
+    assert resolve_session_dir(tmp_path, "fixture-session-001") == session_dir
 
 
 def test_read_new_lines_preserves_partial_line_offset(tmp_path: Path) -> None:
@@ -211,6 +307,47 @@ def test_read_new_lines_preserves_partial_line_offset(tmp_path: Path) -> None:
 
 def test_read_new_lines_treats_missing_file_as_empty(tmp_path: Path) -> None:
     assert read_new_lines(tmp_path / "missing.jsonl", 17) == (17, [])
+
+
+@pytest.mark.parametrize(
+    ("host", "expected_family"),
+    [
+        ("localhost", socket.AF_INET),
+        ("127.0.0.1", socket.AF_INET),
+        ("::1", socket.AF_INET6),
+    ],
+)
+def test_console_server_accepts_loopback_hosts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    host: str,
+    expected_family: socket.AddressFamily,
+) -> None:
+    monkeypatch.setattr(ConsoleServer, "server_bind", lambda _server: None)
+    monkeypatch.setattr(ConsoleServer, "server_activate", lambda _server: None)
+    config = ConsoleConfig(host=host, port=0, data_root=tmp_path)
+
+    server = ConsoleServer(config)
+    try:
+        assert server.socket.family == expected_family
+    finally:
+        server.server_close()
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.10", "console.local"])
+def test_console_server_rejects_non_loopback_hosts_before_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    host: str,
+) -> None:
+    def fail_if_binding_attempted(_server: ConsoleServer) -> None:
+        raise AssertionError("invalid host reached socket binding")
+
+    monkeypatch.setattr(ConsoleServer, "server_bind", fail_if_binding_attempted)
+    config = ConsoleConfig(host=host, port=0, data_root=tmp_path)
+
+    with pytest.raises(ValueError, match=re.escape(host)):
+        ConsoleServer(config)
 
 
 def test_server_binds_ephemeral_localhost_and_lists_sessions(
@@ -276,6 +413,17 @@ def test_events_returns_404_for_missing_session(
     assert status == 404
     assert headers["Content-Type"] == "application/json"
     assert "does-not-exist" in body["error"]
+
+
+def test_events_returns_404_for_url_encoded_session_separator(
+    running_server: tuple[ConsoleServer, Path],
+) -> None:
+    server, _ = running_server
+    (server.config.data_root / "outside").mkdir()
+
+    status = _get_status(server, "/events?session=..%2foutside")
+
+    assert status == 404
 
 
 def test_unknown_route_returns_404(running_server: tuple[ConsoleServer, Path]) -> None:

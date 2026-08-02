@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from contextlib import AbstractContextManager, contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import ipaddress
 import json
+import socket
 import threading
 import time
 from urllib.parse import parse_qs, urlparse
@@ -24,10 +26,30 @@ class ConsoleServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, config: ConsoleConfig) -> None:
+        host_address = _require_loopback_host(config.host)
+        if isinstance(host_address, ipaddress.IPv6Address):
+            self.address_family = socket.AF_INET6
+
         self.config = config
         self.stop_event = threading.Event()
         self.serve_thread: threading.Thread | None = None
         super().__init__((config.host, config.port), _ConsoleRequestHandler)
+
+
+def _require_loopback_host(
+    host: str,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    if host == "localhost":
+        return None
+
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        raise ValueError(f"console host {host!r} is not a loopback address") from None
+
+    if not address.is_loopback:
+        raise ValueError(f"console host {host!r} is not a loopback address")
+    return address
 
 
 class _ConsoleRequestHandler(BaseHTTPRequestHandler):
