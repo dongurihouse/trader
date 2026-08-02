@@ -9,7 +9,7 @@ import time
 
 from trader.console.config import load_console_config
 from trader.console.report import write_report
-from trader.console.server import run_server
+from trader.console.server import ConsolePortInUseError, run_server
 from trader.console.sessions import resolve_session_dir
 
 
@@ -88,14 +88,18 @@ def _handle_console(args: argparse.Namespace) -> int:
         return 1
 
     session_id = session_dir.name
-    with run_server(config) as server:
-        host, port = server.server_address
-        print(
-            f"Serving session {session_id!r} at "
-            f"http://{host}:{port}/?session={session_id}",
-            flush=True,
-        )
-        _wait_until_interrupted()
+    try:
+        with run_server(config) as server:
+            host, port = server.server_address
+            print(
+                f"Serving session {session_id!r} at "
+                f"http://{host}:{port}/?session={session_id}",
+                flush=True,
+            )
+            _wait_until_interrupted()
+    except ConsolePortInUseError as exc:
+        print(exc, file=sys.stderr)
+        return 1
     return 0
 
 

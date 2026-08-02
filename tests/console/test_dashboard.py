@@ -59,6 +59,7 @@ def test_root_serves_self_contained_dashboard(running_server: ConsoleServer) -> 
         'id="leaderboard-body"',
         "n_real",
         "n_shadow",
+        "Number.isInteger",
         'id="shadow-caveat"',
         SHADOW_CAVEAT_TEXT,
         'id="cum-r-sparkline"',

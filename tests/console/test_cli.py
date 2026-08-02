@@ -165,6 +165,30 @@ def test_console_command_returns_one_when_no_sessions_exist(
     assert "no sessions" in captured.err.lower()
 
 
+def test_console_command_returns_one_when_port_is_in_use(
+    report_cli_fixture: tuple[Path, Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_dir, _ = report_cli_fixture
+    parser = _build_component_parser()
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        (config_dir / "console.yaml").write_text(
+            f"host: 127.0.0.1\nport: {port}\n", encoding="utf-8"
+        )
+        args = parser.parse_args(["console", "--config-dir", str(config_dir)])
+
+        result = args.func(args)
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert captured.out == ""
+    assert captured.err == f"console server: port {port} is already in use\n"
+
+
 def test_wait_until_interrupted_returns_on_keyboard_interrupt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

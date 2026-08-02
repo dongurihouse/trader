@@ -309,6 +309,22 @@ def test_read_new_lines_treats_missing_file_as_empty(tmp_path: Path) -> None:
     assert read_new_lines(tmp_path / "missing.jsonl", 17) == (17, [])
 
 
+def test_read_new_lines_skips_malformed_complete_lines(tmp_path: Path) -> None:
+    path = tmp_path / "telemetry.jsonl"
+    contents = (
+        b'{"ev": "session_start"}\n'
+        b"not json at all\n"
+        b'{"ev": "tick"}\n'
+    )
+    path.write_bytes(contents)
+
+    offset, records = read_new_lines(path, 0)
+
+    assert offset == len(contents)
+    assert records == [{"ev": "session_start"}, {"ev": "tick"}]
+    assert read_new_lines(path, offset) == (offset, [])
+
+
 @pytest.mark.parametrize(
     ("host", "expected_family"),
     [
@@ -348,6 +364,19 @@ def test_console_server_rejects_non_loopback_hosts_before_binding(
 
     with pytest.raises(ValueError, match=re.escape(host)):
         ConsoleServer(config)
+
+
+def test_console_server_names_occupied_port(tmp_path: Path) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        config = ConsoleConfig(host="127.0.0.1", port=port, data_root=tmp_path)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            ConsoleServer(config)
+
+    assert str(exc_info.value) == f"console server: port {port} is already in use"
 
 
 def test_server_binds_ephemeral_localhost_and_lists_sessions(

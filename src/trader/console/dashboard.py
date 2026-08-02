@@ -212,7 +212,10 @@ _DASHBOARD_HTML = """<!doctype html>
 
       function formatMetric(value) {
         if (value == null) return "—";
-        return typeof value === "number" ? value.toFixed(3) : String(value);
+        if (typeof value === "number") {
+          return Number.isInteger(value) ? String(value) : value.toFixed(3);
+        }
+        return String(value);
       }
 
       function metricCells(record) {

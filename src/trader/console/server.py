@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager, contextmanager
+import errno
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
@@ -20,6 +21,10 @@ from trader.console.telemetry_feed import read_new_lines
 POLL_INTERVAL_SECONDS = 0.05
 
 
+class ConsolePortInUseError(RuntimeError):
+    """Raised when the configured console port already has a listener."""
+
+
 class ConsoleServer(ThreadingHTTPServer):
     """Thread-per-request server carrying console configuration and stop state."""
 
@@ -33,7 +38,14 @@ class ConsoleServer(ThreadingHTTPServer):
         self.config = config
         self.stop_event = threading.Event()
         self.serve_thread: threading.Thread | None = None
-        super().__init__((config.host, config.port), _ConsoleRequestHandler)
+        try:
+            super().__init__((config.host, config.port), _ConsoleRequestHandler)
+        except OSError as exc:
+            if exc.errno != errno.EADDRINUSE:
+                raise
+            raise ConsolePortInUseError(
+                f"console server: port {config.port} is already in use"
+            ) from None
 
 
 def _require_loopback_host(
