@@ -62,6 +62,22 @@ def _register_fills(subparsers) -> None:
     record_parser.set_defaults(func=_handle_fills_record)
 
 
+def _register_run(subparsers) -> None:
+    """Register the execution session command."""
+    from trader.execution.driver import run_session_command
+
+    run_parser = subparsers.add_parser("run")
+    run_parser.add_argument(
+        "--mode",
+        required=True,
+        choices=["backtest", "paper", "live"],
+    )
+    run_parser.add_argument("--start", default=None)
+    run_parser.add_argument("--end", default=None)
+    run_parser.set_defaults(func=run_session_command)
+
+
 def register(subparsers) -> None:
     """Register all execution component commands with the top-level parser."""
     _register_fills(subparsers)
+    _register_run(subparsers)
