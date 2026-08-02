@@ -250,6 +250,9 @@ class SessionRunner:
                     # closing machinery for a path nothing currently exercises.
                     continue
 
+                if intent.side is not None:
+                    self._shadow_book.mark_reversal(asof, intent.side)
+
                 real_positions = self._real_book.state.positions
                 if (
                     entry.status != "probe"
@@ -388,9 +391,12 @@ class SessionRunner:
         intent: Intent,
         tag: ShadowTag,
     ) -> None:
+        if intent.side is None:
+            raise ValueError("open shadow intents require a side")
         self._shadow_book.open(
             algo_id=intent.algo_id,
             instrument=intent.instrument,
+            side=intent.side,
             stop=intent.stop,
             target=intent.target,
             tag=tag,

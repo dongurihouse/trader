@@ -7,12 +7,13 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import pytest
 
-from trader.contracts import Fill, OrderTicket, PositionState
+from trader.contracts import Fill, OrderTicket, PositionState, Side
 from trader.contracts.testing import FakeMarketData
 from trader.execution.book import (
     ClosedTrade,
     RealBook,
     ShadowBook,
+    ShadowTag,
     build_algo_metrics,
 )
 from trader.execution.broker import SimBroker, apply_slippage
@@ -161,6 +162,28 @@ def _ticket(
         target=target,
         risk={"fixture": True},
         created_ts=created_ts,
+    )
+
+
+def _open_shadow(
+    book: ShadowBook,
+    *,
+    algo_id: str,
+    side: Side = "long",
+    instrument: str = "SNXX",
+    stop: float | None = 95.0,
+    target: float | None = 105.0,
+    tag: ShadowTag = "probe",
+    opened_ts: datetime = BAR_START,
+) -> None:
+    book.open(
+        algo_id=algo_id,
+        instrument=instrument,
+        side=side,
+        stop=stop,
+        target=target,
+        tag=tag,
+        opened_ts=opened_ts,
     )
 
 
@@ -727,9 +750,9 @@ def test_shadow_entry_and_exit_use_x4_slippage_and_zero_real_shares() -> None:
             )
         }
     )
-    book.open(
+    _open_shadow(
+        book,
         algo_id="probe-algo",
-        instrument="SNXX",
         stop=95.0,
         target=105.0,
         tag="probe",
@@ -775,9 +798,9 @@ def test_shadow_book_records_zero_r_when_gap_entry_opens_on_stop() -> None:
     intent_asof = BAR_START + timedelta(minutes=1)
     fill_asof = BAR_START + timedelta(minutes=2)
     data = _data_for_stop_gap_to_entry_open()
-    book.open(
+    _open_shadow(
+        book,
         algo_id="probe-algo",
-        instrument="SNXX",
         stop=99.0,
         target=105.0,
         tag="probe",
@@ -842,7 +865,8 @@ def test_shadow_concurrent_algos_resolve_independently_on_different_bars() -> No
             ),
         }
     )
-    book.open(
+    _open_shadow(
+        book,
         algo_id="stop-algo",
         instrument="SNXX",
         stop=95.0,
@@ -850,7 +874,8 @@ def test_shadow_concurrent_algos_resolve_independently_on_different_bars() -> No
         tag="probe",
         opened_ts=BAR_START,
     )
-    book.open(
+    _open_shadow(
+        book,
         algo_id="target-algo",
         instrument="SNDQ",
         stop=95.0,
@@ -871,6 +896,145 @@ def test_shadow_concurrent_algos_resolve_independently_on_different_bars() -> No
     assert book.resolved_r_multiples("target-algo") == pytest.approx([0.959])
 
 
+def test_shadow_reversal_mark_resolves_only_conflicting_episode_on_later_open() -> None:
+    book = ShadowBook(_execution_config())
+    entry_asof = BAR_START + timedelta(minutes=1)
+    mark_asof = BAR_START + timedelta(minutes=2)
+    reversal_asof = BAR_START + timedelta(minutes=3)
+    data = FakeMarketData(
+        {
+            "SNXX": _frame(
+                (BAR_START, 100.0, 101.0, 99.0, 100.0),
+                (
+                    BAR_START + timedelta(minutes=1),
+                    100.0,
+                    106.0,
+                    96.0,
+                    100.0,
+                ),
+                (
+                    BAR_START + timedelta(minutes=2),
+                    102.0,
+                    106.0,
+                    96.0,
+                    102.0,
+                ),
+            )
+        }
+    )
+    _open_shadow(
+        book,
+        algo_id="probe-long",
+        side="long",
+        tag="probe",
+    )
+    _open_shadow(
+        book,
+        algo_id="rejected-short",
+        side="short",
+        tag="rejected",
+    )
+
+    entry_fills = book.on_bar(entry_asof, data)
+    long_id = next(
+        fill.ticket_id for fill in entry_fills if "probe-long" in fill.ticket_id
+    )
+    short_id = next(
+        fill.ticket_id for fill in entry_fills if "rejected-short" in fill.ticket_id
+    )
+
+    book.mark_reversal(mark_asof, "long")
+    book.mark_reversal(mark_asof, "long")
+
+    assert book.on_bar(mark_asof, data) == [
+        Fill(
+            ticket_id=long_id,
+            ts=mark_asof,
+            price=round(apply_slippage(105.0, "sell", 25.0), 4),
+            shares=0,
+            kind="target",
+            book="shadow",
+        )
+    ]
+    assert book.on_bar(reversal_asof, data) == [
+        Fill(
+            ticket_id=short_id,
+            ts=reversal_asof,
+            price=round(apply_slippage(102.0, "sell", 25.0), 4),
+            shares=0,
+            kind="reversal",
+            book="shadow",
+        )
+    ]
+    assert [
+        (closed.algo_id, closed.exit_kind, closed.tag)
+        for closed in book.take_closed_trades()
+    ] == [
+        ("probe-long", "target", "probe"),
+        ("rejected-short", "reversal", "rejected"),
+    ]
+    assert book.resolved_r_multiples("probe-long") == pytest.approx([0.8975])
+    assert book.resolved_r_multiples("rejected-short") == pytest.approx([0.299])
+
+
+def test_shadow_reversal_mark_with_same_side_leaves_bracket_exit_unchanged() -> None:
+    book = ShadowBook(_execution_config())
+    entry_asof = BAR_START + timedelta(minutes=1)
+    mark_asof = BAR_START + timedelta(minutes=2)
+    exit_asof = BAR_START + timedelta(minutes=3)
+    data = FakeMarketData(
+        {
+            "SNXX": _frame(
+                (BAR_START, 100.0, 101.0, 99.0, 100.0),
+                (
+                    BAR_START + timedelta(minutes=1),
+                    100.0,
+                    101.0,
+                    99.0,
+                    100.0,
+                ),
+                (
+                    BAR_START + timedelta(minutes=2),
+                    100.0,
+                    106.0,
+                    99.0,
+                    105.0,
+                ),
+            )
+        }
+    )
+    _open_shadow(
+        book,
+        algo_id="same-side",
+        side="long",
+        tag="probe",
+    )
+    entry_fills = book.on_bar(entry_asof, data)
+
+    book.mark_reversal(mark_asof, "long")
+
+    assert book.on_bar(mark_asof, data) == []
+    assert book.on_bar(exit_asof, data) == [
+        Fill(
+            ticket_id=entry_fills[0].ticket_id,
+            ts=exit_asof,
+            price=round(apply_slippage(105.0, "sell", 25.0), 4),
+            shares=0,
+            kind="target",
+            book="shadow",
+        )
+    ]
+    assert book.take_closed_trades() == [
+        ClosedTrade(
+            algo_id="same-side",
+            instrument="SNXX",
+            r_multiple=pytest.approx(0.8975),
+            exit_kind="target",
+            tag="probe",
+        )
+    ]
+
+
 def test_shadow_same_algo_same_bar_episode_ids_are_distinct_and_deterministic() -> None:
     config = _execution_config()
     data = _data_for_raw_opens(100.0)
@@ -879,9 +1043,9 @@ def test_shadow_same_algo_same_bar_episode_ids_are_distinct_and_deterministic() 
     second_book = ShadowBook(config)
     for book in (first_book, second_book):
         for tag in ("probe", "rejected"):
-            book.open(
+            _open_shadow(
+                book,
                 algo_id="same-algo",
-                instrument="SNXX",
                 stop=90.0,
                 target=110.0,
                 tag=tag,
@@ -923,7 +1087,8 @@ def test_shadow_and_sim_broker_fill_prices_match_exactly() -> None:
         }
     )
     broker.submit(ticket)
-    shadow.open(
+    _open_shadow(
+        shadow,
         algo_id=ticket.algo_id,
         instrument=ticket.instrument,
         stop=95.0,

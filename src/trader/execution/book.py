@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Literal, cast
 from zoneinfo import ZoneInfo
@@ -16,6 +16,7 @@ from trader.contracts import (
     OrderTicket,
     PortfolioState,
     PositionState,
+    Side,
 )
 
 from .broker.sim import apply_slippage, check_exit, slippage_bps_for
@@ -235,6 +236,7 @@ class _ShadowEpisode:
     episode_id: str
     algo_id: str
     instrument: str
+    side: Side
     stop: float | None
     target: float | None
     tag: ShadowTag
@@ -251,6 +253,7 @@ class _PendingShadow:
 class _OpenShadow:
     episode: _ShadowEpisode
     entry_price: float
+    reversal_eligible_after: datetime | None = None
 
 
 class ShadowBook:
@@ -279,6 +282,7 @@ class ShadowBook:
         *,
         algo_id: str,
         instrument: str,
+        side: Side,
         stop: float | None,
         target: float | None,
         tag: ShadowTag,
@@ -293,6 +297,7 @@ class ShadowBook:
             ),
             algo_id=algo_id,
             instrument=instrument,
+            side=side,
             stop=stop,
             target=target,
             tag=tag,
@@ -380,7 +385,36 @@ class ShadowBook:
             )
 
         still_open: list[_OpenShadow] = []
+        unmarked_positions: list[_OpenShadow] = []
         for position in positions_to_check:
+            if position.reversal_eligible_after is None:
+                unmarked_positions.append(position)
+                continue
+
+            if asof <= position.reversal_eligible_after:
+                still_open.append(position)
+                continue
+
+            episode = position.episode
+            bars = data.bars_1m(
+                episode.instrument,
+                asof=asof,
+                lookback_minutes=1,
+            )
+            if bars.empty:
+                still_open.append(position)
+                continue
+
+            fills.append(
+                self._close_position(
+                    position,
+                    asof=asof,
+                    raw_exit_price=float(bars.iloc[0]["o"]),
+                    exit_kind="reversal",
+                )
+            )
+
+        for position in unmarked_positions:
             episode = position.episode
             bars = data.bars_1m(
                 episode.instrument,
@@ -422,6 +456,21 @@ class ShadowBook:
         self._pending = still_pending
         self._positions = still_open
         return fills
+
+    def mark_reversal(self, asof: datetime, trigger_side: Side) -> None:
+        """Schedule conflicting filled shadow episodes for a later open exit."""
+        marked: list[_OpenShadow] = []
+        for position in self._positions:
+            if (
+                position.episode.side != trigger_side
+                and position.reversal_eligible_after is None
+            ):
+                marked.append(
+                    replace(position, reversal_eligible_after=asof)
+                )
+                continue
+            marked.append(position)
+        self._positions = marked
 
     def force_flat(self, asof: datetime, data: MarketData) -> list[Fill]:
         """Drop unfilled episodes and close filled episodes at the last close."""
