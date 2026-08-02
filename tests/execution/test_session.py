@@ -432,6 +432,7 @@ def test_start_day_drops_pending_entry_and_resets_in_flight_guard() -> None:
 
     runner.start_day(next_day_start.date())
     assert real_book.state.entries_today == 0
+    assert real_book.forget_unfilled_tickets() == {}
     runner.process_bar(second_intent_ts)
     runner.process_bar(second_fill_ts)
 

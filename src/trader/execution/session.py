@@ -170,6 +170,7 @@ class SessionRunner:
 
     def start_day(self, day: date) -> None:
         self._broker.cancel_open("new trading day")
+        self._real_book.forget_unfilled_tickets()
         self._real_book.start_new_day()
         # Day roll cancels only unfilled shadow entries. Filled shadow episodes
         # are kept explicit; callers invoke start_day only when the real book is flat.
