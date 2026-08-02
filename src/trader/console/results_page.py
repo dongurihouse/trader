@@ -34,8 +34,44 @@ __BASE_CSS__
     }
 
     .session-line {
-      margin: 4px 0 14px;
+      margin: 0;
       color: var(--muted);
+      text-align: right;
+    }
+
+    .session-control {
+      display: grid;
+      gap: 6px;
+      width: min(440px, 100%);
+    }
+
+    .session-control label {
+      display: grid;
+      gap: 5px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    #session-picker {
+      width: 100%;
+      min-height: 36px;
+      padding: 7px 9px;
+      border: 1px solid var(--panel-edge);
+      border-radius: 8px;
+      background: #0d141a;
+      color: var(--text);
+      font: inherit;
+    }
+
+    #session-picker:focus {
+      border-color: var(--accent);
+      outline: none;
+    }
+
+    #session-picker:disabled {
+      color: var(--muted);
+      cursor: not-allowed;
+      opacity: 0.75;
     }
 
     .kpi-grid {
@@ -269,7 +305,13 @@ __BASE_CSS__
   <main>
     <header>
       <h1>trader.console results</h1>
-      <div id="session-label" class="session-line" aria-live="polite">loading...</div>
+      <div class="session-control">
+        <label for="session-picker">
+          Session
+          <select id="session-picker" disabled></select>
+        </label>
+        <div id="session-label" class="session-line" aria-live="polite">loading...</div>
+      </div>
     </header>
 
     __NAV_HTML__
@@ -339,6 +381,7 @@ __BASE_CSS__
       "use strict";
 
       const sessionLabel = document.getElementById("session-label");
+      const sessionPicker = document.getElementById("session-picker");
       const emptyState = document.getElementById("empty-state");
       const resultsContent = document.getElementById("results-content");
       const execSummary = document.getElementById("exec-summary");
@@ -350,7 +393,7 @@ __BASE_CSS__
       const tradesTable = document.getElementById("day-trades-table");
       const tradeDetail = document.getElementById("trade-detail");
       const searchParams = new URLSearchParams(window.location.search);
-      const explicitSession = searchParams.has("session")
+      const initialSession = searchParams.has("session")
         ? searchParams.get("session")
         : null;
 
@@ -363,6 +406,7 @@ __BASE_CSS__
         candlesByDay: new Map(),
         markerHits: [],
         knownSessions: [],
+        selectedSession: initialSession,
       };
 
       function escapeHtml(value) {
@@ -412,12 +456,68 @@ __BASE_CSS__
 
       function apiPath(path, extras = {}) {
         const params = new URLSearchParams();
-        if (explicitSession !== null) params.set("session", explicitSession);
+        if (state.selectedSession !== null) params.set("session", state.selectedSession);
         for (const [key, value] of Object.entries(extras)) {
           params.set(key, value);
         }
         const query = params.toString();
         return query ? `${path}?${query}` : path;
+      }
+
+      function sessionMode(sessionId) {
+        const value = String(sessionId);
+        const separator = value.indexOf("-");
+        return separator === -1 ? value : value.slice(0, separator);
+      }
+
+      function sessionsNewestFirst() {
+        return [...state.knownSessions].reverse();
+      }
+
+      function defaultSelectedSession() {
+        const sessions = sessionsNewestFirst();
+        return sessions.find((sessionId) => sessionId.startsWith("backtest-")) ||
+          sessions[0] || null;
+      }
+
+      function syncSessionPicker() {
+        if (state.selectedSession === null) {
+          sessionPicker.selectedIndex = -1;
+          return;
+        }
+        sessionPicker.value = state.selectedSession;
+      }
+
+      function renderSessionPicker() {
+        const sessions = sessionsNewestFirst();
+        if (state.selectedSession === null) {
+          state.selectedSession = defaultSelectedSession();
+        }
+        sessionPicker.textContent = "";
+        for (const sessionId of sessions) {
+          const option = document.createElement("option");
+          option.value = sessionId;
+          option.textContent = `${sessionId} (${sessionMode(sessionId)})`;
+          sessionPicker.appendChild(option);
+        }
+        sessionPicker.disabled = sessions.length === 0;
+        syncSessionPicker();
+      }
+
+      function replaceSessionUrl(sessionId) {
+        const url = new URL(window.location.href);
+        url.search = "";
+        url.searchParams.set("session", sessionId);
+        history.replaceState(null, "", url);
+      }
+
+      function resetSessionViewState() {
+        state.payload = null;
+        state.selectedAlgo = null;
+        state.selectedDay = null;
+        state.selectedTradeId = null;
+        state.candlesByDay.clear();
+        state.markerHits = [];
       }
 
       function sortedDays() {
@@ -861,12 +961,16 @@ __BASE_CSS__
       async function loadSessionList() {
         try {
           const response = await fetch("/sessions");
-          if (!response.ok) return;
-          const payload = await response.json();
-          state.knownSessions = payload.sessions || [];
+          if (response.ok) {
+            const payload = await response.json();
+            state.knownSessions = payload.sessions || [];
+          } else {
+            state.knownSessions = [];
+          }
         } catch (error) {
           state.knownSessions = [];
         }
+        renderSessionPicker();
       }
 
       async function loadResults() {
@@ -886,6 +990,10 @@ __BASE_CSS__
           state.selectedDay = chooseInitialDay();
           state.selectedTradeId = null;
           const session = payload.session || {};
+          if (session.id != null) {
+            state.selectedSession = String(session.id);
+            syncSessionPicker();
+          }
           sessionLabel.textContent = `${formatValue(session.id)} · ${formatValue(session.mode)}`;
           renderExecSummary();
           renderDataThinWarnings();
@@ -913,6 +1021,13 @@ __BASE_CSS__
         renderTradeTable();
         renderTradeDetail();
         drawChart();
+      });
+      sessionPicker.addEventListener("change", async () => {
+        if (!sessionPicker.value || sessionPicker.value === state.selectedSession) return;
+        state.selectedSession = sessionPicker.value;
+        resetSessionViewState();
+        replaceSessionUrl(state.selectedSession);
+        await loadResults();
       });
       window.addEventListener("resize", drawChart);
 

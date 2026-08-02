@@ -139,6 +139,7 @@ def _assert_results_html_is_self_contained(body: str) -> None:
         'href="/"',
         'href="/results" aria-current="page"',
         'id="session-label"',
+        'id="session-picker"',
         'id="algo-filter"',
         'class="algo-pill"',
         'id="days-list"',
@@ -167,6 +168,22 @@ def test_render_results_html_is_self_contained() -> None:
     body = render_results_html()
 
     _assert_results_html_is_self_contained(body)
+
+
+def test_results_html_wires_session_picker_to_mutable_session_state() -> None:
+    body = render_results_html()
+
+    assert "selectedSession:" in body
+    assert "state.selectedSession" in body
+    assert "const explicitSession" not in body
+    assert 'sessionPicker.addEventListener("change"' in body
+    assert "state.payload = null" in body
+    assert "state.selectedAlgo = null" in body
+    assert "state.selectedDay = null" in body
+    assert "state.selectedTradeId = null" in body
+    assert "state.candlesByDay.clear()" in body
+    assert "state.markerHits = []" in body
+    assert "history.replaceState" in body
 
 
 def test_results_api_returns_built_payload_for_explicit_session(tmp_path: Path) -> None:
