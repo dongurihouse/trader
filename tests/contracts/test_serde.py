@@ -18,6 +18,7 @@ from trader.contracts.orders import (
 from trader.contracts.telemetry import (
     AlgoErrorEvent,
     AlgoMetrics,
+    DataThinEvent,
     DaySkippedEvent,
     FillEvent,
     IntentEvent,
@@ -109,6 +110,7 @@ RECORDS = [
         shares=100,
         kind="entry",
         book="real",
+        price_basis="real",
     ),
     Rejection(
         intent=REJECTION_INTENT,
@@ -146,6 +148,8 @@ RECORDS = [
         config_sha256="abc123",
         package_version="0.1.0",
         symbols=["SNDK", "SNXX"],
+        etf_price_basis="auto",
+        qualifying_day_counts={"SNXX": 1, "SNDQ": 0},
         roster=[
             {"id": "breakout", "status": "emitting"},
             {"id": "mean-reversion", "status": "probe"},
@@ -163,6 +167,15 @@ RECORDS = [
         session="session-001",
         day="2026-07-01",
         reason="no_prev_session",
+    ),
+    DataThinEvent(
+        ev="data_thin",
+        ts=TS,
+        session="session-001",
+        symbol="SNXX",
+        day="2026-07-01",
+        bar_count=42,
+        min_intraday_bars=100,
     ),
     IntentEvent(
         ev="intent",
@@ -223,6 +236,7 @@ RECORDS = [
         shares=100,
         kind="entry",
         book="real",
+        price_basis="real",
         tag=None,
     ),
     PositionClosedEvent(

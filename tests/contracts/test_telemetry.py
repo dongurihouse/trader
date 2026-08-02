@@ -23,6 +23,8 @@ EVENT_CASES = [
             "config_sha256": "abc123",
             "package_version": "0.1.0",
             "symbols": ["SNDK", "SNXX"],
+            "etf_price_basis": "auto",
+            "qualifying_day_counts": {"SNXX": 1, "SNDQ": 0},
             "roster": [
                 {"id": "breakout", "status": "emitting"},
                 {"id": "mean-reversion", "status": "probe"},
@@ -46,6 +48,18 @@ EVENT_CASES = [
             "session": "session-001",
             "day": "2026-07-01",
             "reason": "no_prev_session",
+        },
+    ),
+    (
+        "DataThinEvent",
+        {
+            "ev": "data_thin",
+            "ts": TS,
+            "session": "session-001",
+            "symbol": "SNXX",
+            "day": "2026-07-01",
+            "bar_count": 42,
+            "min_intraday_bars": 100,
         },
     ),
     (
@@ -118,6 +132,7 @@ EVENT_CASES = [
             "shares": 100,
             "kind": "entry",
             "book": "real",
+            "price_basis": "real",
             "tag": None,
         },
     ),
@@ -243,6 +258,8 @@ def test_event_fields_have_exact_types() -> None:
         "config_sha256": str,
         "package_version": str,
         "symbols": list[str],
+        "etf_price_basis": Literal["auto", "synthetic", "real"],
+        "qualifying_day_counts": dict[str, int],
         "roster": list[dict],
     }
     assert get_type_hints(telemetry.TickEvent) == {
@@ -255,6 +272,14 @@ def test_event_fields_have_exact_types() -> None:
         **common,
         "day": str,
         "reason": str,
+    }
+    assert get_type_hints(telemetry.DataThinEvent) == {
+        "ev": Literal["data_thin"],
+        **common,
+        "symbol": str,
+        "day": str,
+        "bar_count": int,
+        "min_intraday_bars": int,
     }
     assert get_type_hints(telemetry.IntentEvent) == {
         "ev": Literal["intent"],
@@ -291,6 +316,7 @@ def test_event_fields_have_exact_types() -> None:
         "shares": int,
         "kind": Literal["entry", "stop", "target", "reversal", "eod"],
         "book": Literal["real", "shadow"],
+        "price_basis": Literal["real", "synthetic"],
         "tag": str | None,
     }
     assert get_type_hints(telemetry.PositionClosedEvent) == {
@@ -342,8 +368,10 @@ def test_event_fields_have_exact_types() -> None:
     [
         ("SessionStartEvent", "ev", ("session_start",)),
         ("SessionStartEvent", "mode", ("backtest", "paper", "live")),
+        ("SessionStartEvent", "etf_price_basis", ("auto", "synthetic", "real")),
         ("TickEvent", "ev", ("tick",)),
         ("DaySkippedEvent", "ev", ("day_skipped",)),
+        ("DataThinEvent", "ev", ("data_thin",)),
         ("IntentEvent", "ev", ("intent",)),
         ("IntentEvent", "action", ("open", "close")),
         ("IntentEvent", "side", ("long", "short")),
@@ -358,6 +386,7 @@ def test_event_fields_have_exact_types() -> None:
         ("FillEvent", "ev", ("fill",)),
         ("FillEvent", "kind", ("entry", "stop", "target", "reversal", "eod")),
         ("FillEvent", "book", ("real", "shadow")),
+        ("FillEvent", "price_basis", ("real", "synthetic")),
         ("PositionClosedEvent", "ev", ("position_closed",)),
         ("PositionClosedEvent", "book", ("real", "shadow")),
         ("PositionClosedEvent", "exit_kind", ("stop", "target", "reversal", "eod")),
@@ -444,6 +473,7 @@ def test_event_types_maps_exact_tags_to_event_classes() -> None:
         "session_start": telemetry.SessionStartEvent,
         "tick": telemetry.TickEvent,
         "day_skipped": telemetry.DaySkippedEvent,
+        "data_thin": telemetry.DataThinEvent,
         "intent": telemetry.IntentEvent,
         "rejection": telemetry.RejectionEvent,
         "ticket": telemetry.TicketEvent,
@@ -455,7 +485,7 @@ def test_event_types_maps_exact_tags_to_event_classes() -> None:
     }
 
     assert telemetry.EVENT_TYPES == expected
-    assert len(telemetry.EVENT_TYPES) == 11
+    assert len(telemetry.EVENT_TYPES) == 12
     for tag, event_type in expected.items():
         assert telemetry.EVENT_TYPES[tag] is event_type
 

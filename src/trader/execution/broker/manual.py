@@ -227,6 +227,7 @@ class ManualBroker:
                     shares=payload["shares"],
                     kind=cast(FilledKind, payload["kind"]),
                     book="real",
+                    price_basis="real",
                 )
                 fills.append(fill)
                 self._fill_offset = handle.tell()

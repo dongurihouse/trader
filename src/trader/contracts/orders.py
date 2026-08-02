@@ -33,6 +33,7 @@ class Fill:
     shares: int
     kind: Literal["entry", "stop", "target", "reversal", "eod"]
     book: Literal["real", "shadow"]
+    price_basis: Literal["real", "synthetic"]
 
 
 @dataclass(frozen=True)

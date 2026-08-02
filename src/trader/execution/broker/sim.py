@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal, cast
 from zoneinfo import ZoneInfo
 
-from trader.contracts import Fill, MarketData, OrderTicket, Side
+from trader.algos import bracket
+from trader.contracts import Fill, LookaheadError, MarketData, OrderTicket, Side
 from trader.execution.config import ExecutionConfig
+
+
+FillPriceBasis = Literal["real", "synthetic"]
 
 
 @dataclass(frozen=True)
@@ -26,6 +30,241 @@ class _OpenPosition:
     stop: float
     target: float
     reversal_eligible_after: datetime | None = None
+
+
+@dataclass(frozen=True)
+class FillPriceBar:
+    o: float
+    h: float
+    l: float
+    c: float
+    price_basis: FillPriceBasis
+
+
+def _timestamp_day(timestamp: object, tz: ZoneInfo) -> date:
+    if hasattr(timestamp, "to_pydatetime"):
+        timestamp = timestamp.to_pydatetime()
+    return cast(datetime, timestamp).astimezone(tz).date()
+
+
+class FillPriceResolver:
+    """Resolve real or synthetic ETF bars for deterministic fill pricing."""
+
+    def __init__(
+        self,
+        execution_config: ExecutionConfig,
+        *,
+        timezone: str = "America/New_York",
+    ) -> None:
+        self._execution_config = execution_config
+        self._tz = ZoneInfo(timezone)
+        self._basis_by_day: dict[tuple[str, date], FillPriceBasis | None] = {}
+
+    def bar(
+        self,
+        data: MarketData,
+        *,
+        instrument: str,
+        asof: datetime,
+    ) -> FillPriceBar | None:
+        trading_day = asof.astimezone(self._tz).date()
+        basis = self._basis_for_day(
+            data,
+            instrument=instrument,
+            asof=asof,
+            trading_day=trading_day,
+        )
+        if basis is None:
+            return None
+        if basis == "real":
+            return self._real_bar(
+                data,
+                instrument=instrument,
+                asof=asof,
+                trading_day=trading_day,
+            )
+        return self._synthetic_bar(
+            data,
+            instrument=instrument,
+            asof=asof,
+            trading_day=trading_day,
+        )
+
+    def _basis_for_day(
+        self,
+        data: MarketData,
+        *,
+        instrument: str,
+        asof: datetime,
+        trading_day: date,
+    ) -> FillPriceBasis | None:
+        cache_key = (instrument, trading_day)
+        if cache_key in self._basis_by_day:
+            return self._basis_by_day[cache_key]
+
+        mode = self._execution_config.fills.etf_price_basis
+        if mode == "synthetic":
+            basis: FillPriceBasis | None = "synthetic"
+        else:
+            count, cacheable = self.intraday_bar_count(
+                data,
+                instrument=instrument,
+                asof=asof,
+                trading_day=trading_day,
+            )
+            if count >= self._execution_config.fills.min_intraday_bars:
+                basis = "real"
+            elif mode == "auto":
+                basis = "synthetic"
+            else:
+                basis = None
+
+        if basis is None and mode == "real" and not cacheable:
+            return None
+        self._basis_by_day[cache_key] = basis
+        return basis
+
+    def intraday_bar_count(
+        self,
+        data: MarketData,
+        *,
+        instrument: str,
+        asof: datetime,
+        trading_day: date,
+    ) -> tuple[int, bool]:
+        count_asof = data.calendar().session_close(trading_day)
+        try:
+            bars = data.bars_1m(
+                instrument,
+                asof=count_asof,
+                lookback_minutes=None,
+            )
+            cacheable = True
+        except (KeyError, LookaheadError):
+            try:
+                bars = data.bars_1m(
+                    instrument,
+                    asof=asof,
+                    lookback_minutes=None,
+                )
+                cacheable = not bars.empty
+            except (KeyError, LookaheadError):
+                return 0, True
+
+        if bars.empty:
+            return 0, cacheable
+        return (
+            sum(
+                1
+                for timestamp in bars.index
+                if _timestamp_day(timestamp, self._tz) == trading_day
+            ),
+            cacheable,
+        )
+
+    def _intraday_bar_count(
+        self,
+        data: MarketData,
+        *,
+        instrument: str,
+        asof: datetime,
+        trading_day: date,
+    ) -> tuple[int, bool]:
+        return self.intraday_bar_count(
+            data,
+            instrument=instrument,
+            asof=asof,
+            trading_day=trading_day,
+        )
+
+    def _latest_completed_bar(
+        self,
+        data: MarketData,
+        *,
+        symbol: str,
+        asof: datetime,
+        trading_day: date,
+    ) -> object | None:
+        try:
+            bars = data.bars_1m(
+                symbol,
+                asof=asof,
+                lookback_minutes=1,
+            )
+        except (KeyError, LookaheadError):
+            return None
+        if bars.empty:
+            return None
+        if _timestamp_day(bars.index[-1], self._tz) != trading_day:
+            return None
+        return bars.iloc[-1]
+
+    def _real_bar(
+        self,
+        data: MarketData,
+        *,
+        instrument: str,
+        asof: datetime,
+        trading_day: date,
+    ) -> FillPriceBar | None:
+        bar = self._latest_completed_bar(
+            data,
+            symbol=instrument,
+            asof=asof,
+            trading_day=trading_day,
+        )
+        if bar is None:
+            return None
+        return FillPriceBar(
+            o=float(bar["o"]),
+            h=float(bar["h"]),
+            l=float(bar["l"]),
+            c=float(bar["c"]),
+            price_basis="real",
+        )
+
+    def _synthetic_bar(
+        self,
+        data: MarketData,
+        *,
+        instrument: str,
+        asof: datetime,
+        trading_day: date,
+    ) -> FillPriceBar | None:
+        sndk_bar = self._latest_completed_bar(
+            data,
+            symbol=bracket.UNDERLYING,
+            asof=asof,
+            trading_day=trading_day,
+        )
+        if sndk_bar is None:
+            return None
+
+        sndk_prev = bracket.previous_close(bracket.UNDERLYING, data, asof)
+        etf_prev = bracket.previous_close(instrument, data, asof)
+        if sndk_prev is None or etf_prev is None:
+            return None
+        if sndk_prev <= 0 or etf_prev <= 0:
+            return None
+
+        lev = bracket.leverage_for(instrument)
+        high_candidate = bracket.etf_price(
+            float(sndk_bar["h"]), sndk_prev, etf_prev, lev
+        )
+        low_candidate = bracket.etf_price(
+            float(sndk_bar["l"]), sndk_prev, etf_prev, lev
+        )
+        return FillPriceBar(
+            o=bracket.etf_price(
+                float(sndk_bar["o"]), sndk_prev, etf_prev, lev
+            ),
+            h=max(high_candidate, low_candidate),
+            l=min(high_candidate, low_candidate),
+            c=bracket.etf_price(
+                float(sndk_bar["c"]), sndk_prev, etf_prev, lev
+            ),
+            price_basis="synthetic",
+        )
 
 
 def apply_slippage(
@@ -85,6 +324,10 @@ class SimBroker:
         self._execution_config = execution_config
         self._timezone = timezone
         self._tz = ZoneInfo(timezone)
+        self._prices = FillPriceResolver(
+            execution_config,
+            timezone=timezone,
+        )
         self._pending: list[_PendingEntry] = []
         self._positions: list[_OpenPosition] = []
         self._last_asof: datetime | None = None
@@ -109,16 +352,15 @@ class SimBroker:
                 still_pending.append(pending)
                 continue
 
-            bars = data.bars_1m(
-                ticket.instrument,
+            bar = self._prices.bar(
+                data,
+                instrument=ticket.instrument,
                 asof=asof,
-                lookback_minutes=1,
             )
-            if bars.empty:
+            if bar is None:
                 still_pending.append(pending)
                 continue
 
-            bar = bars.iloc[0]
             bps = slippage_bps_for(
                 self._execution_config,
                 ticket.instrument,
@@ -126,7 +368,7 @@ class SimBroker:
                 tz=self._timezone,
             )
             entry_price = round(
-                apply_slippage(float(bar["o"]), "buy", bps),
+                apply_slippage(bar.o, "buy", bps),
                 4,
             )
             fills.append(
@@ -137,6 +379,7 @@ class SimBroker:
                     shares=ticket.shares,
                     kind="entry",
                     book="real",
+                    price_basis=bar.price_basis,
                 )
             )
             positions_to_check.append(
@@ -161,12 +404,12 @@ class SimBroker:
                 still_open.append(position)
                 continue
 
-            bars = data.bars_1m(
-                position.instrument,
+            bar = self._prices.bar(
+                data,
+                instrument=position.instrument,
                 asof=asof,
-                lookback_minutes=1,
             )
-            if bars.empty:
+            if bar is None:
                 still_open.append(position)
                 continue
 
@@ -174,28 +417,28 @@ class SimBroker:
                 self._exit_fill(
                     position,
                     asof=asof,
-                    raw_exit_price=float(bars.iloc[0]["o"]),
+                    raw_exit_price=bar.o,
                     exit_kind="reversal",
+                    price_basis=bar.price_basis,
                 )
             )
 
         for position in unmarked_positions:
-            bars = data.bars_1m(
-                position.instrument,
+            bar = self._prices.bar(
+                data,
+                instrument=position.instrument,
                 asof=asof,
-                lookback_minutes=1,
             )
-            if bars.empty:
+            if bar is None:
                 still_open.append(position)
                 continue
 
-            bar = bars.iloc[0]
             exit_result = check_exit(
                 stop=position.stop,
                 target=position.target,
-                bar_open=float(bar["o"]),
-                bar_low=float(bar["l"]),
-                bar_high=float(bar["h"]),
+                bar_open=bar.o,
+                bar_low=bar.l,
+                bar_high=bar.h,
             )
             if exit_result is None:
                 trading_day = asof.astimezone(self._tz).date()
@@ -204,7 +447,7 @@ class SimBroker:
                     still_open.append(position)
                     continue
                 exit_kind: Literal["stop", "target", "eod"] = "eod"
-                raw_exit_price = float(bar["c"])
+                raw_exit_price = bar.c
             else:
                 exit_kind, raw_exit_price = exit_result
 
@@ -214,6 +457,7 @@ class SimBroker:
                     asof=asof,
                     raw_exit_price=raw_exit_price,
                     exit_kind=exit_kind,
+                    price_basis=bar.price_basis,
                 )
             )
 
@@ -248,22 +492,22 @@ class SimBroker:
         fills: list[Fill] = []
         still_open: list[_OpenPosition] = []
         for position in self._positions:
-            bars = data.bars_1m(
-                position.instrument,
+            bar = self._prices.bar(
+                data,
+                instrument=position.instrument,
                 asof=asof,
-                lookback_minutes=1,
             )
-            if bars.empty:
+            if bar is None:
                 still_open.append(position)
                 continue
 
-            raw_exit_price = float(bars.iloc[0]["c"])
             fills.append(
                 self._exit_fill(
                     position,
                     asof=asof,
-                    raw_exit_price=raw_exit_price,
+                    raw_exit_price=bar.c,
                     exit_kind="eod",
+                    price_basis=bar.price_basis,
                 )
             )
 
@@ -277,6 +521,7 @@ class SimBroker:
         asof: datetime,
         raw_exit_price: float,
         exit_kind: Literal["stop", "target", "reversal", "eod"],
+        price_basis: FillPriceBasis,
     ) -> Fill:
         bps = slippage_bps_for(
             self._execution_config,
@@ -294,7 +539,16 @@ class SimBroker:
             shares=position.shares,
             kind=exit_kind,
             book="real",
+            price_basis=price_basis,
         )
 
 
-__all__ = ["SimBroker", "apply_slippage", "check_exit", "slippage_bps_for"]
+__all__ = [
+    "FillPriceBar",
+    "FillPriceBasis",
+    "FillPriceResolver",
+    "SimBroker",
+    "apply_slippage",
+    "check_exit",
+    "slippage_bps_for",
+]

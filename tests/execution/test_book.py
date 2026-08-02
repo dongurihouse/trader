@@ -28,6 +28,7 @@ from trader.execution.config import (
 
 
 BAR_START = datetime(2026, 7, 1, 13, 30, tzinfo=timezone.utc)
+PREV_CLOSE_BAR = datetime(2026, 6, 30, 19, 59, tzinfo=timezone.utc)
 SESSION_CLOSE = datetime(2026, 7, 1, 20, 0, tzinfo=timezone.utc)
 
 
@@ -56,15 +57,39 @@ def _risk_config(
     )
 
 
-def _execution_config() -> ExecutionConfig:
+def _execution_config(
+    *,
+    etf_price_basis: str = "real",
+    min_intraday_bars: int = 1,
+    slippage_bps: float = 25.0,
+) -> ExecutionConfig:
     return ExecutionConfig(
         broker="sim",
         live_orders=False,
-        fills=FillsConfig(commission=0.0),
+        fills=FillsConfig(
+            commission=0.0,
+            etf_price_basis=etf_price_basis,
+            min_intraday_bars=min_intraday_bars,
+        ),
         slippage_bps={
-            "SNXX": {"2026-07": 25.0},
+            "SNXX": {"2026-07": slippage_bps},
             "SNDQ": {"2026-07": 10.0},
         },
+    )
+
+
+def _real_book(
+    risk_config: RiskConfig | None = None,
+    *,
+    execution_config: ExecutionConfig | None = None,
+    commission: float = 0.0,
+    timezone: str = "America/New_York",
+) -> RealBook:
+    return RealBook(
+        _risk_config() if risk_config is None else risk_config,
+        _execution_config() if execution_config is None else execution_config,
+        commission=commission,
+        timezone=timezone,
     )
 
 
@@ -136,11 +161,46 @@ def _data_for_stop_gap_to_entry_open() -> FakeMarketData:
     )
 
 
+def _basis_data(
+    *,
+    instrument: str = "SNXX",
+    sndk_prev_close: float = 100.0,
+    etf_prev_close: float = 50.0,
+    sndk_rows: tuple[tuple[datetime, float, float, float, float], ...],
+    etf_rows: tuple[tuple[datetime, float, float, float, float], ...] = (),
+) -> FakeMarketData:
+    return FakeMarketData(
+        {
+            "SNDK": _frame(
+                (
+                    PREV_CLOSE_BAR,
+                    sndk_prev_close,
+                    sndk_prev_close,
+                    sndk_prev_close,
+                    sndk_prev_close,
+                ),
+                *sndk_rows,
+            ),
+            instrument: _frame(
+                (
+                    PREV_CLOSE_BAR,
+                    etf_prev_close,
+                    etf_prev_close,
+                    etf_prev_close,
+                    etf_prev_close,
+                ),
+                *etf_rows,
+            ),
+        }
+    )
+
+
 def _ticket(
     ticket_id: str = "ticket-1",
     *,
     algo_id: str = "breakout",
     instrument: str = "SNXX",
+    side: Side = "long",
     shares: int = 10,
     stop: float = 95.0,
     target: float = 105.0,
@@ -151,7 +211,7 @@ def _ticket(
         algo_id=algo_id,
         intent_ts=created_ts,
         instrument=instrument,
-        side="long",
+        side=side,
         shares=shares,
         entry="market_next_open",
         stop=stop,
@@ -204,6 +264,7 @@ def _apply_real_round_trip(
                 shares=ticket.shares,
                 kind="entry",
                 book="real",
+                price_basis="real",
             )
         ],
         data,
@@ -217,6 +278,7 @@ def _apply_real_round_trip(
                 shares=ticket.shares,
                 kind=exit_kind,
                 book="real",
+                price_basis="real",
             )
         ],
         data,
@@ -225,7 +287,7 @@ def _apply_real_round_trip(
 
 def test_real_book_starts_with_one_stable_empty_portfolio() -> None:
     config = _risk_config(equity=12_345.0)
-    book = RealBook(config)
+    book = _real_book(config)
 
     assert book.state is book.state
     assert book.state.cash == 12_345.0
@@ -237,7 +299,7 @@ def test_real_book_starts_with_one_stable_empty_portfolio() -> None:
 
 
 def test_register_ticket_records_pending_ticket_without_consuming_daily_entry() -> None:
-    book = RealBook(_risk_config())
+    book = _real_book(_risk_config())
 
     book.register_ticket(_ticket("ticket-a"))
     assert book.state.entries_today == 0
@@ -249,7 +311,7 @@ def test_register_ticket_records_pending_ticket_without_consuming_daily_entry() 
 
 
 def test_entry_fill_consumes_daily_entry_and_builds_position_from_ticket() -> None:
-    book = RealBook(_risk_config())
+    book = _real_book(_risk_config())
     ticket = _ticket(shares=17, stop=94.0, target=108.0)
     entry_ts = BAR_START + timedelta(minutes=1)
     data = _data_for_raw_opens(100.0)
@@ -265,6 +327,7 @@ def test_entry_fill_consumes_daily_entry_and_builds_position_from_ticket() -> No
                 shares=17,
                 kind="entry",
                 book="real",
+                price_basis="real",
             )
         ],
         data,
@@ -286,7 +349,7 @@ def test_entry_fill_consumes_daily_entry_and_builds_position_from_ticket() -> No
 
 
 def test_forget_unfilled_tickets_discards_only_tickets_without_positions() -> None:
-    book = RealBook(_risk_config())
+    book = _real_book(_risk_config())
     filled = _ticket("filled")
     pending = _ticket("pending")
     entry_ts = BAR_START + timedelta(minutes=1)
@@ -302,6 +365,7 @@ def test_forget_unfilled_tickets_discards_only_tickets_without_positions() -> No
                 shares=filled.shares,
                 kind="entry",
                 book="real",
+                price_basis="real",
             )
         ],
         data,
@@ -320,6 +384,7 @@ def test_forget_unfilled_tickets_discards_only_tickets_without_positions() -> No
                 shares=filled.shares,
                 kind="target",
                 book="real",
+                price_basis="real",
             )
         ],
         data,
@@ -328,7 +393,7 @@ def test_forget_unfilled_tickets_discards_only_tickets_without_positions() -> No
 
 
 def test_target_exit_resolves_r_removes_position_and_drains_closed_trade() -> None:
-    book = RealBook(_risk_config())
+    book = _real_book(_risk_config())
     ticket = _ticket(stop=95.0, target=105.0)
     entry_ts = BAR_START + timedelta(minutes=1)
     exit_ts = entry_ts + timedelta(minutes=1)
@@ -343,6 +408,7 @@ def test_target_exit_resolves_r_removes_position_and_drains_closed_trade() -> No
                 shares=10,
                 kind="entry",
                 book="real",
+                price_basis="real",
             ),
             Fill(
                 ticket_id=ticket.ticket_id,
@@ -351,6 +417,7 @@ def test_target_exit_resolves_r_removes_position_and_drains_closed_trade() -> No
                 shares=10,
                 kind="target",
                 book="real",
+                price_basis="real",
             ),
         ],
         data,
@@ -372,10 +439,65 @@ def test_target_exit_resolves_r_removes_position_and_drains_closed_trade() -> No
     assert book.take_closed_trades() == []
 
 
+def test_real_book_r_multiple_uses_synthetic_raw_entry_basis() -> None:
+    book = _real_book(
+        _risk_config(),
+        execution_config=_execution_config(etf_price_basis="synthetic"),
+    )
+    entry_ts = datetime(2026, 7, 29, 13, 38, tzinfo=timezone.utc)
+    exit_ts = entry_ts + timedelta(minutes=1)
+    data = _basis_data(
+        instrument="SNDQ",
+        sndk_prev_close=100.0,
+        etf_prev_close=50.0,
+        sndk_rows=(
+            (
+                entry_ts - timedelta(minutes=1),
+                94.161,
+                94.161,
+                94.161,
+                94.161,
+            ),
+        ),
+        etf_rows=(
+            (
+                entry_ts - timedelta(minutes=1),
+                50.75,
+                51.0,
+                50.5,
+                50.75,
+            ),
+        ),
+    )
+    ticket = _ticket(
+        "orb5-20260729T133800Z-0",
+        algo_id="orb5",
+        instrument="SNDQ",
+        side="short",
+        stop=50.69,
+        target=65.93,
+        created_ts=entry_ts - timedelta(minutes=1),
+    )
+
+    _apply_real_round_trip(
+        book,
+        data,
+        ticket,
+        entry_ts=entry_ts,
+        entry_price=55.839,
+        exit_ts=exit_ts,
+        exit_price=50.6494,
+        exit_kind="stop",
+    )
+
+    expected_r = (50.6494 - 55.839) / abs(55.839 - 50.69)
+    assert book.resolved_r_multiples("orb5") == pytest.approx([expected_r])
+
+
 def test_real_book_records_zero_r_when_gap_entry_opens_on_stop() -> None:
     config = _execution_config()
     broker = SimBroker(config)
-    book = RealBook(_risk_config())
+    book = _real_book(_risk_config())
     intent_asof = BAR_START + timedelta(minutes=1)
     fill_asof = BAR_START + timedelta(minutes=2)
     data = _data_for_stop_gap_to_entry_open()
@@ -405,7 +527,7 @@ def test_real_book_records_zero_r_when_gap_entry_opens_on_stop() -> None:
 
 
 def test_realized_r_today_accumulates_sequential_round_trips() -> None:
-    book = RealBook(_risk_config())
+    book = _real_book(_risk_config())
     data = _data_for_raw_opens(100.0, 110.0)
 
     _apply_real_round_trip(
@@ -439,7 +561,7 @@ def test_realized_r_today_accumulates_sequential_round_trips() -> None:
 
 
 def test_cash_and_equity_accumulate_dollar_pnl_across_round_trips() -> None:
-    book = RealBook(_risk_config(equity=12_345.0))
+    book = _real_book(_risk_config(equity=12_345.0))
     data = _data_for_raw_opens(100.0, 110.0)
 
     _apply_real_round_trip(
@@ -475,7 +597,7 @@ def test_cash_and_equity_accumulate_dollar_pnl_across_round_trips() -> None:
 
 
 def test_zero_commission_preserves_round_trip_equity_accounting() -> None:
-    book = RealBook(_risk_config(equity=12_345.0), commission=0.0)
+    book = _real_book(_risk_config(equity=12_345.0), commission=0.0)
     data = _data_for_raw_opens(100.0)
 
     _apply_real_round_trip(
@@ -496,8 +618,8 @@ def test_zero_commission_preserves_round_trip_equity_accounting() -> None:
 def test_commission_deducts_one_flat_fee_per_fill_leg() -> None:
     commission = 1.50
     data = _data_for_raw_opens(100.0)
-    zero_commission = RealBook(_risk_config(equity=12_345.0), commission=0.0)
-    charged = RealBook(_risk_config(equity=12_345.0), commission=commission)
+    zero_commission = _real_book(_risk_config(equity=12_345.0), commission=0.0)
+    charged = _real_book(_risk_config(equity=12_345.0), commission=commission)
 
     for book in (zero_commission, charged):
         _apply_real_round_trip(
@@ -520,7 +642,7 @@ def test_commission_deducts_one_flat_fee_per_fill_leg() -> None:
 
 
 def test_two_consecutive_losing_stops_mute_at_session_close() -> None:
-    book = RealBook(_risk_config(mute_after_consecutive_stops=2))
+    book = _real_book(_risk_config(mute_after_consecutive_stops=2))
     data = _data_for_raw_opens(100.0, 100.0)
 
     _apply_real_round_trip(
@@ -550,7 +672,7 @@ def test_two_consecutive_losing_stops_mute_at_session_close() -> None:
 
 
 def test_winning_exit_resets_consecutive_losing_stop_streak() -> None:
-    book = RealBook(_risk_config(mute_after_consecutive_stops=2))
+    book = _real_book(_risk_config(mute_after_consecutive_stops=2))
     data = _data_for_raw_opens(100.0, 100.0, 100.0)
     trades = [
         ("ticket-a", "stop", 94.75),
@@ -577,7 +699,7 @@ def test_winning_exit_resets_consecutive_losing_stop_streak() -> None:
 
 
 def test_cumulative_day_r_loss_mutes_independently_of_stop_streak() -> None:
-    book = RealBook(
+    book = _real_book(
         _risk_config(
             mute_after_consecutive_stops=99,
             mute_after_cumulative_day_r=-1.0,
@@ -601,7 +723,7 @@ def test_cumulative_day_r_loss_mutes_independently_of_stop_streak() -> None:
 
 
 def test_losing_eod_leaves_consecutive_stop_streak_unchanged() -> None:
-    book = RealBook(_risk_config(mute_after_consecutive_stops=2))
+    book = _real_book(_risk_config(mute_after_consecutive_stops=2))
     data = _data_for_raw_opens(100.0, 100.0, 100.0)
     trades = [
         ("ticket-a", "stop"),
@@ -630,7 +752,7 @@ def test_losing_eod_leaves_consecutive_stop_streak_unchanged() -> None:
 
 
 def test_losing_reversal_increments_losing_stop_streak_and_sets_cooldown() -> None:
-    book = RealBook(
+    book = _real_book(
         _risk_config(
             mute_after_consecutive_stops=99,
             mute_after_cumulative_day_r=-99.0,
@@ -657,7 +779,7 @@ def test_losing_reversal_increments_losing_stop_streak_and_sets_cooldown() -> No
 
 
 def test_reversal_sets_cooldown_even_for_winning_exit() -> None:
-    book = RealBook(
+    book = _real_book(
         _risk_config(
             mute_after_consecutive_stops=99,
             mute_after_cumulative_day_r=-99.0,
@@ -715,7 +837,7 @@ def test_losing_reversal_uses_later_same_exit_mute_deadline(
     exit_ts: datetime,
     expected_deadline: datetime,
 ) -> None:
-    book = RealBook(
+    book = _real_book(
         _risk_config(
             mute_after_consecutive_stops=1,
             mute_after_cumulative_day_r=-99.0,
@@ -741,7 +863,7 @@ def test_losing_reversal_uses_later_same_exit_mute_deadline(
 
 
 def test_start_new_day_resets_rails_but_preserves_resolved_history() -> None:
-    book = RealBook(
+    book = _real_book(
         _risk_config(mute_after_consecutive_stops=2)
     )
     data = _data_for_raw_opens(100.0, 100.0)
@@ -818,6 +940,7 @@ def test_shadow_entry_and_exit_use_x4_slippage_and_zero_real_shares() -> None:
             shares=0,
             kind="target",
             book="shadow",
+            price_basis="real",
         )
     ]
     assert book.resolved_r_multiples("probe-algo") == pytest.approx([0.8975])
@@ -831,6 +954,34 @@ def test_shadow_entry_and_exit_use_x4_slippage_and_zero_real_shares() -> None:
         )
     ]
     assert book.take_closed_trades() == []
+
+
+def test_shadow_book_uses_same_synthetic_entry_basis_as_sim_broker() -> None:
+    config = _execution_config(etf_price_basis="synthetic", slippage_bps=0.0)
+    broker = SimBroker(config)
+    book = ShadowBook(config)
+    asof = BAR_START + timedelta(minutes=1)
+    data = _basis_data(
+        sndk_rows=((BAR_START, 101.0, 101.5, 100.5, 101.0),),
+    )
+    ticket = _ticket(stop=45.0, target=60.0)
+    broker.submit(ticket)
+    _open_shadow(
+        book,
+        algo_id="probe-algo",
+        stop=45.0,
+        target=60.0,
+        opened_ts=BAR_START,
+    )
+
+    real_fills = broker.on_bar(asof, data)
+    shadow_fills = book.on_bar(asof, data)
+
+    assert len(real_fills) == 1
+    assert len(shadow_fills) == 1
+    assert real_fills[0].price == 51.0
+    assert shadow_fills[0].price == real_fills[0].price
+    assert shadow_fills[0].price_basis == real_fills[0].price_basis == "synthetic"
 
 
 def test_shadow_book_records_zero_r_when_gap_entry_opens_on_stop() -> None:
@@ -995,6 +1146,7 @@ def test_shadow_reversal_mark_resolves_only_conflicting_episode_on_later_open() 
             shares=0,
             kind="target",
             book="shadow",
+            price_basis="real",
         )
     ]
     assert book.on_bar(reversal_asof, data) == [
@@ -1005,6 +1157,7 @@ def test_shadow_reversal_mark_resolves_only_conflicting_episode_on_later_open() 
             shares=0,
             kind="reversal",
             book="shadow",
+            price_basis="real",
         )
     ]
     assert [
@@ -1063,6 +1216,7 @@ def test_shadow_reversal_mark_with_same_side_leaves_bracket_exit_unchanged() -> 
             shares=0,
             kind="target",
             book="shadow",
+            price_basis="real",
         )
     ]
     assert book.take_closed_trades() == [

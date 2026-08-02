@@ -100,6 +100,9 @@ def test_loads_real_config_into_expected_typed_shape() -> None:
     assert resolved.risk.account.equity == 10000
     assert resolved.risk.account.day_slots == 2
     assert resolved.execution.broker == "sim"
+    assert resolved.execution.fills.commission == 0.0
+    assert resolved.execution.fills.etf_price_basis == "auto"
+    assert resolved.execution.fills.min_intraday_bars == 100
     assert resolved.execution.slippage_bps["SNXX"]["2026-07"] == 5
     assert resolved.risk.drawdown_stop.max_session_drawdown_r is None
     assert resolved.console.port == 8777
@@ -196,6 +199,19 @@ def test_rejects_missing_required_key(copied_config: Path) -> None:
     with pytest.raises(
         ConfigError,
         match=r"risk\.yaml: account.*equity",
+    ):
+        load_config(copied_config)
+
+
+def test_rejects_unknown_fill_price_basis(copied_config: Path) -> None:
+    execution_path = copied_config / "execution.yaml"
+    execution_data = _load_yaml(execution_path)
+    execution_data["fills"]["etf_price_basis"] = "midquote"
+    _write_yaml(execution_path, execution_data)
+
+    with pytest.raises(
+        ConfigError,
+        match=r"execution\.yaml: fills: etf_price_basis",
     ):
         load_config(copied_config)
 

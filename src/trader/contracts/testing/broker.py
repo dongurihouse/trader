@@ -43,6 +43,7 @@ class FakeBroker:
                     shares=ticket.shares,
                     kind="entry",
                     book="real",
+                    price_basis="real",
                 )
             )
 

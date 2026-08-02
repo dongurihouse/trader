@@ -13,6 +13,11 @@ from trader.provider import relay, store
 from trader.provider.calendar import load_calendar
 
 
+# Keep this provider-side default in sync with config/execution.yaml
+# fills.min_intraday_bars without importing execution config at runtime.
+DEFAULT_MIN_INTRADAY_BARS = 100
+
+
 def _symbols(value: str) -> list[str]:
     return [symbol.strip().upper() for symbol in value.split(",") if symbol.strip()]
 
@@ -38,7 +43,15 @@ def handle_fetch(args: argparse.Namespace) -> int:
             claude_bin=args.claude_bin,
             model=args.model,
         )
-        relay.validate_payload(payload, symbols, start_iso, end_iso)
+        relay.validate_payload(
+            payload,
+            symbols,
+            start_iso,
+            end_iso,
+            calendar=calendar,
+            day=day,
+            min_intraday_bars=args.min_intraday_bars,
+        )
         path = relay.save_raw(
             payload,
             Path(args.data_root) / "raw" / "robinhood",
@@ -170,6 +183,15 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     fetch.add_argument("--tag", default=None)
     fetch.add_argument("--interval", default="minute")
     fetch.add_argument("--bounds", default="regular")
+    fetch.add_argument(
+        "--min-intraday-bars",
+        type=int,
+        default=DEFAULT_MIN_INTRADAY_BARS,
+        help=(
+            "minimum minute bars required per fetched symbol "
+            "(default: %(default)s; mirrors execution.yaml fills.min_intraday_bars)"
+        ),
+    )
     fetch.set_defaults(func=handle_fetch)
 
     ingest = subparsers.add_parser("ingest", help="ingest raw provider bars")

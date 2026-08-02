@@ -11,7 +11,8 @@ from trader.contracts import (
     Rejection,
 )
 
-from .config import RiskConfig
+from .broker.sim import FillPriceResolver
+from .config import ExecutionConfig, RiskConfig
 
 
 _NO_MARGIN_TOLERANCE = 1e-9
@@ -32,8 +33,18 @@ def _is_over_slot(shares: int, entry_px: float, slot_capital: float) -> bool:
 class RiskRails:
     """Reject invalid open intents or size them from one capital slot."""
 
-    def __init__(self, config: RiskConfig) -> None:
+    def __init__(
+        self,
+        config: RiskConfig,
+        execution_config: ExecutionConfig,
+        *,
+        timezone: str = "America/New_York",
+    ) -> None:
         self._config = config
+        self._prices = FillPriceResolver(
+            execution_config,
+            timezone=timezone,
+        )
 
     def check_and_size(
         self,
@@ -139,12 +150,12 @@ class RiskRails:
                 ),
             )
 
-        bars = data.bars_1m(
-            intent.instrument,
+        bar = self._prices.bar(
+            data,
             asof=intent.ts,
-            lookback_minutes=1,
+            instrument=intent.instrument,
         )
-        if bars.empty:
+        if bar is None:
             return Rejection(
                 intent=intent,
                 rule="no_price_data",
@@ -154,7 +165,7 @@ class RiskRails:
                 ),
             )
 
-        entry_px = round(float(bars.iloc[-1]["c"]), 2)
+        entry_px = round(bar.c, 2)
         risk = entry_px - intent.stop
         if risk <= 0:
             return Rejection(

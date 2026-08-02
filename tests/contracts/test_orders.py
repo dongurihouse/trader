@@ -96,6 +96,7 @@ def test_fill_constructs_with_exact_fields_types_and_literal_values() -> None:
         shares=100,
         kind="entry",
         book="real",
+        price_basis="real",
     )
 
     assert vars(fill) == {
@@ -105,6 +106,7 @@ def test_fill_constructs_with_exact_fields_types_and_literal_values() -> None:
         "shares": 100,
         "kind": "entry",
         "book": "real",
+        "price_basis": "real",
     }
     hints = get_type_hints(fill_type)
     assert hints == {
@@ -114,6 +116,7 @@ def test_fill_constructs_with_exact_fields_types_and_literal_values() -> None:
         "shares": int,
         "kind": Literal["entry", "stop", "target", "reversal", "eod"],
         "book": Literal["real", "shadow"],
+        "price_basis": Literal["real", "synthetic"],
     }
     assert get_args(hints["kind"]) == (
         "entry",
@@ -123,6 +126,7 @@ def test_fill_constructs_with_exact_fields_types_and_literal_values() -> None:
         "eod",
     )
     assert get_args(hints["book"]) == ("real", "shadow")
+    assert get_args(hints["price_basis"]) == ("real", "synthetic")
 
 
 def test_fill_is_frozen() -> None:
@@ -133,6 +137,7 @@ def test_fill_is_frozen() -> None:
         shares=100,
         kind="entry",
         book="real",
+        price_basis="real",
     )
 
     with pytest.raises(FrozenInstanceError):

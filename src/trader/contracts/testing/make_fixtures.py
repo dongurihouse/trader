@@ -9,6 +9,7 @@ from trader.contracts.intents import Intent
 from trader.contracts.serde import append_jsonl, record_to_json
 from trader.contracts.telemetry import (
     AlgoErrorEvent,
+    DataThinEvent,
     DaySkippedEvent,
     FillEvent,
     IntentEvent,
@@ -107,6 +108,8 @@ def generate_fixtures(output_dir: Path) -> None:
             config_sha256="fixture-config-sha256",
             package_version="0.1.0",
             symbols=["SNDK", "SNXX"],
+            etf_price_basis="auto",
+            qualifying_day_counts={"SNXX": 0},
             roster=[
                 {"id": "breakout", "status": "emitting"},
                 {"id": "mean-reversion", "status": "probe"},
@@ -124,6 +127,15 @@ def generate_fixtures(output_dir: Path) -> None:
             session=session,
             day="2026-06-30",
             reason="no_prev_session",
+        ),
+        DataThinEvent(
+            ev="data_thin",
+            ts=datetime(2026, 7, 1, 13, 31, 1, tzinfo=timezone.utc),
+            session=session,
+            symbol="SNXX",
+            day="2026-07-01",
+            bar_count=42,
+            min_intraday_bars=100,
         ),
         IntentEvent(
             ev="intent",
@@ -184,6 +196,7 @@ def generate_fixtures(output_dir: Path) -> None:
             shares=100,
             kind="entry",
             book="real",
+            price_basis="real",
             tag=None,
         ),
         FillEvent(
@@ -195,6 +208,7 @@ def generate_fixtures(output_dir: Path) -> None:
             shares=100,
             kind="target",
             book="real",
+            price_basis="real",
             tag=None,
         ),
         PositionClosedEvent(

@@ -194,12 +194,24 @@ def _risk_config() -> RiskConfig:
     )
 
 
-def _execution_config(*, broker: str = "sim") -> ExecutionConfig:
+def _execution_config(
+    *,
+    broker: str = "sim",
+    etf_price_basis: str = "real",
+    min_intraday_bars: int = 1,
+) -> ExecutionConfig:
     return ExecutionConfig(
         broker=broker,
         live_orders=False,
-        fills=FillsConfig(commission=0.0),
-        slippage_bps={"SNXX": {"2026-07": 0.0}},
+        fills=FillsConfig(
+            commission=0.0,
+            etf_price_basis=etf_price_basis,
+            min_intraday_bars=min_intraday_bars,
+        ),
+        slippage_bps={
+            "SNXX": {"2026-07": 0.0},
+            "SNDQ": {"2026-07": 0.0},
+        },
     )
 
 
@@ -217,14 +229,17 @@ def _runner(
         mode=mode,
         market_data=data,
         broker=SimBroker(execution_config),
-        risk=RiskRails(risk_config),
-        real_book=RealBook(risk_config),
+        risk=RiskRails(risk_config, execution_config),
+        real_book=RealBook(risk_config, execution_config),
         shadow_book=ShadowBook(execution_config),
         telemetry=telemetry,
         roster=[RosterEntry(algo=algo, status="emitting")],
         symbols=["SNXX"],
         config_sha256="fixture-sha256",
         package_version="0.1.0",
+        execution_config=execution_config,
+        traded_instruments=[],
+        timezone="America/New_York",
     )
 
 
@@ -393,6 +408,82 @@ def test_run_backtest_drives_every_bar_and_uses_first_bar_for_session_start() ->
     ] == []
     assert telemetry.records[-1]["ev"] == "session_end"
     assert telemetry.records[-1]["ts"] == "2026-07-02T13:33:00Z"
+
+
+def test_run_backtest_session_start_reports_basis_and_qualifying_day_counts() -> None:
+    previous_day = date(2026, 6, 30)
+    first_day = date(2026, 7, 1)
+    second_day = date(2026, 7, 2)
+    previous_open = datetime(2026, 6, 30, 13, 30, tzinfo=UTC)
+    first_open = datetime(2026, 7, 1, 13, 30, tzinfo=UTC)
+    second_open = datetime(2026, 7, 2, 13, 30, tzinfo=UTC)
+    previous_close = datetime(2026, 6, 30, 19, 59, tzinfo=UTC)
+    first_close = datetime(2026, 7, 1, 19, 59, tzinfo=UTC)
+    second_close = datetime(2026, 7, 2, 19, 59, tzinfo=UTC)
+    data = FakeMarketData(
+        {
+            "SNDK": _frame(
+                previous_open,
+                previous_close,
+                first_open,
+                first_close,
+                second_open,
+                second_close,
+            ),
+            "SNXX": _frame(
+                first_open,
+                first_close,
+                second_close,
+            ),
+            "SNDQ": _frame(
+                first_close,
+                second_open,
+                second_close,
+            ),
+        }
+    )
+    warmups: list[tuple[str, date]] = []
+    algo = ScriptedAlgo("scripted", warmup_log=warmups)
+    telemetry = CollectingTelemetry()
+    risk_config = _risk_config()
+    execution_config = _execution_config(
+        etf_price_basis="auto",
+        min_intraday_bars=2,
+    )
+    runner = SessionRunner(
+        session_id="backtest-fixed-session",
+        mode="backtest",
+        market_data=data,
+        broker=SimBroker(execution_config),
+        risk=RiskRails(risk_config, execution_config),
+        real_book=RealBook(risk_config, execution_config),
+        shadow_book=ShadowBook(execution_config),
+        telemetry=telemetry,
+        roster=[RosterEntry(algo=algo, status="emitting")],
+        symbols=["SNDK", "SNXX", "SNDQ"],
+        config_sha256="fixture-sha256",
+        package_version="0.1.0",
+        execution_config=execution_config,
+        traded_instruments=["SNXX", "SNDQ"],
+        timezone="America/New_York",
+    )
+
+    run_backtest(
+        runner,
+        market_data=data,
+        primary_symbol="SNDK",
+        trading_days=[first_day, second_day],
+        rth_open=time(9, 30),
+        rth_close=time(9, 31),
+        timezone="America/New_York",
+    )
+
+    assert telemetry.records[0]["ev"] == "session_start"
+    assert telemetry.records[0]["etf_price_basis"] == "auto"
+    assert telemetry.records[0]["qualifying_day_counts"] == {
+        "SNXX": 1,
+        "SNDQ": 1,
+    }
 
 
 def test_run_backtest_skips_day_when_previous_session_missing_from_calendar() -> None:

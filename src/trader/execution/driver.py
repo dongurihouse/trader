@@ -131,7 +131,10 @@ def run_backtest(
         rth_close=rth_close,
         timezone_name=timezone,
     )
-    runner.start_session(first_asof)
+    runner.start_session(
+        first_asof,
+        qualifying_day_counts=runner.qualifying_day_counts(trading_days),
+    )
     last_asof = first_asof
     summary: SessionSummary
 
@@ -169,7 +172,7 @@ def run_backtest(
                 )
                 continue
 
-            runner.start_day(trading_day)
+            runner.start_day(trading_day, ts=day_first_asof)
             asof = datetime.combine(
                 trading_day,
                 rth_open,
@@ -216,7 +219,7 @@ def run_live_cadence(
     summary: SessionSummary
 
     try:
-        runner.start_day(trading_day)
+        runner.start_day(trading_day, ts=session_start)
         while next_cycle <= session_close:
             clock.sleep_until(next_cycle)
             on_cycle()
@@ -363,10 +366,16 @@ def run_session_command(args) -> int | None:
     except ContractViolation as exc:
         _print_run_error(str(exc))
         return 2
-    risk = RiskRails(resolved.risk)
+    risk = RiskRails(
+        resolved.risk,
+        resolved.execution,
+        timezone=resolved.trader.timezone,
+    )
     real_book = RealBook(
         resolved.risk,
+        resolved.execution,
         commission=resolved.execution.fills.commission,
+        timezone=resolved.trader.timezone,
     )
     shadow_book = ShadowBook(resolved.execution)
     market_data = compose_real_market_data(resolved)
@@ -384,6 +393,9 @@ def run_session_command(args) -> int | None:
         symbols=resolved.trader.symbols,
         config_sha256=resolved.config_sha256,
         package_version=resolved.package_version,
+        execution_config=resolved.execution,
+        traded_instruments=list(resolved.trader.instrument_map.values()),
+        timezone=resolved.trader.timezone,
     )
 
     if mode == "backtest":

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 import json
 from pathlib import Path
 import re
@@ -266,11 +266,49 @@ def _parse_ts(timestamp: str) -> datetime:
     return datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
 
 
+def _session_seconds(
+    calendar: MarketCalendarImpl,
+    day: date,
+    close_time: time,
+) -> int:
+    return int(
+        (
+            datetime.combine(day, close_time)
+            - datetime.combine(day, calendar.open_time)
+        ).total_seconds()
+    )
+
+
+def _minimum_intraday_bars(
+    calendar: MarketCalendarImpl,
+    day: date,
+    min_intraday_bars: int,
+) -> int:
+    if min_intraday_bars < 1:
+        raise RelayError("min_intraday_bars must be at least 1")
+    if day not in calendar.early_closes:
+        return min_intraday_bars
+
+    regular_seconds = _session_seconds(calendar, day, calendar.close_time)
+    actual_seconds = _session_seconds(calendar, day, calendar.early_close_time)
+    if regular_seconds <= 0 or actual_seconds <= 0:
+        raise RelayError(f"{day.isoformat()}: calendar session length is invalid")
+
+    scaled = (
+        min_intraday_bars * actual_seconds + regular_seconds - 1
+    ) // regular_seconds
+    return min(min_intraday_bars, max(1, scaled))
+
+
 def validate_payload(
     payload: dict,
     symbols: Iterable[str],
     start_iso: str,
     end_iso: str,
+    *,
+    calendar: MarketCalendarImpl,
+    day: date,
+    min_intraday_bars: int,
 ) -> None:
     """Reject relay payloads missing requested or in-range bar coverage."""
     if not isinstance(payload, dict):
@@ -291,11 +329,18 @@ def validate_payload(
 
     start = _parse_ts(start_iso)
     end = _parse_ts(end_iso)
+    required_bars = _minimum_intraday_bars(calendar, day, min_intraday_bars)
     for result in results:
         symbol = result.get("symbol")
         bars = result.get("bars") or []
         if not bars:
             raise RelayError(f"{symbol}: result block has no bars")
+        if len(bars) < required_bars:
+            shortfall = required_bars - len(bars)
+            raise RelayError(
+                f"{symbol}: result block has {len(bars)} bars; "
+                f"minimum {required_bars}; short by {shortfall}"
+            )
         for bar in (bars[0], bars[-1]):
             timestamp = _parse_ts(bar["begins_at"])
             if not start <= timestamp <= end:

@@ -7,9 +7,11 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import pytest
 
+from trader.algos import bracket
 from trader.contracts import Fill, OrderTicket, Side
 from trader.contracts.testing import FakeMarketData
 from trader.execution.broker import (
+    FillPriceResolver,
     SimBroker,
     apply_slippage,
     check_exit,
@@ -19,15 +21,23 @@ from trader.execution.config import ExecutionConfig, FillsConfig
 
 
 BAR_START = datetime(2026, 7, 1, 13, 30, tzinfo=timezone.utc)
+PREV_CLOSE_BAR = datetime(2026, 6, 30, 19, 59, tzinfo=timezone.utc)
 
 
 def _execution_config(
     slippage_bps: dict[str, dict[str, float]] | None = None,
+    *,
+    etf_price_basis: str = "real",
+    min_intraday_bars: int = 1,
 ) -> ExecutionConfig:
     return ExecutionConfig(
         broker="sim",
         live_orders=False,
-        fills=FillsConfig(commission=0.0),
+        fills=FillsConfig(
+            commission=0.0,
+            etf_price_basis=etf_price_basis,
+            min_intraday_bars=min_intraday_bars,
+        ),
         slippage_bps=slippage_bps
         if slippage_bps is not None
         else {
@@ -54,6 +64,40 @@ def _data(
     instrument: str = "SNXX",
 ) -> FakeMarketData:
     return FakeMarketData({instrument: _frame(*rows)})
+
+
+def _basis_data(
+    *,
+    instrument: str = "SNXX",
+    sndk_prev_close: float = 100.0,
+    etf_prev_close: float = 50.0,
+    sndk_rows: tuple[tuple[datetime, float, float, float, float], ...],
+    etf_rows: tuple[tuple[datetime, float, float, float, float], ...] = (),
+) -> FakeMarketData:
+    return FakeMarketData(
+        {
+            "SNDK": _frame(
+                (
+                    PREV_CLOSE_BAR,
+                    sndk_prev_close,
+                    sndk_prev_close,
+                    sndk_prev_close,
+                    sndk_prev_close,
+                ),
+                *sndk_rows,
+            ),
+            instrument: _frame(
+                (
+                    PREV_CLOSE_BAR,
+                    etf_prev_close,
+                    etf_prev_close,
+                    etf_prev_close,
+                    etf_prev_close,
+                ),
+                *etf_rows,
+            ),
+        }
+    )
 
 
 def _ticket(
@@ -173,6 +217,7 @@ def test_entry_fills_at_visible_bar_open_with_buy_slippage() -> None:
             shares=7,
             kind="entry",
             book="real",
+            price_basis="real",
         )
     ]
 
@@ -203,6 +248,7 @@ def test_ticket_submitted_after_cycle_cannot_fill_on_repeated_same_bar() -> None
             shares=10,
             kind="entry",
             book="real",
+            price_basis="real",
         )
     ]
 
@@ -227,6 +273,293 @@ def test_pending_entry_waits_for_an_available_instrument_bar() -> None:
             shares=10,
             kind="entry",
             book="real",
+            price_basis="real",
+        )
+    ]
+
+
+def test_synthetic_basis_derives_entry_from_sndk_without_current_etf_bar() -> None:
+    asof = BAR_START + timedelta(minutes=1)
+    config = _execution_config(
+        {"SNXX": {"2026-07": 0.0}},
+        etf_price_basis="synthetic",
+    )
+    broker = SimBroker(config)
+    data = _basis_data(
+        sndk_rows=((BAR_START, 101.0, 102.0, 99.0, 101.5),),
+    )
+    broker.submit(_ticket(stop=45.0, target=60.0))
+
+    fills = broker.on_bar(asof, data)
+
+    assert len(fills) == 1
+    assert fills[0].kind == "entry"
+    assert fills[0].price == 51.0
+    assert fills[0].price_basis == "synthetic"
+
+
+@pytest.mark.parametrize("basis", ["real", "auto"])
+def test_qualified_intraday_day_uses_real_basis(basis: str) -> None:
+    asof = BAR_START + timedelta(minutes=1)
+    config = _execution_config(
+        {"SNXX": {"2026-07": 0.0}},
+        etf_price_basis=basis,
+        min_intraday_bars=1,
+    )
+    broker = SimBroker(config)
+    data = _basis_data(
+        sndk_rows=((BAR_START, 101.0, 102.0, 99.0, 101.5),),
+        etf_rows=((BAR_START, 77.0, 78.0, 76.0, 77.5),),
+    )
+    broker.submit(_ticket(stop=70.0, target=90.0))
+
+    fills = broker.on_bar(asof, data)
+
+    assert len(fills) == 1
+    assert fills[0].price == 77.0
+    assert fills[0].price_basis == "real"
+
+
+def test_auto_basis_falls_back_to_synthetic_when_intraday_day_is_thin() -> None:
+    asof = BAR_START + timedelta(minutes=1)
+    config = _execution_config(
+        {"SNXX": {"2026-07": 0.0}},
+        etf_price_basis="auto",
+        min_intraday_bars=2,
+    )
+    broker = SimBroker(config)
+    data = _basis_data(
+        sndk_rows=((BAR_START, 101.0, 102.0, 99.0, 101.5),),
+        etf_rows=((BAR_START, 77.0, 78.0, 76.0, 77.5),),
+    )
+    broker.submit(_ticket(stop=45.0, target=60.0))
+
+    fills = broker.on_bar(asof, data)
+
+    assert len(fills) == 1
+    assert fills[0].price == 51.0
+    assert fills[0].price_basis == "synthetic"
+
+
+def test_real_basis_refuses_thin_intraday_day_without_dropping_pending_entry() -> None:
+    first_asof = BAR_START + timedelta(minutes=1)
+    next_day_start = BAR_START + timedelta(days=1)
+    second_asof = next_day_start + timedelta(minutes=2)
+    config = _execution_config(
+        {"SNXX": {"2026-07": 0.0}},
+        etf_price_basis="real",
+        min_intraday_bars=2,
+    )
+    broker = SimBroker(config)
+    data = _basis_data(
+        sndk_rows=(
+            (BAR_START, 101.0, 102.0, 99.0, 101.5),
+            (next_day_start, 102.0, 103.0, 101.0, 102.5),
+        ),
+        etf_rows=(
+            (BAR_START, 77.0, 78.0, 76.0, 77.5),
+            (next_day_start, 80.0, 81.0, 79.0, 80.5),
+            (next_day_start + timedelta(minutes=1), 81.0, 82.0, 80.0, 81.5),
+        ),
+    )
+    broker.submit(_ticket(stop=70.0, target=90.0))
+
+    assert broker.on_bar(first_asof, data) == []
+    fills = broker.on_bar(second_asof, data)
+
+    assert len(fills) == 1
+    assert fills[0].price == 81.0
+    assert fills[0].price_basis == "real"
+
+
+@pytest.mark.parametrize(
+    ("instrument", "etf_prev_close", "expected_open"),
+    [
+        ("SNXX", 50.0, 51.0),
+        ("SNDQ", 80.0, 78.4),
+    ],
+)
+def test_synthetic_entries_match_bracket_translation_for_each_etf(
+    instrument: str,
+    etf_prev_close: float,
+    expected_open: float,
+) -> None:
+    asof = BAR_START + timedelta(minutes=1)
+    config = _execution_config(
+        {instrument: {"2026-07": 0.0}},
+        etf_price_basis="synthetic",
+    )
+    broker = SimBroker(config)
+    data = _basis_data(
+        instrument=instrument,
+        etf_prev_close=etf_prev_close,
+        sndk_rows=((BAR_START, 101.0, 102.0, 99.0, 101.5),),
+    )
+    ticket = _ticket(
+        instrument=instrument,
+        side="short" if instrument == "SNDQ" else "long",
+        stop=expected_open - 10.0,
+        target=expected_open + 10.0,
+    )
+    assert expected_open == pytest.approx(
+        bracket.etf_price(
+            101.0,
+            100.0,
+            etf_prev_close,
+            bracket.leverage_for(instrument),
+        )
+    )
+    broker.submit(ticket)
+
+    fills = broker.on_bar(asof, data)
+
+    assert len(fills) == 1
+    assert fills[0].price == pytest.approx(expected_open)
+    assert fills[0].price_basis == "synthetic"
+
+
+def test_synthetic_basis_waits_when_previous_close_anchor_is_missing() -> None:
+    asof = BAR_START + timedelta(minutes=1)
+    config = _execution_config(
+        {"SNXX": {"2026-07": 0.0}},
+        etf_price_basis="synthetic",
+    )
+    broker = SimBroker(config)
+    data = FakeMarketData(
+        {
+            "SNDK": _frame((BAR_START, 101.0, 102.0, 99.0, 101.5)),
+            "SNXX": _frame(
+                (PREV_CLOSE_BAR, 50.0, 50.0, 50.0, 50.0),
+            ),
+        }
+    )
+    broker.submit(_ticket(stop=45.0, target=60.0))
+
+    assert broker.on_bar(asof, data) == []
+
+
+@pytest.mark.parametrize(
+    ("sndk_prev_close", "etf_prev_close"),
+    [
+        (0.0, 50.0),
+        (100.0, 0.0),
+    ],
+)
+def test_synthetic_basis_waits_when_previous_close_anchor_is_non_positive(
+    sndk_prev_close: float,
+    etf_prev_close: float,
+) -> None:
+    asof = BAR_START + timedelta(minutes=1)
+    config = _execution_config(
+        {"SNXX": {"2026-07": 0.0}},
+        etf_price_basis="synthetic",
+    )
+    broker = SimBroker(config)
+    data = _basis_data(
+        sndk_prev_close=sndk_prev_close,
+        etf_prev_close=etf_prev_close,
+        sndk_rows=((BAR_START, 101.0, 102.0, 99.0, 101.5),),
+    )
+    broker.submit(_ticket(stop=45.0, target=60.0))
+
+    assert broker.on_bar(asof, data) == []
+
+
+def test_synthetic_sndq_bar_orders_high_and_low_after_negative_leverage() -> None:
+    asof = BAR_START + timedelta(minutes=1)
+    config = _execution_config(
+        {"SNDQ": {"2026-07": 0.0}},
+        etf_price_basis="synthetic",
+    )
+    broker = SimBroker(config)
+    data = _basis_data(
+        instrument="SNDQ",
+        etf_prev_close=80.0,
+        sndk_rows=((BAR_START, 100.0, 103.0, 98.0, 100.0),),
+    )
+    broker.submit(
+        _ticket(
+            instrument="SNDQ",
+            side="short",
+            stop=75.2,
+            target=83.2,
+        )
+    )
+
+    fills = broker.on_bar(asof, data)
+
+    assert [fill.kind for fill in fills] == ["entry", "stop"]
+    assert fills[1].price == 75.2
+    assert fills[1].price_basis == "synthetic"
+
+
+def test_synthetic_sndq_bar_high_low_are_max_min_of_translated_endpoints() -> None:
+    asof = BAR_START + timedelta(minutes=1)
+    config = _execution_config(
+        {"SNDQ": {"2026-07": 0.0}},
+        etf_price_basis="synthetic",
+    )
+    data = _basis_data(
+        instrument="SNDQ",
+        etf_prev_close=80.0,
+        sndk_rows=((BAR_START, 100.0, 103.0, 98.0, 100.0),),
+    )
+    translated_sndk_high = 75.2
+    translated_sndk_low = 83.2
+    assert translated_sndk_high == pytest.approx(
+        bracket.etf_price(103.0, 100.0, 80.0, -2.0)
+    )
+    assert translated_sndk_low == pytest.approx(
+        bracket.etf_price(98.0, 100.0, 80.0, -2.0)
+    )
+
+    bar = FillPriceResolver(config).bar(
+        data,
+        instrument="SNDQ",
+        asof=asof,
+    )
+
+    assert bar is not None
+    assert bar.h >= bar.l
+    assert bar.h == pytest.approx(max(translated_sndk_high, translated_sndk_low))
+    assert bar.l == pytest.approx(min(translated_sndk_high, translated_sndk_low))
+
+
+def test_auto_basis_classification_is_cached_for_the_trading_day() -> None:
+    entry_asof = BAR_START + timedelta(minutes=1)
+    flat_asof = BAR_START + timedelta(minutes=2)
+    config = _execution_config(
+        {"SNXX": {"2026-07": 0.0}},
+        etf_price_basis="auto",
+        min_intraday_bars=2,
+    )
+    broker = SimBroker(config)
+    data = _basis_data(
+        sndk_rows=(
+            (BAR_START, 101.0, 101.0, 101.0, 101.0),
+            (BAR_START + timedelta(minutes=1), 102.0, 102.0, 102.0, 102.0),
+        ),
+        etf_rows=(
+            (BAR_START, 77.0, 77.0, 77.0, 77.0),
+            (BAR_START + timedelta(minutes=1), 88.0, 88.0, 88.0, 88.0),
+        ),
+    )
+    broker.submit(_ticket(stop=45.0, target=90.0))
+
+    entry_fills = broker.on_bar(entry_asof, data)
+    exit_fills = broker.force_flat(flat_asof, data)
+
+    assert entry_fills[0].price == 51.0
+    assert entry_fills[0].price_basis == "synthetic"
+    assert exit_fills == [
+        Fill(
+            ticket_id="ticket-1",
+            ts=flat_asof,
+            price=52.0,
+            shares=10,
+            kind="eod",
+            book="real",
+            price_basis="synthetic",
         )
     ]
 
@@ -252,6 +585,7 @@ def test_stop_wins_when_same_bar_range_spans_both_levels() -> None:
             shares=10,
             kind="stop",
             book="real",
+            price_basis="real",
         )
     ]
 
@@ -342,6 +676,7 @@ def test_entry_bar_can_immediately_stop_and_returns_entry_first() -> None:
             shares=10,
             kind="entry",
             book="real",
+            price_basis="real",
         ),
         Fill(
             ticket_id="ticket-1",
@@ -350,6 +685,7 @@ def test_entry_bar_can_immediately_stop_and_returns_entry_first() -> None:
             shares=10,
             kind="stop",
             book="real",
+            price_basis="real",
         ),
     ]
 
@@ -379,6 +715,7 @@ def test_session_close_falls_back_to_sell_slipped_bar_close() -> None:
             shares=10,
             kind="eod",
             book="real",
+            price_basis="real",
         )
     ]
 
@@ -406,6 +743,7 @@ def test_force_flat_closes_at_current_close_once() -> None:
             shares=10,
             kind="eod",
             book="real",
+            price_basis="real",
         )
     ]
     assert broker.on_bar(later_asof, data) == []
@@ -524,6 +862,7 @@ def test_reversal_mark_waits_for_later_open_and_preempts_bracket_checks() -> Non
             shares=10,
             kind="reversal",
             book="real",
+            price_basis="real",
         )
     ]
     assert broker.on_bar(later_asof, data) == []
@@ -553,5 +892,6 @@ def test_reversal_mark_with_same_side_leaves_position_under_bracket_checks() -> 
             shares=10,
             kind="target",
             book="real",
+            price_basis="real",
         )
     ]

@@ -115,6 +115,7 @@ def test_fake_broker_waits_for_a_completed_bar_then_fills_once_at_raw_open() -> 
             shares=37,
             kind="entry",
             book="real",
+            price_basis="real",
         )
     ]
     assert broker.on_bar(_FIRST_BAR + timedelta(minutes=2), data) == []
@@ -140,6 +141,7 @@ def test_fake_broker_fills_all_pending_tickets_with_instrument_specific_opens() 
             shares=10,
             kind="entry",
             book="real",
+            price_basis="real",
         ),
         Fill(
             ticket_id="ticket-b",
@@ -148,6 +150,7 @@ def test_fake_broker_fills_all_pending_tickets_with_instrument_specific_opens() 
             shares=23,
             kind="entry",
             book="real",
+            price_basis="real",
         ),
     ]
 

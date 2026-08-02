@@ -15,6 +15,7 @@ import pytest
 from trader.contracts import (
     Broker,
     AlgoStatus,
+    Fill,
     Intent,
     MarketData,
     OrderTicket,
@@ -152,8 +153,28 @@ def _execution_config(*, slippage_bps: float = 0.0) -> ExecutionConfig:
     return ExecutionConfig(
         broker="sim",
         live_orders=False,
-        fills=FillsConfig(commission=0.0),
+        fills=FillsConfig(
+            commission=0.0,
+            etf_price_basis="real",
+            min_intraday_bars=1,
+        ),
         slippage_bps={"SNXX": {"2026-07": slippage_bps}},
+    )
+
+
+def _day_frame(day: date, bar_count: int) -> pd.DataFrame:
+    timestamps = []
+    if bar_count > 0:
+        timestamps.extend(
+            datetime(day.year, day.month, day.day, 13, 30, tzinfo=timezone.utc)
+            + timedelta(minutes=index)
+            for index in range(bar_count - 1)
+        )
+        timestamps.append(
+            datetime(day.year, day.month, day.day, 19, 59, tzinfo=timezone.utc)
+        )
+    return _frame(
+        *((timestamp, 100.0, 101.0, 99.0, 100.0) for timestamp in timestamps)
     )
 
 
@@ -165,27 +186,205 @@ def _runner(
     risk: RiskEngine | None = None,
     slippage_bps: float = 0.0,
     risk_config: RiskConfig | None = None,
+    execution_config: ExecutionConfig | None = None,
+    traded_instruments: list[str] | None = None,
+    symbols: list[str] | None = None,
     broker: Broker | None = None,
 ) -> tuple[SessionRunner, RealBook, ShadowBook]:
     risk_config = _risk_config() if risk_config is None else risk_config
-    execution_config = _execution_config(slippage_bps=slippage_bps)
-    real_book = RealBook(risk_config)
+    execution_config = (
+        _execution_config(slippage_bps=slippage_bps)
+        if execution_config is None
+        else execution_config
+    )
+    real_book = RealBook(risk_config, execution_config)
     shadow_book = ShadowBook(execution_config)
     runner = SessionRunner(
         session_id="backtest-20260701-scripted",
         mode="backtest",
         market_data=data,
         broker=SimBroker(execution_config) if broker is None else broker,
-        risk=risk if risk is not None else RiskRails(risk_config),
+        risk=risk
+        if risk is not None
+        else RiskRails(risk_config, execution_config),
         real_book=real_book,
         shadow_book=shadow_book,
         telemetry=telemetry,
         roster=roster,
-        symbols=["SNXX"],
+        symbols=["SNXX"] if symbols is None else symbols,
         config_sha256="fixture-sha256",
         package_version="0.1.0",
+        execution_config=execution_config,
+        traded_instruments=[] if traded_instruments is None else traded_instruments,
+        timezone="America/New_York",
     )
     return runner, real_book, shadow_book
+
+
+@pytest.mark.parametrize(
+    ("book", "price_basis", "tag"),
+    [
+        ("real", "real", None),
+        ("real", "synthetic", None),
+        ("shadow", "real", "probe"),
+        ("shadow", "synthetic", "rejected"),
+    ],
+)
+def test_emit_fill_preserves_fill_price_basis_in_telemetry(
+    book: str,
+    price_basis: str,
+    tag: str | None,
+) -> None:
+    data = FakeMarketData({"SNXX": _day_frame(BAR_START.date(), 1)})
+    telemetry = CollectingTelemetry()
+    runner, _real_book, _shadow_book = _runner(
+        data=data,
+        telemetry=telemetry,
+        roster=[],
+    )
+    fill = Fill(
+        ticket_id="ticket-basis",
+        ts=BAR_START,
+        price=101.25,
+        shares=12,
+        kind="entry",
+        book=book,
+        price_basis=price_basis,
+    )
+
+    runner._emit_fill(fill, tag=tag)
+
+    assert telemetry.records == [
+        {
+            "ev": "fill",
+            "ts": "2026-07-01T13:30:00Z",
+            "session": "backtest-20260701-scripted",
+            "ticket_id": "ticket-basis",
+            "price": 101.25,
+            "shares": 12,
+            "kind": "entry",
+            "book": book,
+            "price_basis": price_basis,
+            "tag": tag,
+        }
+    ]
+
+
+def test_start_day_emits_data_thin_once_for_each_thin_traded_instrument() -> None:
+    day = date(2026, 7, 1)
+    execution_config = ExecutionConfig(
+        broker="sim",
+        live_orders=False,
+        fills=FillsConfig(
+            commission=0.0,
+            etf_price_basis="real",
+            min_intraday_bars=2,
+        ),
+        slippage_bps={"SNXX": {"2026-07": 0.0}},
+    )
+    data = FakeMarketData(
+        {
+            "SNXX": _day_frame(day, 1),
+            "SNDQ": _day_frame(day, 2),
+            "SPY": _day_frame(day, 1),
+        }
+    )
+    telemetry = CollectingTelemetry()
+    runner, _real_book, _shadow_book = _runner(
+        data=data,
+        telemetry=telemetry,
+        roster=[],
+        execution_config=execution_config,
+        traded_instruments=["SNXX", "SNDQ"],
+        symbols=["SNXX", "SNDQ", "SPY"],
+    )
+
+    runner.start_day(day)
+
+    assert [record for record in telemetry.records if record["ev"] == "data_thin"] == [
+        {
+            "ev": "data_thin",
+            "ts": "2026-07-01T20:00:00Z",
+            "session": "backtest-20260701-scripted",
+            "symbol": "SNXX",
+            "day": "2026-07-01",
+            "bar_count": 1,
+            "min_intraday_bars": 2,
+        }
+    ]
+
+
+def test_start_day_emits_data_thin_when_synthetic_basis_skips_real_pricing_count() -> None:
+    day = date(2026, 7, 1)
+    execution_config = ExecutionConfig(
+        broker="sim",
+        live_orders=False,
+        fills=FillsConfig(
+            commission=0.0,
+            etf_price_basis="synthetic",
+            min_intraday_bars=2,
+        ),
+        slippage_bps={"SNXX": {"2026-07": 0.0}},
+    )
+    data = FakeMarketData({"SNXX": _day_frame(day, 1)})
+    telemetry = CollectingTelemetry()
+    runner, _real_book, _shadow_book = _runner(
+        data=data,
+        telemetry=telemetry,
+        roster=[],
+        execution_config=execution_config,
+        traded_instruments=["SNXX"],
+        symbols=["SNXX"],
+    )
+
+    runner.start_day(day)
+
+    assert [record for record in telemetry.records if record["ev"] == "data_thin"] == [
+        {
+            "ev": "data_thin",
+            "ts": "2026-07-01T20:00:00Z",
+            "session": "backtest-20260701-scripted",
+            "symbol": "SNXX",
+            "day": "2026-07-01",
+            "bar_count": 1,
+            "min_intraday_bars": 2,
+        }
+    ]
+
+
+def test_start_day_ignores_thin_context_symbols_that_are_not_traded() -> None:
+    day = date(2026, 7, 1)
+    execution_config = ExecutionConfig(
+        broker="sim",
+        live_orders=False,
+        fills=FillsConfig(
+            commission=0.0,
+            etf_price_basis="real",
+            min_intraday_bars=2,
+        ),
+        slippage_bps={"SNXX": {"2026-07": 0.0}},
+    )
+    data = FakeMarketData(
+        {
+            "SNXX": _day_frame(day, 2),
+            "SNDQ": _day_frame(day, 2),
+            "SNDK": _day_frame(day, 1),
+            "SPY": _day_frame(day, 1),
+        }
+    )
+    telemetry = CollectingTelemetry()
+    runner, _real_book, _shadow_book = _runner(
+        data=data,
+        telemetry=telemetry,
+        roster=[],
+        execution_config=execution_config,
+        traded_instruments=["SNXX", "SNDQ"],
+        symbols=["SNDK", "SNXX", "SNDQ", "SPY"],
+    )
+
+    runner.start_day(day)
+
+    assert [record for record in telemetry.records if record["ev"] == "data_thin"] == []
 
 
 class _FailIfCalledRisk:
@@ -202,7 +401,7 @@ class _FailIfCalledRisk:
 class _FailForAlgoRisk:
     def __init__(self, blocked_algo_id: str) -> None:
         self._blocked_algo_id = blocked_algo_id
-        self._delegate = RiskRails(_risk_config())
+        self._delegate = RiskRails(_risk_config(), _execution_config())
 
     def check_and_size(
         self,
@@ -314,6 +513,8 @@ def test_session_runner_executes_real_and_shadow_paths_in_exact_order() -> None:
         "config_sha256": "fixture-sha256",
         "package_version": "0.1.0",
         "symbols": ["SNXX"],
+        "etf_price_basis": "real",
+        "qualifying_day_counts": {},
         "roster": [
             {"id": "accepted", "status": "emitting"},
             {"id": "broken", "status": "emitting"},

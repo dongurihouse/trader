@@ -294,6 +294,7 @@ def test_new_recorded_fill_is_returned_once_and_starts_position_monitoring(
             shares=7,
             kind="entry",
             book="real",
+            price_basis="real",
         )
     ]
     assert second == []
@@ -387,6 +388,7 @@ def test_eod_condition_prints_one_notice_without_creating_a_fill(
             shares=10,
             kind="entry",
             book="real",
+            price_basis="real",
         )
     ]
     assert len(notices) == 1
@@ -422,6 +424,7 @@ def test_recorded_exit_fill_is_returned_and_stops_further_notices(
             shares=10,
             kind="stop",
             book="real",
+            price_basis="real",
         )
     ]
     assert output == []

@@ -16,7 +16,11 @@ def _execution_config(*, live_orders: bool) -> ExecutionConfig:
     return ExecutionConfig(
         broker="api",
         live_orders=live_orders,
-        fills=FillsConfig(commission=0.0),
+        fills=FillsConfig(
+            commission=0.0,
+            etf_price_basis="real",
+            min_intraday_bars=1,
+        ),
         slippage_bps={},
     )
 

@@ -19,7 +19,13 @@ from trader.contracts import (
     Side,
 )
 
-from .broker.sim import apply_slippage, check_exit, slippage_bps_for
+from .broker.sim import (
+    FillPriceBasis,
+    FillPriceResolver,
+    apply_slippage,
+    check_exit,
+    slippage_bps_for,
+)
 from .config import ExecutionConfig, RiskConfig
 
 
@@ -39,15 +45,20 @@ class ClosedTrade:
 def _raw_entry_price(
     data: MarketData,
     *,
+    prices: FillPriceResolver,
     instrument: str,
     entry_fill_ts: datetime,
 ) -> float:
-    bars = data.bars_1m(
-        instrument,
+    bar = prices.bar(
+        data,
+        instrument=instrument,
         asof=entry_fill_ts,
-        lookback_minutes=1,
     )
-    return float(bars.iloc[0]["o"])
+    if bar is None:
+        raise RuntimeError(
+            "cannot resolve raw entry price for a filled real-book entry"
+        )
+    return bar.o
 
 
 def _r_multiple(
@@ -69,6 +80,7 @@ class RealBook:
     def __init__(
         self,
         risk_config: RiskConfig,
+        execution_config: ExecutionConfig,
         *,
         commission: float = 0.0,
         timezone: str = "America/New_York",
@@ -85,6 +97,10 @@ class RealBook:
         self._risk_config = risk_config
         self._commission = commission
         self._tz = ZoneInfo(timezone)
+        self._prices = FillPriceResolver(
+            execution_config,
+            timezone=timezone,
+        )
         self._tickets: dict[str, OrderTicket] = {}
         self._positions_by_ticket: dict[str, PositionState] = {}
         self._raw_entries: dict[str, float] = {}
@@ -137,6 +153,7 @@ class RealBook:
         self._positions_by_ticket[fill.ticket_id] = position
         self._raw_entries[fill.ticket_id] = _raw_entry_price(
             data,
+            prices=self._prices,
             instrument=ticket.instrument,
             entry_fill_ts=fill.ts,
         )
@@ -272,6 +289,10 @@ class ShadowBook:
         self._execution_config = execution_config
         self._timezone = timezone
         self._tz = ZoneInfo(timezone)
+        self._prices = FillPriceResolver(
+            execution_config,
+            timezone=timezone,
+        )
         self._pending: list[_PendingShadow] = []
         self._positions: list[_OpenShadow] = []
         self._raw_entries: dict[str, float] = {}
@@ -348,16 +369,16 @@ class ShadowBook:
                 still_pending.append(pending)
                 continue
 
-            bars = data.bars_1m(
-                episode.instrument,
+            bar = self._prices.bar(
+                data,
+                instrument=episode.instrument,
                 asof=asof,
-                lookback_minutes=1,
             )
-            if bars.empty:
+            if bar is None:
                 still_pending.append(pending)
                 continue
 
-            raw_entry = float(bars.iloc[0]["o"])
+            raw_entry = bar.o
             bps = slippage_bps_for(
                 self._execution_config,
                 episode.instrument,
@@ -378,6 +399,7 @@ class ShadowBook:
                     shares=0,
                     kind="entry",
                     book="shadow",
+                    price_basis=bar.price_basis,
                 )
             )
             self._raw_entries[episode.episode_id] = raw_entry
@@ -400,12 +422,12 @@ class ShadowBook:
                 continue
 
             episode = position.episode
-            bars = data.bars_1m(
-                episode.instrument,
+            bar = self._prices.bar(
+                data,
+                instrument=episode.instrument,
                 asof=asof,
-                lookback_minutes=1,
             )
-            if bars.empty:
+            if bar is None:
                 still_open.append(position)
                 continue
 
@@ -413,29 +435,29 @@ class ShadowBook:
                 self._close_position(
                     position,
                     asof=asof,
-                    raw_exit_price=float(bars.iloc[0]["o"]),
+                    raw_exit_price=bar.o,
                     exit_kind="reversal",
+                    price_basis=bar.price_basis,
                 )
             )
 
         for position in unmarked_positions:
             episode = position.episode
-            bars = data.bars_1m(
-                episode.instrument,
+            bar = self._prices.bar(
+                data,
+                instrument=episode.instrument,
                 asof=asof,
-                lookback_minutes=1,
             )
-            if bars.empty:
+            if bar is None:
                 still_open.append(position)
                 continue
 
-            bar = bars.iloc[0]
             exit_result = check_exit(
                 stop=cast(float, episode.stop),
                 target=cast(float, episode.target),
-                bar_open=float(bar["o"]),
-                bar_low=float(bar["l"]),
-                bar_high=float(bar["h"]),
+                bar_open=bar.o,
+                bar_low=bar.l,
+                bar_high=bar.h,
             )
             if exit_result is None:
                 trading_day = asof.astimezone(self._tz).date()
@@ -444,7 +466,7 @@ class ShadowBook:
                     still_open.append(position)
                     continue
                 exit_kind: Literal["stop", "target", "eod"] = "eod"
-                raw_exit_price = float(bar["c"])
+                raw_exit_price = bar.c
             else:
                 exit_kind, raw_exit_price = exit_result
 
@@ -454,6 +476,7 @@ class ShadowBook:
                     asof=asof,
                     raw_exit_price=raw_exit_price,
                     exit_kind=exit_kind,
+                    price_basis=bar.price_basis,
                 )
             )
 
@@ -482,12 +505,12 @@ class ShadowBook:
         fills: list[Fill] = []
         for position in self._positions:
             episode = position.episode
-            bars = data.bars_1m(
-                episode.instrument,
+            bar = self._prices.bar(
+                data,
+                instrument=episode.instrument,
                 asof=asof,
-                lookback_minutes=1,
             )
-            if bars.empty:
+            if bar is None:
                 raise RuntimeError(
                     "cannot force-flat a filled shadow episode without a known bar"
                 )
@@ -495,8 +518,9 @@ class ShadowBook:
                 self._close_position(
                     position,
                     asof=asof,
-                    raw_exit_price=float(bars.iloc[-1]["c"]),
+                    raw_exit_price=bar.c,
                     exit_kind="eod",
+                    price_basis=bar.price_basis,
                 )
             )
         self._positions = []
@@ -509,6 +533,7 @@ class ShadowBook:
         asof: datetime,
         raw_exit_price: float,
         exit_kind: _ExitKind,
+        price_basis: FillPriceBasis,
     ) -> Fill:
         episode = position.episode
         bps = slippage_bps_for(
@@ -528,6 +553,7 @@ class ShadowBook:
             shares=0,
             kind=exit_kind,
             book="shadow",
+            price_basis=price_basis,
         )
         r_multiple = _r_multiple(
             slipped_exit_price=exit_price,
