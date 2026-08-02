@@ -59,6 +59,8 @@ class ValidationConfig:
     etf_leverage_factor: float
     etf_tolerance: float
     bad_tick_neighbor_fraction: float
+    max_bad_run_bars: int
+    quarantine_abort_fraction: float
 
 
 @dataclass(frozen=True)

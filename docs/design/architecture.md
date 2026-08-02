@@ -255,6 +255,46 @@ correctness comes from the PIT rules in §4.
   16:27Z printed at 1615.00 against a 1430-1442 tape); ingest must quarantine, not
   ingest, such bars.
 
+## 9a. Fill pricing basis (amendment A12, 2026-08-02 — normative)
+
+Measured on the predecessor store, 2026-08-02: SNXX has 125 stored days of which **1**
+carries intraday minute bars; SNDQ has 69 of which **1** does. Every other day holds a
+single bar — a daily anchor. SNDK, by contrast, has 41 days at 960 bars. The instruments
+this program actually trades therefore have essentially no intraday history, and the
+first real backtest silently produced meaningless results because every position opened
+and closed inside the same bar.
+
+This was a design error carried in from Wave 1: trader was built to fill on real ETF
+minute bars, which do not exist. The predecessor derived ETF prices from SNDK through the
+leverage relation instead, and its entire recorded evidence base rests on that method.
+
+**Rule.** Fills on ETF instruments are priced on a declared basis, recorded per fill:
+
+- `synthetic` — the ETF price is derived from the SNDK bar at that timestamp through the
+  same leverage translation the brackets already use (`etf_price`, anchored on both
+  symbols' previous closes). This is the predecessor's method and the only one the
+  available history supports.
+- `real` — the ETF's own stored minute bar is used, permitted only for a
+  (symbol, day) whose bar count meets `min_intraday_bars`.
+- `auto` (default) — real where the day qualifies, synthetic otherwise.
+
+Every `fill` telemetry record carries `price_basis` naming which was used, and
+`session_start` reports the configured mode plus the per-symbol counts of qualifying
+days. A result set may never leave its basis ambiguous: a synthetic fill is a model
+output, not an observed trade price, and any report or dashboard showing such trades must
+say so.
+
+**Data-thinness is an error, not a shrug.** A session whose traded instruments have fewer
+than `min_intraday_bars` on a day emits a `data_thin` telemetry warning naming symbol,
+day, and count. The relay's payload validation — which today accepts any response with at
+least one bar — must apply the same threshold, so a near-empty vendor response is caught
+at capture time rather than discovered in a backtest weeks later.
+
+**Capture priority.** Real ETF minute bars have no historical source: they accrue only
+from live capture, and every uncaptured session is permanently lost. Whatever the fill
+basis, capturing SNXX and SNDQ intraday going forward is the highest-value data action
+this program has.
+
 ## 10a. Bad-tick policy (amendment A9, 2026-08-02 — normative)
 
 Two review rounds produced detectors that were locally reasonable and globally wrong (a

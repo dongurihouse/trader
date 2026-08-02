@@ -126,11 +126,12 @@ def _data(
     *,
     bar_ts: datetime = INTENT_TS - timedelta(minutes=1),
     later_close: float | None = None,
+    symbol: str = INSTRUMENT,
 ) -> FakeMarketData:
     rows = [(bar_ts, close)]
     if later_close is not None:
         rows.append((bar_ts + timedelta(minutes=1), later_close))
-    return FakeMarketData({INSTRUMENT: _frame(*rows)})
+    return FakeMarketData({symbol: _frame(*rows)})
 
 
 class NoFutureAsOfMarketData:
@@ -352,9 +353,9 @@ def test_no_price_data_rejects_empty_visible_frame_with_visible_bar_control() ->
     ("side", "stop", "target"),
     [
         ("long", 101.0, 110.0),
-        ("short", 99.0, 90.0),
+        ("short", 101.0, 110.0),
     ],
-    ids=["long-stop-above-entry", "short-stop-below-entry"],
+    ids=["long-stop-above-entry", "short-stop-above-entry"],
 )
 def test_degenerate_bracket_rejects_stop_on_wrong_side_of_entry_reference(
     side: str,
@@ -363,17 +364,22 @@ def test_degenerate_bracket_rejects_stop_on_wrong_side_of_entry_reference(
 ) -> None:
     engine = RiskRails(_risk_config())
     intent = _intent(side=side, stop=stop, target=target)
+    data = NoFutureAsOfMarketData(
+        _data(100.0),
+        latest_asof=INTENT_TS,
+    )
 
-    rejected = engine.check_and_size(intent, _portfolio(), _data(100.0))
+    rejected = engine.check_and_size(intent, _portfolio(), data)
 
     _assert_rejection(rejected, intent, "degenerate_bracket")
+    assert data.requests == [(INSTRUMENT, INTENT_TS, 1)]
 
 
 @pytest.mark.parametrize(
     ("side", "target"),
     [
         ("long", 110.0),
-        ("short", 90.0),
+        ("short", 110.0),
     ],
     ids=["long-stop-equals-entry", "short-stop-equals-entry"],
 )
@@ -383,19 +389,24 @@ def test_degenerate_bracket_rejects_stop_equal_to_entry_reference(
 ) -> None:
     engine = RiskRails(_risk_config())
     intent = _intent(side=side, stop=100.0, target=target)
+    data = NoFutureAsOfMarketData(
+        _data(100.0),
+        latest_asof=INTENT_TS,
+    )
 
-    rejected = engine.check_and_size(intent, _portfolio(), _data(100.0))
+    rejected = engine.check_and_size(intent, _portfolio(), data)
 
     _assert_rejection(rejected, intent, "degenerate_bracket")
+    assert data.requests == [(INSTRUMENT, INTENT_TS, 1)]
 
 
 @pytest.mark.parametrize(
     ("side", "stop", "target"),
     [
         ("long", 95.0, 95.0),
-        ("short", 105.0, 105.0),
+        ("short", 95.0, 95.0),
     ],
-    ids=["long-target-not-above-stop", "short-target-not-below-stop"],
+    ids=["long-target-not-above-stop", "short-target-not-above-stop"],
 )
 def test_degenerate_bracket_rejects_structural_stop_target_without_price_data(
     side: str,
@@ -415,10 +426,30 @@ def test_degenerate_bracket_rejects_structural_stop_target_without_price_data(
 
 
 @pytest.mark.parametrize(
+    "side",
+    ["long", "short"],
+    ids=["long", "short"],
+)
+def test_degenerate_bracket_rejects_inverted_instrument_bracket_for_any_side(
+    side: str,
+) -> None:
+    engine = RiskRails(_risk_config())
+    intent = _intent(side=side, stop=110.0, target=100.0)
+
+    rejected = engine.check_and_size(
+        intent,
+        _portfolio(),
+        BarsForbiddenMarketData(),
+    )
+
+    _assert_rejection(rejected, intent, "degenerate_bracket")
+
+
+@pytest.mark.parametrize(
     ("side", "stop", "target", "expected_risk_dollars"),
     [
         ("long", 95.0, 110.0, 250.0),
-        ("short", 105.0, 90.0, 250.0),
+        ("short", 95.0, 110.0, 250.0),
     ],
     ids=["long", "short"],
 )
@@ -436,6 +467,154 @@ def test_valid_brackets_preserve_risk_dollars(
     assert isinstance(result, OrderTicket)
     assert result.shares == 50
     assert result.risk["dollars"] == expected_risk_dollars
+
+
+@pytest.mark.parametrize(
+    (
+        "algo_id",
+        "intent_ts",
+        "stop",
+        "target",
+        "entry_ref",
+        "expected_shares",
+        "expected_risk_dollars",
+    ),
+    [
+        (
+            "lateday_momentum",
+            datetime(2026, 7, 27, 18, 1, tzinfo=timezone.utc),
+            40.92,
+            43.17,
+            41.25,
+            121,
+            39.93,
+        ),
+        (
+            "gap_play",
+            datetime(2026, 7, 28, 13, 48, tzinfo=timezone.utc),
+            50.23,
+            56.17,
+            53.20,
+            93,
+            276.21,
+        ),
+        (
+            "lateday_momentum",
+            datetime(2026, 7, 28, 18, 1, tzinfo=timezone.utc),
+            52.61,
+            55.51,
+            53.20,
+            93,
+            54.87,
+        ),
+        (
+            "orb5",
+            datetime(2026, 7, 29, 13, 38, tzinfo=timezone.utc),
+            50.69,
+            65.93,
+            60.79,
+            82,
+            828.20,
+        ),
+        (
+            "lateday_momentum",
+            datetime(2026, 7, 29, 18, 1, tzinfo=timezone.utc),
+            53.62,
+            58.32,
+            60.79,
+            82,
+            587.94,
+        ),
+    ],
+)
+def test_degenerate_bracket_accepts_translated_short_sndq_backtest_intents(
+    algo_id: str,
+    intent_ts: datetime,
+    stop: float,
+    target: float,
+    entry_ref: float,
+    expected_shares: int,
+    expected_risk_dollars: float,
+) -> None:
+    # These are real rejected intents from backtest session
+    # backtest-20260802-061527. The SNDQ cases were the regression:
+    # correctly translated short-signal brackets that the side-branching rail
+    # wrongly refused.
+    engine = RiskRails(_risk_config())
+    intent = _intent(
+        algo_id=algo_id,
+        ts=intent_ts,
+        side="short",
+        instrument="SNDQ",
+        stop=stop,
+        target=target,
+    )
+
+    result = engine.check_and_size(
+        intent,
+        _portfolio(),
+        _data(
+            entry_ref,
+            bar_ts=intent_ts - timedelta(minutes=1),
+            symbol="SNDQ",
+        ),
+    )
+
+    assert isinstance(result, OrderTicket)
+    assert result.instrument == "SNDQ"
+    assert result.side == "short"
+    assert result.shares == expected_shares
+    assert result.stop == stop
+    assert result.target == target
+    assert result.risk["dollars"] == expected_risk_dollars
+
+
+@pytest.mark.parametrize(
+    ("algo_id", "intent_ts", "side", "instrument", "stop", "target", "entry_ref"),
+    [
+        (
+            "orb5",
+            datetime(2026, 7, 28, 13, 36, tzinfo=timezone.utc),
+            "long",
+            "SNXX",
+            8.99,
+            10.72,
+            8.04,
+        ),
+    ],
+)
+def test_degenerate_bracket_rejects_backtest_intent_with_stop_above_entry_ref(
+    algo_id: str,
+    intent_ts: datetime,
+    side: str,
+    instrument: str,
+    stop: float,
+    target: float,
+    entry_ref: float,
+) -> None:
+    engine = RiskRails(_risk_config())
+    intent = _intent(
+        algo_id=algo_id,
+        ts=intent_ts,
+        side=side,
+        instrument=instrument,
+        stop=stop,
+        target=target,
+    )
+
+    rejected = engine.check_and_size(
+        intent,
+        _portfolio(),
+        _data(
+            entry_ref,
+            bar_ts=intent_ts - timedelta(minutes=1),
+            symbol=instrument,
+        ),
+    )
+
+    _assert_rejection(rejected, intent, "degenerate_bracket")
+    assert f"{stop:.2f}" in rejected.detail
+    assert f"{entry_ref:.2f}" in rejected.detail
 
 
 def test_unsized_rejects_unaffordable_share_with_affordable_price_control() -> None:

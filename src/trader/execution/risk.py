@@ -124,19 +124,18 @@ class RiskRails:
                 detail="open intents require a target price",
             )
 
-        if (
-            intent.side == "long"
-            and intent.stop >= intent.target
-        ) or (
-            intent.side == "short"
-            and intent.stop <= intent.target
-        ):
+        # Intent.side is the SNDK signal direction, but stop and target have
+        # already been translated into the execution instrument. SNXX and SNDQ
+        # are both held long, so instrument-space brackets must keep long
+        # geometry and agree with sim.check_exit; the signed SNDK-space guard
+        # lives upstream in algos/declarative.py.
+        if intent.stop >= intent.target:
             return Rejection(
                 intent=intent,
                 rule="degenerate_bracket",
                 detail=(
-                    f"{intent.side} bracket has no tradeable stop/target "
-                    f"spread: stop {intent.stop:.2f}, target {intent.target:.2f}"
+                    "instrument bracket has no tradeable stop/target spread: "
+                    f"stop {intent.stop:.2f}, target {intent.target:.2f}"
                 ),
             )
 
@@ -156,17 +155,13 @@ class RiskRails:
             )
 
         entry_px = round(float(bars.iloc[-1]["c"]), 2)
-        risk = (
-            entry_px - intent.stop
-            if intent.side == "long"
-            else intent.stop - entry_px
-        )
+        risk = entry_px - intent.stop
         if risk <= 0:
             return Rejection(
                 intent=intent,
                 rule="degenerate_bracket",
                 detail=(
-                    f"{intent.side} stop {intent.stop:.2f} is not beyond "
+                    f"stop {intent.stop:.2f} is not below "
                     f"entry reference price {entry_px:.2f}"
                 ),
             )
