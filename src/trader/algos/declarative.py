@@ -578,7 +578,6 @@ class DeclarativeAlgo:
                 risk,
             )
 
-            self._done = True
             rule_eval = self._ruleset.evaluate(data, asof)
             candidate_eval = rule_eval.for_candidate(self.id, direction)
 
@@ -593,6 +592,7 @@ class DeclarativeAlgo:
             )
             if translated is None:
                 return []
+            self._done = True
             instrument, _translated_entry, stop, target = translated
             confidence = round(
                 heuristic_confidence(

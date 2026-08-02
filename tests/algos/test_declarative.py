@@ -323,6 +323,20 @@ def test_all_inverted_sides_return_nothing_without_consuming_one_shot() -> None:
     assert algo._done is False
 
 
+def test_translation_failure_does_not_consume_one_shot_and_can_retry() -> None:
+    frames = _frames()
+    frames["SNXX"] = frames["SNXX"].loc["2026-07-03":]
+    algo = DeclarativeAlgo("translation-retry", "emitting", _params())
+    data = FakeMarketData(frames=frames, signals=_signals())
+
+    assert algo.on_bar(ASOF, data) == []
+    assert algo._done is False
+
+    data._frames["SNXX"] = _frames()["SNXX"]
+
+    assert len(algo.on_bar(ASOF + timedelta(minutes=1), data)) == 1
+
+
 def test_gate_block_consumes_one_shot_before_the_gate_verdict() -> None:
     params = _params(
         gates=[
