@@ -64,6 +64,8 @@ _PULLBACK_BASELINES: dict[
 _OUTPUT_SESSION_SEEDS: dict[
     tuple[str, str, str, str, int], tuple[tuple[int, float, int], ...]
 ] = {}
+_INITIALIZED_DATABASES: set[Path] = set()
+_DATABASE_INIT_LOCK = threading.Lock()
 
 
 class ConfigError(ValueError):
@@ -350,24 +352,31 @@ def _connect(path: Path, read_only: bool = False) -> sqlite3.Connection:
 
 
 def _init_database(path: Path) -> None:
-    try:
-        schema = SCHEMA.read_text()
-    except FileNotFoundError as exc:
-        raise ConfigError("schema file does not exist: %s" % SCHEMA) from exc
-    connection = _connect(path)
-    try:
-        connection.executescript(schema)
-        trade_columns = {
-            row["name"] for row in connection.execute("PRAGMA table_info(trades)")
-        }
-        if "direction" not in trade_columns:
-            connection.execute(
-                "ALTER TABLE trades ADD COLUMN direction INTEGER NOT NULL DEFAULT 1 "
-                "CHECK(direction IN (-1, 1))"
-            )
-        connection.commit()
-    finally:
-        connection.close()
+    path = path.resolve()
+    if path in _INITIALIZED_DATABASES:
+        return
+    with _DATABASE_INIT_LOCK:
+        if path in _INITIALIZED_DATABASES:
+            return
+        try:
+            schema = SCHEMA.read_text()
+        except FileNotFoundError as exc:
+            raise ConfigError("schema file does not exist: %s" % SCHEMA) from exc
+        connection = _connect(path)
+        try:
+            connection.executescript(schema)
+            trade_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(trades)")
+            }
+            if "direction" not in trade_columns:
+                connection.execute(
+                    "ALTER TABLE trades ADD COLUMN direction INTEGER NOT NULL DEFAULT 1 "
+                    "CHECK(direction IN (-1, 1))"
+                )
+            connection.commit()
+        finally:
+            connection.close()
+        _INITIALIZED_DATABASES.add(path)
 
 
 def _bars(
@@ -1197,32 +1206,6 @@ def _prior_output(
     return json.loads(row["output"]) if row else None
 
 
-def _trade_open_entries(
-    connection: sqlite3.Connection, ticker: str, algo: str, ts: int
-) -> list[dict[str, Any]]:
-    last_exit = connection.execute(
-        "SELECT MAX(ts) FROM trades WHERE ticker=? AND algo=? AND action='exit_all' AND ts<?",
-        (ticker, algo, ts),
-    ).fetchone()[0]
-    rows = connection.execute(
-        """
-        SELECT tr.ts, tr.direction, b.close FROM trades tr
-        JOIN bars b ON b.ticker=tr.ticker AND b.ts=tr.ts
-        WHERE tr.ticker=? AND tr.algo=? AND tr.action='entry'
-          AND tr.ts>? AND tr.ts<? ORDER BY tr.ts
-        """,
-        (ticker, algo, last_exit if last_exit is not None else -1, ts),
-    ).fetchall()
-    return [
-        {
-            "ts": int(row["ts"]),
-            "price": float(row["close"]),
-            "direction": int(row["direction"]),
-        }
-        for row in rows
-    ]
-
-
 def _output_state(
     connection: sqlite3.Connection,
     settings: Settings,
@@ -1341,6 +1324,7 @@ def run_core(
         required_algos.update(settings.algo_requirements[name])
 
     algo_values: dict[str, tuple[bool, bool, int]] = {}
+    algo_open_entries: dict[str, tuple[Mapping[str, Any], ...]] = {}
     for name in settings.algo_order:
         if name not in required_algos:
             continue
@@ -1358,13 +1342,15 @@ def run_core(
         open_entries, session_outputs = _output_state(
             connection, settings, ticker, name, ts
         )
+        position = tuple(open_entries)
+        algo_open_entries[name] = position
         try:
             output = ALGO_FUNCTIONS[node["function"]].function(
                 AlgoContext(
                     parameters=node["params"],
                     inputs=inputs,
                     previous=previous,
-                    open_entries=tuple(open_entries),
+                    open_entries=position,
                     session_outputs=tuple(session_outputs),
                 )
             )
@@ -1374,10 +1360,23 @@ def run_core(
             result = _algo_output(output)
         except EvaluationError as exc:
             raise EvaluationError("algo %s returned invalid output: %s" % (name, exc)) from exc
+        if result[1]:
+            result = (
+                (False, True, int(position[0]["direction"]))
+                if position
+                else (False, False, 0)
+            )
         algo_values[name] = result
 
     selected_values = {name: algo_values[name] for name in selected}
-    return {"ticker": ticker, "ts": ts, "signals": signal_values, "algos": selected_values}
+    selected_positions = {name: algo_open_entries[name] for name in selected}
+    return {
+        "ticker": ticker,
+        "ts": ts,
+        "signals": signal_values,
+        "algos": selected_values,
+        "_open_entries": selected_positions,
+    }
 
 
 def _effective_settings(
@@ -1413,7 +1412,8 @@ def core(
     connection = _connect(current.database, read_only=True)
     try:
         settings, _ = _effective_settings(connection, current, config_path)
-        return run_core(connection, settings, ticker, ts, algos)
+        result = run_core(connection, settings, ticker, ts, algos)
+        return {key: result[key] for key in ("ticker", "ts", "signals", "algos")}
     finally:
         connection.close()
 
@@ -1512,18 +1512,26 @@ def _write_result(
             if action is None:
                 continue
             if action == "exit_all":
-                live_entries = _trade_open_entries(
-                    connection, result["ticker"], name, result["ts"]
-                )
-                if not live_entries:
-                    continue
-                direction = int(live_entries[0]["direction"])
-            exists = connection.execute(
-                "SELECT 1 FROM trades WHERE ticker=? AND algo=? AND ts=?",
+                open_entries = result["_open_entries"][name]
+                if not open_entries:
+                    raise EvaluationError("algo %s closed without an open entry" % name)
+                if direction != int(open_entries[0]["direction"]):
+                    raise EvaluationError("algo %s closed in the wrong direction" % name)
+            existing = connection.execute(
+                "SELECT action,direction FROM trades WHERE ticker=? AND algo=? AND ts=?",
                 (result["ticker"], name, result["ts"]),
-            ).fetchone()
-            if exists:
-                continue
+            ).fetchall()
+            if existing:
+                if (
+                    len(existing) == 1
+                    and existing[0]["action"] == action
+                    and int(existing[0]["direction"]) == direction
+                ):
+                    continue
+                raise EvaluationError(
+                    "stored trade conflicts with algo output: %s %s %s"
+                    % (result["ticker"], name, result["ts"])
+                )
             connection.execute(
                 "INSERT INTO trades(ticker,algo,ts,action,direction) VALUES (?,?,?,?,?)",
                 (result["ticker"], name, result["ts"], action, direction),
@@ -1620,8 +1628,7 @@ def _best_effort_log(config_path: Path, level: str, message: str) -> None:
 
 
 def status(settings: Settings) -> str:
-    _init_database(settings.database)
-    connection = _connect(settings.database)
+    connection = _connect(settings.database, read_only=True)
     try:
         lines = ["ticker  bars      outputs   latest"]
         for ticker in settings.tickers:
@@ -1673,6 +1680,7 @@ class Service:
     def run(self) -> None:
         signal.signal(signal.SIGINT, self.stop)
         signal.signal(signal.SIGTERM, self.stop)
+        _init_database(self.settings.database)
         health_server = ThreadingHTTPServer(
             ("127.0.0.1", self.settings.api_port), _HealthHandler
         )
