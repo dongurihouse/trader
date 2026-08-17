@@ -221,36 +221,36 @@ footer {
 .log-counts .warn strong { color: var(--amber); }
 .log-counts .error strong { color: var(--red); }
 
-.service-health-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  margin-bottom: 18px;
+.topbar-health {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .health-indicator {
-  display: grid;
-  grid-template-columns: 10px auto minmax(0, 1fr);
+  display: inline-flex;
   align-items: center;
-  gap: 12px;
-  min-height: 64px;
-  padding: 12px 15px;
+  gap: 7px;
+  min-height: 30px;
+  padding: 5px 9px;
   background: rgba(16, 23, 33, 0.68);
   border: 1px solid var(--line);
-  border-radius: 11px;
+  border-radius: 8px;
 }
 
 .health-indicator-dot {
-  width: 9px;
-  height: 9px;
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
   background: var(--subtle);
   border-radius: 50%;
-  box-shadow: 0 0 0 4px rgba(95, 108, 119, 0.12);
+  box-shadow: 0 0 0 3px rgba(95, 108, 119, 0.12);
 }
 
 .health-indicator-copy {
-  display: grid;
-  gap: 4px;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
 }
 
 .health-indicator-copy small,
@@ -261,21 +261,18 @@ footer {
 
 .health-indicator-copy small {
   color: var(--subtle);
-  font-size: 0.54rem;
+  font-size: 0.52rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
 .health-indicator-copy strong {
   color: var(--muted);
-  font-size: 0.72rem;
+  font-size: 0.58rem;
 }
 
 .health-indicator-detail {
-  justify-self: end;
-  color: var(--subtle);
-  font-size: 0.59rem;
-  text-align: right;
+  display: none;
 }
 
 .health-indicator.is-healthy {
@@ -284,7 +281,7 @@ footer {
 
 .health-indicator.is-healthy .health-indicator-dot {
   background: var(--acid);
-  box-shadow: 0 0 0 4px var(--acid-soft);
+  box-shadow: 0 0 0 3px var(--acid-soft);
 }
 
 .health-indicator.is-healthy .health-indicator-copy strong {
@@ -297,7 +294,7 @@ footer {
 
 .health-indicator.is-degraded .health-indicator-dot {
   background: var(--amber);
-  box-shadow: 0 0 0 4px rgba(244, 197, 106, 0.11);
+  box-shadow: 0 0 0 3px rgba(244, 197, 106, 0.11);
 }
 
 .health-indicator.is-degraded .health-indicator-copy strong {
@@ -310,7 +307,7 @@ footer {
 
 .health-indicator.is-offline .health-indicator-dot {
   background: var(--red);
-  box-shadow: 0 0 0 4px rgba(255, 123, 115, 0.1);
+  box-shadow: 0 0 0 3px rgba(255, 123, 115, 0.1);
 }
 
 .health-indicator.is-offline .health-indicator-copy strong {
@@ -1645,7 +1642,17 @@ pre {
   to { background-position-x: -200%; }
 }
 
+@media (max-width: 1100px) {
+  .logs-page .updated {
+    display: none;
+  }
+}
+
 @media (max-width: 900px) {
+  .logs-page .readonly-pill {
+    display: none;
+  }
+
   .log-counts {
     width: 100%;
   }
@@ -1689,6 +1696,19 @@ pre {
     display: none;
   }
 
+  .topbar-health {
+    gap: 4px;
+  }
+
+  .health-indicator {
+    gap: 6px;
+    padding-inline: 7px;
+  }
+
+  .health-indicator-copy strong {
+    display: none;
+  }
+
   .topbar-nav a {
     padding-inline: 9px;
   }
@@ -1700,10 +1720,6 @@ pre {
   .log-counts {
     min-width: 0;
     grid-template-columns: 1fr 1fr;
-  }
-
-  .service-health-grid {
-    grid-template-columns: 1fr;
   }
 
   .log-counts span:nth-child(2) {

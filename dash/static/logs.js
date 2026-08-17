@@ -115,6 +115,7 @@ function renderHealthIndicator(service, health, responseAvailable) {
 
   indicator.className = `health-indicator is-${stateName}`;
   indicator.setAttribute("aria-label", `${service} service: ${statusText}. ${detailText}`);
+  indicator.title = detailText;
   status.textContent = statusText;
   detail.textContent = detailText;
 }
