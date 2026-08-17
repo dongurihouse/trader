@@ -60,7 +60,6 @@ const easternFullDate = new Intl.DateTimeFormat("en-US", {
   day: "numeric",
 });
 
-const integerFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 const compactFormat = new Intl.NumberFormat("en-US", {
   notation: "compact",
   maximumFractionDigits: 1,
@@ -817,7 +816,7 @@ function renderInspection(inspection) {
   change.textContent = `${formatSigned(inspection.change)}  ${formatSigned(inspection.changePct, "%")}`;
   change.classList.toggle("down", Number(inspection.change) < 0);
   $("#quote-time").textContent = easternInspectionTime.format(dateFromEpoch(inspection.bar.ts));
-  $(".quote-block").dataset.mode = inspection.mode;
+  $(".chart-header").dataset.mode = inspection.mode;
   renderShapeForest(inspection.shape);
 }
 
@@ -892,25 +891,13 @@ function focusDate(date) {
   });
 }
 
-function renderAlgoOverlay(payload = null) {
+function renderAlgoOverlay() {
   const configured = Object.entries(state.overview?.config?.algos || {})
     .filter(([, definition]) => definition?.trades === true)
     .map(([name]) => name);
   if (!configured.includes(state.algo)) state.algo = configured[0] || null;
 
-  const overlay = $("#algo-overlay");
-  overlay.hidden = !state.algo;
   chart.setAlgo(state.algo);
-  if (!state.algo) return;
-
-  $("#algo-overlay-name").textContent = state.algo.toUpperCase();
-  const actionCount = (payload?.trades || []).filter((trade) => trade.algo === state.algo).length;
-  const rangeLabel = payload?.range === "HISTORY" ? "loaded history" : payload?.range;
-  $("#algo-overlay-count").textContent = payload
-    ? actionCount
-      ? `${integerFormat.format(actionCount)} ${actionCount === 1 ? "action" : "actions"} in ${rangeLabel}`
-      : `No trade actions in ${rangeLabel}`
-    : "Loading actions…";
 }
 
 async function loadOverview({ quiet = false } = {}) {
@@ -933,7 +920,7 @@ function renderOverview() {
   $("#market-status").setAttribute("aria-label", overview.market.label);
   $("#market-status").title = overview.market.label;
   $("#market-dot").classList.toggle("live", overview.market.state === "live");
-  renderAlgoOverlay(state.bars);
+  renderAlgoOverlay();
   renderTickers(overview.quotes);
   renderQuote();
 }
@@ -975,7 +962,7 @@ function renderQuote() {
   $("#quote-time").textContent = quote?.available
     ? easternInspectionTime.format(dateFromEpoch(quote.ts))
     : "Waiting for bars";
-  $(".quote-block").dataset.mode = "latest";
+  $(".chart-header").dataset.mode = "latest";
   renderShapeForest(null);
 }
 
@@ -997,7 +984,7 @@ async function loadBars({ quiet = false } = {}) {
     if (request !== state.chartRequest) return;
     const shouldFocusLatest = state.bars?.ticker !== payload.ticker;
     state.bars = payload;
-    renderAlgoOverlay(payload);
+    renderAlgoOverlay();
     renderDateStrip(payload);
     chart.setData(payload);
     if (shouldFocusLatest && state.sessions.length) {

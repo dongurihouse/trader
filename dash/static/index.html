@@ -58,13 +58,11 @@
       <section class="chart-card surface" aria-label="Price chart">
         <div class="chart-header">
           <div class="quote-block">
-            <div class="quote-row">
-              <strong id="quote-price">—</strong>
-              <div class="quote-details">
-                <span id="quote-change">—</span>
-                <time id="quote-time">Waiting for bars</time>
-              </div>
-            </div>
+            <strong id="quote-price">—</strong>
+          </div>
+          <div class="quote-details">
+            <span id="quote-change">—</span>
+            <time class="quote-time" id="quote-time">Waiting for bars</time>
           </div>
           <div class="shape-forest" id="shape-forest" aria-live="polite">
             <small class="shape-forest-title" id="shape-forest-title">Shape forest</small>
@@ -72,15 +70,6 @@
               <span class="shape-unavailable">Waiting for evaluation</span>
             </div>
           </div>
-        </div>
-
-        <div class="chart-legend-row" id="algo-overlay" aria-live="polite" hidden>
-          <div class="chart-legend" aria-label="Algorithm trade overlay">
-            <span class="algo-overlay-name"><small>ALGO</small><strong id="algo-overlay-name">—</strong></span>
-            <span><i class="legend-entry" aria-hidden="true"></i> Entry</span>
-            <span><i class="legend-exit" aria-hidden="true"></i> Exit</span>
-          </div>
-          <span class="algo-overlay-count" id="algo-overlay-count">Checking actions…</span>
         </div>
 
         <div class="chart-stage" id="chart-stage">
