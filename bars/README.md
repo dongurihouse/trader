@@ -72,6 +72,9 @@ CSV is the default output:
 make query SYMBOL=SNDK ARGS='--start 2026-08-14 --end 2026-08-14'
 ```
 
+Bare dates use Eastern calendar days. ISO-8601 timestamps must include their
+timezone.
+
 JSON is also available:
 
 ```sh

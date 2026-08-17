@@ -14,16 +14,16 @@ import signal
 import sqlite3
 import sys
 import threading
-import time as system_time
+import time
 import webbrowser
-from concurrent.futures import Future
+from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time as clock_time, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from queue import Queue
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
@@ -91,12 +91,21 @@ class TechnicalSpec:
 
 
 @dataclass(frozen=True)
+class ProviderSettings:
+    bounds: str
+    url: str
+    oauth_store: Path
+    oauth_callback_port: int
+    timeout_seconds: int
+    max_symbols_per_call: int
+
+
+@dataclass(frozen=True)
 class Settings:
     tickers: Tuple[str, ...]
-    bounds: str
-    live_start: time
-    regular_close: time
-    early_close: time
+    live_start: clock_time
+    regular_close: clock_time
+    early_close: clock_time
     early_close_days: frozenset
     after_close_minutes: int
     poll_seconds: int
@@ -108,11 +117,7 @@ class Settings:
     retry_seconds: int
     retry_max_seconds: int
     database: Path
-    provider_url: str
-    oauth_store: Path
-    oauth_callback_port: int
-    timeout_seconds: int
-    max_symbols_per_call: int
+    provider: ProviderSettings
     technical_specs: Tuple[TechnicalSpec, ...]
 
 
@@ -122,11 +127,11 @@ def _positive_int(value, name: str, minimum: int = 1) -> int:
     return value
 
 
-def _clock(value, name: str) -> time:
+def _clock(value, name: str) -> clock_time:
     if not isinstance(value, str):
         raise ConfigError("%s must be HH:MM" % name)
     try:
-        parsed = time.fromisoformat(value)
+        parsed = clock_time.fromisoformat(value)
     except ValueError as exc:
         raise ConfigError("%s must be HH:MM" % name) from exc
     if parsed.second or parsed.microsecond:
@@ -257,7 +262,6 @@ def load_settings(path: Path) -> Settings:
 
     return Settings(
         tickers=tuple(tickers),
-        bounds=bounds,
         live_start=_clock(live.get("start", "04:00"), "live_polling.start"),
         regular_close=_clock(
             live.get("regular_close", "16:00"),
@@ -296,23 +300,26 @@ def load_settings(path: Path) -> Settings:
             30,
         ),
         database=database,
-        provider_url=str(
-            provider.get("url", "https://agent.robinhood.com/mcp/trading")
-        ),
-        oauth_store=oauth_store,
-        oauth_callback_port=_positive_int(
-            provider.get("oauth_callback_port", 8765),
-            "bars.provider.oauth_callback_port",
-            1024,
-        ),
-        timeout_seconds=_positive_int(
-            provider.get("timeout_seconds", 300),
-            "bars.provider.timeout_seconds",
-            30,
-        ),
-        max_symbols_per_call=_positive_int(
-            provider.get("max_symbols_per_call", 3),
-            "bars.provider.max_symbols_per_call",
+        provider=ProviderSettings(
+            bounds=bounds,
+            url=str(
+                provider.get("url", "https://agent.robinhood.com/mcp/trading")
+            ),
+            oauth_store=oauth_store,
+            oauth_callback_port=_positive_int(
+                provider.get("oauth_callback_port", 8765),
+                "bars.provider.oauth_callback_port",
+                1024,
+            ),
+            timeout_seconds=_positive_int(
+                provider.get("timeout_seconds", 300),
+                "bars.provider.timeout_seconds",
+                30,
+            ),
+            max_symbols_per_call=_positive_int(
+                provider.get("max_symbols_per_call", 3),
+                "bars.provider.max_symbols_per_call",
+            ),
         ),
         technical_specs=_technical_specs(raw),
     )
@@ -339,11 +346,54 @@ def _query_epoch(value: str, end: bool = False) -> int:
     try:
         if len(value) == 10:
             day = date.fromisoformat(value)
-            clock = time(23, 59, 59) if end else time(0, 0)
-            return _epoch(datetime.combine(day, clock, tzinfo=UTC))
+            clock = clock_time(23, 59, 59) if end else clock_time(0, 0)
+            return _epoch(datetime.combine(day, clock, tzinfo=EASTERN))
         return _epoch(_parse_iso(value))
     except (TypeError, ValueError) as exc:
         raise ConfigError("invalid timestamp: %s" % value) from exc
+
+
+def _collection_window(
+    settings: Settings, day: date
+) -> Tuple[datetime, datetime]:
+    close = (
+        settings.early_close
+        if day in settings.early_close_days
+        else settings.regular_close
+    )
+    start = datetime.combine(day, settings.live_start, tzinfo=EASTERN)
+    end = datetime.combine(day, close, tzinfo=EASTERN) + timedelta(
+        minutes=settings.after_close_minutes
+    )
+    return start.astimezone(UTC), end.astimezone(UTC)
+
+
+def _collection_chunks(
+    settings: Settings, start: datetime, end: datetime
+) -> Iterator[Tuple[datetime, datetime]]:
+    start = start.astimezone(UTC)
+    end = end.astimezone(UTC)
+    day = start.astimezone(EASTERN).date()
+    final_day = end.astimezone(EASTERN).date()
+    while day <= final_day:
+        if day.weekday() < 5:
+            window_start, window_end = _collection_window(settings, day)
+            chunk_start = max(start, window_start)
+            chunk_end = min(end, window_end)
+            if chunk_start <= chunk_end:
+                yield chunk_start, chunk_end
+        day += timedelta(days=1)
+
+
+def _fixed_chunks(
+    start: datetime, end: datetime, days: int
+) -> Iterator[Tuple[datetime, datetime]]:
+    cursor = start.astimezone(UTC)
+    end = end.astimezone(UTC)
+    while cursor < end:
+        chunk_end = min(end, cursor + timedelta(days=days))
+        yield cursor, chunk_end
+        cursor = chunk_end
 
 
 @dataclass(frozen=True)
@@ -385,6 +435,60 @@ def _bar_row(ticker: str, raw: object) -> BarRow:
         )
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         raise RelayError("Robinhood returned a malformed bar") from exc
+
+
+def _bar_rows(
+    payload: object,
+    symbols: Sequence[str],
+    start: datetime,
+    end: datetime,
+) -> List[BarRow]:
+    data = payload.get("data") if isinstance(payload, dict) else None
+    results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list):
+        raise RelayError("Robinhood payload is missing data.results")
+
+    wanted = set(symbols)
+    got = set()
+    rows: List[BarRow] = []
+    for result in results:
+        if not isinstance(result, dict):
+            raise RelayError("Robinhood result block is not an object")
+        symbol = result.get("symbol")
+        if not isinstance(symbol, str) or not SYMBOL_RE.fullmatch(symbol):
+            raise RelayError("Robinhood result has an invalid symbol")
+        bars = result.get("bars")
+        if not isinstance(bars, list):
+            raise RelayError("Robinhood result bars is not a list")
+        got.add(symbol)
+        for raw in bars:
+            row = _bar_row(symbol, raw)
+            timestamp = datetime.fromtimestamp(row.ts, UTC)
+            if timestamp < start or timestamp > end:
+                raise RelayError(
+                    "%s bar %s is outside [%s, %s]"
+                    % (
+                        symbol,
+                        _iso_utc(timestamp),
+                        _iso_utc(start),
+                        _iso_utc(end),
+                    )
+                )
+            rows.append(row)
+
+    unexpected = got - wanted
+    if unexpected:
+        raise RelayError(
+            "Robinhood returned unexpected tickers: %s"
+            % ", ".join(sorted(unexpected))
+        )
+    missing = wanted - got
+    if missing:
+        raise RelayError(
+            "Robinhood omitted requested tickers: %s"
+            % ", ".join(sorted(missing))
+        )
+    return rows
 
 
 def _metadata_points(
@@ -584,17 +688,24 @@ def _contains_exception(error: BaseException, wanted_type) -> bool:
     return False
 
 
+@dataclass
+class _RobinhoodSessionState:
+    requests: Queue
+    ready: threading.Event
+    error: Optional[BaseException] = None
+    thread: Optional[threading.Thread] = None
+
+
 class RobinhoodClient:
     TOOL = "get_equity_historicals"
     MAX_RANGE = timedelta(days=1) - timedelta(seconds=1)
+    REQUEST_GRACE_SECONDS = 5
+    CLOSE_TIMEOUT_SECONDS = 5
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: ProviderSettings):
         self.settings = settings
         self.storage = FileTokenStorage(settings.oauth_store)
-        self._requests = None
-        self._ready = None
-        self._thread = None
-        self._worker_error = None
+        self._state: Optional[_RobinhoodSessionState] = None
 
     def _oauth(self, interactive: bool) -> OAuthClientProvider:
         callbacks = (
@@ -606,7 +717,7 @@ class RobinhoodClient:
             "http://127.0.0.1:%d/callback" % self.settings.oauth_callback_port
         )
         return OAuthClientProvider(
-            server_url=self.settings.provider_url,
+            server_url=self.settings.url,
             client_metadata=OAuthClientMetadata(
                 client_name="bars",
                 redirect_uris=[AnyUrl(callback_url)],
@@ -621,7 +732,9 @@ class RobinhoodClient:
             callback_handler=callbacks.callback,
         )
 
-    async def _session_worker(self, interactive: bool) -> None:
+    async def _session_worker(
+        self, state: _RobinhoodSessionState, interactive: bool
+    ) -> None:
         oauth = self._oauth(interactive)
         timeout = httpx2.Timeout(float(self.settings.timeout_seconds))
         async with httpx2.AsyncClient(
@@ -630,15 +743,15 @@ class RobinhoodClient:
             timeout=timeout,
         ) as http_client:
             async with streamable_http_client(
-                self.settings.provider_url,
+                self.settings.url,
                 http_client=http_client,
                 terminate_on_close=False,
             ) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
-                    self._ready.set()
+                    state.ready.set()
                     while True:
-                        request = await asyncio.to_thread(self._requests.get)
+                        request = await asyncio.to_thread(state.requests.get)
                         if request is None:
                             return
                         action, name, arguments, future = request
@@ -654,16 +767,20 @@ class RobinhoodClient:
                                     ),
                                 )
                         except Exception as exc:
-                            future.set_exception(exc)
+                            if not future.cancelled():
+                                future.set_exception(exc)
                         else:
-                            future.set_result(result)
+                            if not future.cancelled():
+                                future.set_result(result)
 
-    def _worker_main(self, interactive: bool) -> None:
+    def _worker_main(
+        self, state: _RobinhoodSessionState, interactive: bool
+    ) -> None:
         try:
-            asyncio.run(self._session_worker(interactive))
+            asyncio.run(self._session_worker(state, interactive))
         except Exception as exc:
-            self._worker_error = exc
-            self._ready.set()
+            state.error = exc
+            state.ready.set()
 
     @staticmethod
     def _relay_error(error: BaseException, action: str) -> RelayError:
@@ -675,64 +792,85 @@ class RobinhoodClient:
             )
         return RelayError("Robinhood %s failed: %s" % (action, error))
 
+    def _close_state(self, state: _RobinhoodSessionState) -> bool:
+        state.requests.put(None)
+        if state.thread is not None:
+            state.thread.join(timeout=self.CLOSE_TIMEOUT_SECONDS)
+        alive = state.thread is not None and state.thread.is_alive()
+        if self._state is state:
+            self._state = None
+        return alive
+
     @contextmanager
-    def connection(self, interactive: bool = False):
-        if self._thread is not None:
-            yield
-            return
-        self._requests = Queue()
-        self._ready = threading.Event()
-        self._worker_error = None
-        self._thread = threading.Thread(
+    def session(self, interactive: bool = False):
+        if self._state is not None:
+            raise RelayError("Robinhood session is already open")
+        state = _RobinhoodSessionState(Queue(), threading.Event())
+        state.thread = threading.Thread(
             target=self._worker_main,
-            args=(interactive,),
+            args=(state, interactive),
             name="robinhood-mcp-session",
             daemon=True,
         )
-        self._thread.start()
-        self._ready.wait()
-        if self._worker_error is not None:
-            error = self._relay_error(self._worker_error, "connection")
-            self._thread.join()
-            self._requests = None
-            self._ready = None
-            self._thread = None
-            self._worker_error = None
+        self._state = state
+        state.thread.start()
+        open_timeout = (
+            self.settings.timeout_seconds + self.REQUEST_GRACE_SECONDS
+        )
+        if not state.ready.wait(timeout=open_timeout):
+            self._close_state(state)
+            raise RelayError(
+                "Robinhood session did not open within %d seconds"
+                % open_timeout
+            )
+        if state.error is not None:
+            error = self._relay_error(state.error, "connection")
+            self._close_state(state)
             raise error
         try:
-            yield
+            yield RobinhoodSession(self)
         finally:
-            self._requests.put(None)
-            self._thread.join()
-            if self._worker_error is not None:
+            close_timed_out = self._close_state(state)
+            if close_timed_out:
+                logging.error(
+                    "Robinhood session did not close within %d seconds",
+                    self.CLOSE_TIMEOUT_SECONDS,
+                )
+            if state.error is not None:
                 logging.error(
                     "could not close Robinhood connection cleanly: %s",
-                    self._worker_error,
+                    state.error,
                 )
-            self._requests = None
-            self._ready = None
-            self._thread = None
-            self._worker_error = None
 
     def _request(self, action: str, name: str = "", arguments=None):
-        if self._thread is None or self._worker_error is not None:
+        state = self._state
+        if state is None:
             raise RelayError("Robinhood connection is not open")
+        if state.error is not None:
+            raise self._relay_error(state.error, action)
         future = Future()
-        self._requests.put((action, name, arguments or {}, future))
+        state.requests.put((action, name, arguments or {}, future))
         try:
-            return future.result()
+            return future.result(
+                timeout=(
+                    self.settings.timeout_seconds + self.REQUEST_GRACE_SECONDS
+                )
+            )
+        except FutureTimeoutError as exc:
+            future.cancel()
+            raise RelayError(
+                "Robinhood %s timed out after %d seconds"
+                % (
+                    action,
+                    self.settings.timeout_seconds + self.REQUEST_GRACE_SECONDS,
+                )
+            ) from exc
         except Exception as exc:
             raise self._relay_error(exc, action) from exc
 
-    def _session_call(
-        self, name: str, arguments: dict, action: str = "historicals request"
-    ):
-        return self._request(action, name, arguments)
-
     def authorize(self) -> List[str]:
-        with self.connection(interactive=True):
-            result = self._request("list")
-        tools = [tool.name for tool in result.tools]
+        with self.session(interactive=True) as session:
+            tools = session.list_tools()
         if self.TOOL not in tools:
             raise RelayError("Robinhood connection does not expose %s" % self.TOOL)
         return tools
@@ -763,22 +901,42 @@ class RobinhoodClient:
             raise RelayError("Robinhood result is not a JSON object")
         return payload
 
-    def fetch(
+    def _fetch_bars(
         self,
         symbols: Sequence[str],
         start_iso: str,
         end_iso: str,
-    ) -> dict:
-        with self.connection():
-            return self._fetch(symbols, start_iso, end_iso)
+    ) -> List[BarRow]:
+        start = _parse_iso(start_iso)
+        end = _parse_iso(end_iso)
+        if end - start > self.MAX_RANGE:
+            raise RelayError("minute request exceeds the one-day provider limit")
+        rows: List[BarRow] = []
+        size = self.settings.max_symbols_per_call
+        for offset in range(0, len(symbols), size):
+            batch = symbols[offset : offset + size]
+            result = self._request(
+                "historicals request",
+                self.TOOL,
+                {
+                    "symbols": list(batch),
+                    "start_time": start_iso,
+                    "end_time": end_iso,
+                    "interval": "minute",
+                    "bounds": self.settings.bounds,
+                },
+            )
+            payload = self._payload(result)
+            rows.extend(_bar_rows(payload, batch, start, end))
+        return rows
 
-    def fetch_technical(
+    def _fetch_technical(
         self,
         ticker: str,
         spec: TechnicalSpec,
         start_iso: str,
         end_iso: str,
-    ) -> dict:
+    ) -> List[MetadataPoint]:
         start = _parse_iso(start_iso)
         end = _parse_iso(end_iso)
         arguments = {
@@ -791,92 +949,38 @@ class RobinhoodClient:
             "output": "series",
         }
         arguments.update(spec.provider_params())
-        with self.connection():
-            result = self._session_call(
-                TECHNICAL_TOOL,
-                arguments,
-                action="technical indicator request",
-            )
-        payload = self._payload(result)
-        _metadata_points(payload, ticker, spec, start, end)
-        return payload
+        result = self._request(
+            "technical indicator request",
+            TECHNICAL_TOOL,
+            arguments,
+        )
+        return _metadata_points(self._payload(result), ticker, spec, start, end)
 
-    def _fetch(
+
+class RobinhoodSession:
+    def __init__(self, client: RobinhoodClient):
+        self.client = client
+
+    def list_tools(self) -> List[str]:
+        result = self.client._request("list")
+        return [tool.name for tool in result.tools]
+
+    def fetch_bars(
         self,
         symbols: Sequence[str],
         start_iso: str,
         end_iso: str,
-    ) -> dict:
-        start = _parse_iso(start_iso)
-        end = _parse_iso(end_iso)
-        if end - start > self.MAX_RANGE:
-            raise RelayError("minute request exceeds the one-day provider limit")
-        combined = {"data": {"results": []}}
-        size = self.settings.max_symbols_per_call
-        for offset in range(0, len(symbols), size):
-            batch = symbols[offset : offset + size]
-            result = self._session_call(
-                self.TOOL,
-                {
-                    "symbols": list(batch),
-                    "start_time": start_iso,
-                    "end_time": end_iso,
-                    "interval": "minute",
-                    "bounds": self.settings.bounds,
-                },
-            )
-            payload = self._payload(result)
-            self._validate(payload, batch, start_iso, end_iso)
-            combined["data"]["results"].extend(payload["data"]["results"])
-        return combined
+    ) -> List[BarRow]:
+        return self.client._fetch_bars(symbols, start_iso, end_iso)
 
-    @staticmethod
-    def _validate(
-        payload: dict,
-        symbols: Sequence[str],
+    def fetch_technical(
+        self,
+        ticker: str,
+        spec: TechnicalSpec,
         start_iso: str,
         end_iso: str,
-    ) -> None:
-        data = payload.get("data") if isinstance(payload, dict) else None
-        results = data.get("results") if isinstance(data, dict) else None
-        if not isinstance(results, list):
-            raise RelayError("Robinhood payload is missing data.results")
-
-        wanted = set(symbols)
-        got = set()
-        start = _parse_iso(start_iso)
-        end = _parse_iso(end_iso)
-        for result in results:
-            if not isinstance(result, dict):
-                raise RelayError("Robinhood result block is not an object")
-            symbol = result.get("symbol")
-            if not isinstance(symbol, str) or not SYMBOL_RE.fullmatch(symbol):
-                raise RelayError("Robinhood result has an invalid symbol")
-            bars = result.get("bars")
-            if not isinstance(bars, list):
-                raise RelayError("Robinhood result bars is not a list")
-            got.add(symbol)
-            for bar in bars:
-                row = _bar_row(symbol, bar)
-                timestamp = datetime.fromtimestamp(row.ts, UTC)
-                if timestamp < start or timestamp > end:
-                    raise RelayError(
-                        "%s bar %s is outside [%s, %s]"
-                        % (symbol, _iso_utc(timestamp), start_iso, end_iso)
-                    )
-
-        unexpected = got - wanted
-        if unexpected:
-            raise RelayError(
-                "Robinhood returned unexpected tickers: %s"
-                % ", ".join(sorted(unexpected))
-            )
-        missing = wanted - got
-        if missing:
-            raise RelayError(
-                "Robinhood omitted requested tickers: %s"
-                % ", ".join(sorted(missing))
-            )
+    ) -> List[MetadataPoint]:
+        return self.client._fetch_technical(ticker, spec, start_iso, end_iso)
 
 
 @dataclass(frozen=True)
@@ -937,33 +1041,31 @@ class BarStore:
             rows,
         )
 
-    def store_payload(
+    def store_bars(
         self,
-        payload: dict,
+        bars: Sequence[BarRow],
         job: Optional[Tuple[str, Sequence[str], str, int]] = None,
     ) -> Dict[str, int]:
-        stats = {"received": 0, "written": 0, "interpolated": 0}
+        stats = {
+            "received": len(bars),
+            "written": 0,
+            "interpolated": sum(int(bar.interpolated) for bar in bars),
+        }
         fetched_at = _epoch(datetime.now(UTC))
-        rows: List[tuple] = []
-        for result in payload["data"]["results"]:
-            ticker = result["symbol"]
-            for raw in result["bars"]:
-                bar = _bar_row(ticker, raw)
-                stats["received"] += 1
-                stats["interpolated"] += int(bar.interpolated)
-                rows.append(
-                    (
-                        bar.ticker,
-                        bar.ts,
-                        bar.open,
-                        bar.high,
-                        bar.low,
-                        bar.close,
-                        bar.volume,
-                        int(bar.interpolated),
-                        fetched_at,
-                    )
-                )
+        rows = [
+            (
+                bar.ticker,
+                bar.ts,
+                bar.open,
+                bar.high,
+                bar.low,
+                bar.close,
+                bar.volume,
+                int(bar.interpolated),
+                fetched_at,
+            )
+            for bar in bars
+        ]
         with self.transaction() as connection:
             self._upsert(connection, rows)
             if job is not None:
@@ -987,13 +1089,12 @@ class BarStore:
 
     def store_metadata(
         self,
-        payload: dict,
+        points: Sequence[MetadataPoint],
         ticker: str,
         spec: TechnicalSpec,
         start: datetime,
         end: datetime,
     ) -> Dict[str, int]:
-        points = _metadata_points(payload, ticker, spec, start, end)
         allowed = {
             row["ts"]
             for row in self.connection.execute(
@@ -1176,7 +1277,7 @@ class Collector:
     def __init__(self, settings: Settings, store: BarStore, provider=None):
         self.settings = settings
         self.store = store
-        self.provider = provider or RobinhoodClient(settings)
+        self.provider = provider or RobinhoodClient(settings.provider)
 
     @staticmethod
     def _empty_stats() -> Dict[str, int]:
@@ -1191,18 +1292,6 @@ class Collector:
         for key in total:
             total[key] += part[key]
 
-    def _session_window(self, day: date) -> Tuple[datetime, datetime]:
-        close = (
-            self.settings.early_close
-            if day in self.settings.early_close_days
-            else self.settings.regular_close
-        )
-        start = datetime.combine(day, self.settings.live_start, tzinfo=EASTERN)
-        end = datetime.combine(day, close, tzinfo=EASTERN) + timedelta(
-            minutes=self.settings.after_close_minutes
-        )
-        return start.astimezone(UTC), end.astimezone(UTC)
-
     def fetch_range(
         self,
         symbols: Sequence[str],
@@ -1213,19 +1302,10 @@ class Collector:
         total = self._empty_stats()
         start = start.astimezone(UTC)
         end = end.astimezone(UTC)
-        day = start.astimezone(EASTERN).date()
-        final_day = end.astimezone(EASTERN).date()
-        with self.provider.connection():
-            while day <= final_day:
-                if day.weekday() >= 5:
-                    day += timedelta(days=1)
-                    continue
-                session_start, session_end = self._session_window(day)
-                chunk_start = max(start, session_start)
-                chunk_end = min(end, session_end)
-                if chunk_start > chunk_end:
-                    day += timedelta(days=1)
-                    continue
+        with self.provider.session() as session:
+            for chunk_start, chunk_end in _collection_chunks(
+                self.settings, start, end
+            ):
                 start_iso = _iso_utc(chunk_start)
                 end_iso = _iso_utc(chunk_end)
                 logging.info(
@@ -1234,7 +1314,7 @@ class Collector:
                     start_iso,
                     end_iso,
                 )
-                payload = self.provider.fetch(symbols, start_iso, end_iso)
+                bars = session.fetch_bars(symbols, start_iso, end_iso)
                 progress = None
                 if job is not None:
                     progress = (
@@ -1245,9 +1325,8 @@ class Collector:
                     )
                 self._add_stats(
                     total,
-                    self.store.store_payload(payload, job=progress),
+                    self.store.store_bars(bars, job=progress),
                 )
-                day += timedelta(days=1)
         return total
 
     def fetch_metadata_range(
@@ -1258,7 +1337,7 @@ class Collector:
         end = end.astimezone(UTC)
         if not self.settings.technical_specs:
             return total
-        with self.provider.connection():
+        with self.provider.session() as session:
             for spec in self.settings.technical_specs:
                 for ticker in self.settings.tickers:
                     latest = self.store.latest_metadata(
@@ -1270,32 +1349,12 @@ class Collector:
                             cursor,
                             datetime.fromtimestamp(latest + 60, UTC),
                         )
-                    while cursor < end:
-                        chunk_start = cursor
-                        if spec.name == "pivot_points":
-                            day = cursor.astimezone(EASTERN).date()
-                            if day.weekday() >= 5:
-                                cursor = datetime.combine(
-                                    day + timedelta(days=1),
-                                    self.settings.live_start,
-                                    tzinfo=EASTERN,
-                                ).astimezone(UTC)
-                                continue
-                            session_start, session_end = self._session_window(day)
-                            chunk_start = max(cursor, session_start)
-                            chunk_end = min(end, session_end)
-                            if chunk_start >= chunk_end:
-                                cursor = datetime.combine(
-                                    day + timedelta(days=1),
-                                    self.settings.live_start,
-                                    tzinfo=EASTERN,
-                                ).astimezone(UTC)
-                                continue
-                        else:
-                            chunk_end = min(
-                                end,
-                                cursor + timedelta(days=TECHNICAL_CHUNK_DAYS),
-                            )
+                    chunks = (
+                        _collection_chunks(self.settings, cursor, end)
+                        if spec.name == "pivot_points"
+                        else _fixed_chunks(cursor, end, TECHNICAL_CHUNK_DAYS)
+                    )
+                    for chunk_start, chunk_end in chunks:
                         logging.info(
                             "fetching %s %s from %s through %s",
                             ticker,
@@ -1303,14 +1362,14 @@ class Collector:
                             _iso_utc(chunk_start),
                             _iso_utc(chunk_end),
                         )
-                        payload = self.provider.fetch_technical(
+                        points = session.fetch_technical(
                             ticker,
                             spec,
                             _iso_utc(chunk_start),
                             _iso_utc(chunk_end),
                         )
                         stats = self.store.store_metadata(
-                            payload,
+                            points,
                             ticker,
                             spec,
                             chunk_start,
@@ -1319,7 +1378,6 @@ class Collector:
                         total["requests"] += 1
                         total["received"] += stats["received"]
                         total["written"] += stats["written"]
-                        cursor = chunk_end
         return total
 
     def _run_jobs(
@@ -1379,7 +1437,9 @@ class Collector:
     ) -> Dict[str, int]:
         current = (now or datetime.now(UTC)).astimezone(UTC)
         metadata_refreshed_after = _epoch(
-            datetime.combine(datetime.now(UTC).date(), time(0), tzinfo=UTC)
+            datetime.combine(
+                datetime.now(UTC).date(), clock_time(0), tzinfo=UTC
+            )
         )
         self.backfill_pending(current)
         start = current - timedelta(days=self.settings.sweep_days)
@@ -1551,20 +1611,13 @@ class Service:
     def _wait(self, seconds: int) -> None:
         self.stop_event.wait(seconds)
 
-    def _close(self, day: date) -> time:
-        if day in self.settings.early_close_days:
-            return self.settings.early_close
-        return self.settings.regular_close
-
     def _cycle(self) -> int:
-        now = datetime.now(EASTERN)
-        day = now.date()
+        now = datetime.now(UTC)
+        day = now.astimezone(EASTERN).date()
         if day.weekday() >= 5:
             return self.settings.idle_seconds
 
-        start = datetime.combine(day, self.settings.live_start, tzinfo=EASTERN)
-        close = datetime.combine(day, self._close(day), tzinfo=EASTERN)
-        final_at = close + timedelta(minutes=self.settings.after_close_minutes)
+        start, final_at = _collection_window(self.settings, day)
         if start <= now < final_at:
             self.collector.poll(now)
             return self.settings.poll_seconds
@@ -1640,7 +1693,7 @@ def _configure_logging(verbose: bool) -> None:
         format="%(asctime)sZ %(levelname)s %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
-    logging.Formatter.converter = system_time.gmtime
+    logging.Formatter.converter = time.gmtime
 
 
 def _parser() -> argparse.ArgumentParser:
