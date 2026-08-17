@@ -10,6 +10,8 @@ from datetime import date, datetime
 from typing import Any, Callable, Mapping, Optional, Sequence
 from zoneinfo import ZoneInfo
 
+from validation import require_float, require_int
+
 
 EASTERN = ZoneInfo("America/New_York")
 SHAPES = (
@@ -369,29 +371,24 @@ def _parameters(parameters: Mapping[str, Any]) -> tuple[int, int, int, float, fl
     if unknown:
         raise ValueError("unknown shape params: %s" % ", ".join(sorted(unknown)))
 
-    def integer(name: str, default: int, minimum: int) -> int:
-        value = parameters.get(name, default)
-        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-            raise ValueError("%s must be an integer >= %d" % (name, minimum))
-        return value
-
-    def number(name: str, default: float, minimum: float) -> float:
-        value = parameters.get(name, default)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError("%s must be a number" % name)
-        value = float(value)
-        if not math.isfinite(value) or value < minimum:
-            raise ValueError("%s must be >= %g" % (name, minimum))
-        return value
-
-    history_sessions = integer("history_sessions", 120, 1)
-    min_sessions = integer("min_sessions", 8, 1)
-    stride_minutes = integer("stride_minutes", 5, 1)
-    shape_base_rate_w = number("shape_base_rate_w", 0.1, 0.0)
+    history_sessions = require_int(parameters.get("history_sessions", 120), "history_sessions")
+    min_sessions = require_int(parameters.get("min_sessions", 8), "min_sessions")
+    stride_minutes = require_int(parameters.get("stride_minutes", 5), "stride_minutes")
+    shape_base_rate_w = float(
+        require_float(parameters.get("shape_base_rate_w", 0.1), "shape_base_rate_w", minimum=0.0)
+    )
     if shape_base_rate_w > 1.0:
         raise ValueError("shape_base_rate_w must be <= 1")
-    age_halflife_days = number("age_halflife_days", 365.0, 1e-9)
-    support_k = number("support_k", 8.0, 1e-9)
+    age_halflife_days = float(
+        require_float(
+            parameters.get("age_halflife_days", 365.0),
+            "age_halflife_days",
+            minimum=1e-9,
+        )
+    )
+    support_k = float(
+        require_float(parameters.get("support_k", 8.0), "support_k", minimum=1e-9)
+    )
     return (
         history_sessions,
         min_sessions,
@@ -482,9 +479,8 @@ def _shape_v1(
     inputs: Mapping[str, Any],
     settings: Any,
     session_window: Callable[[Any, int], tuple[date, int, int]],
+    session_bars: Callable[..., Sequence[sqlite3.Row]],
 ) -> Optional[dict[str, Any]]:
-    if list(inputs) != ["bars"]:
-        raise ValueError("shape_v1 inputs must be ['bars']")
     (
         history_sessions,
         min_sessions,
@@ -528,15 +524,9 @@ def _shape_v1(
     if remaining <= 0:
         return None
 
-    rows = connection.execute(
-        """
-        SELECT ts,open,high,low,close,interpolated
-        FROM bars
-        WHERE ticker=? AND ts>=? AND ts<=? AND ts<?
-        ORDER BY ts
-        """,
-        (ticker, session_open, ts, session_close),
-    ).fetchall()
+    rows = session_bars(
+        connection, ticker, session_open, session_close, ts
+    )
     observed_bars = tuple(
         _Bar(
             ts=int(row["ts"]),
@@ -732,6 +722,7 @@ def shape_v1(
     inputs: Mapping[str, Any],
     settings: Any,
     session_window: Callable[[Any, int], tuple[date, int, int]],
+    session_bars: Callable[..., Sequence[sqlite3.Row]],
 ) -> Optional[dict[str, Any]]:
     """Return the shape forecast, or null for unusable snapshots."""
     try:
@@ -743,6 +734,7 @@ def shape_v1(
             inputs,
             settings,
             session_window,
+            session_bars,
         )
     except Exception:
         return None

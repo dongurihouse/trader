@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import math
 import os
 import re
 import signal
@@ -23,6 +22,7 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from shape_signal import clear_shape_cache, shape_v1
+from validation import require_float, require_int
 
 
 ROOT = Path(__file__).resolve().parent
@@ -73,9 +73,15 @@ class Settings:
     evaluation_days: int
     poll_seconds: int
     api_port: int
+    regular_open: clock_time
+    regular_close: clock_time
+    early_close: clock_time
+    early_close_days: frozenset[date]
     signals: Mapping[str, Mapping[str, Any]]
     algos: Mapping[str, Mapping[str, Any]]
-    document: Mapping[str, Any]
+    signal_order: tuple[str, ...]
+    algo_order: tuple[str, ...]
+    algo_requirements: Mapping[str, frozenset[str]]
     content: str
 
     def enabled_signals(self) -> tuple[str, ...]:
@@ -95,10 +101,37 @@ def _json(value: Any) -> str:
         raise ConfigError("value is not finite JSON") from exc
 
 
-def _positive_int(value: Any, name: str, minimum: int = 1) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-        raise ConfigError("%s must be an integer >= %d" % (name, minimum))
-    return value
+@dataclass(frozen=True)
+class SignalSpec:
+    function: Callable[..., Any]
+    inputs: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class AlgoSpec:
+    function: Callable[..., tuple[bool, bool, int]]
+    input_count: int
+
+
+@dataclass(frozen=True)
+class AlgoContext:
+    parameters: Mapping[str, Any]
+    inputs: Mapping[str, Any]
+    previous: Mapping[str, Any]
+    open_entries: tuple[Mapping[str, Any], ...]
+    session_outputs: tuple[Mapping[str, Any], ...]
+
+
+def _clock(value: Any, name: str) -> clock_time:
+    if not isinstance(value, str):
+        raise ConfigError("%s must be HH:MM" % name)
+    try:
+        parsed = clock_time.fromisoformat(value)
+    except ValueError as exc:
+        raise ConfigError("%s must be HH:MM" % name) from exc
+    if parsed.second or parsed.microsecond:
+        raise ConfigError("%s must be precise to the minute" % name)
+    return parsed
 
 
 def _nodes(document: Mapping[str, Any], key: str) -> dict[str, Mapping[str, Any]]:
@@ -109,9 +142,11 @@ def _nodes(document: Mapping[str, Any], key: str) -> dict[str, Mapping[str, Any]
     for name, value in raw.items():
         if not isinstance(name, str) or not name or not isinstance(value, dict):
             raise ConfigError("every %s entry must be a named object" % key)
-        function = value.get("function", name)
         params = value.get("params", {})
         inputs = value.get("inputs", [])
+        function = value.get("function")
+        if function is None:
+            function = "metadata" if key == "signals" and inputs == ["bar_metadata"] else name
         trades = value.get("trades", False) if key == "algos" else False
         if not isinstance(function, str) or not function:
             raise ConfigError("%s.%s.function must be a name" % (key, name))
@@ -130,9 +165,15 @@ def _nodes(document: Mapping[str, Any], key: str) -> dict[str, Mapping[str, Any]
     return nodes
 
 
-def _check_dependencies(settings: Settings) -> None:
+def _compile_dependencies(
+    signals: Mapping[str, Mapping[str, Any]],
+    algos: Mapping[str, Mapping[str, Any]],
+) -> tuple[tuple[str, ...], tuple[str, ...], dict[str, frozenset[str]]]:
     visiting: set[tuple[str, str]] = set()
     complete: set[tuple[str, str]] = set()
+    signal_order: list[str] = []
+    algo_order: list[str] = []
+    algo_requirements: dict[str, frozenset[str]] = {}
 
     def visit(layer: str, name: str) -> None:
         key = (layer, name)
@@ -140,25 +181,35 @@ def _check_dependencies(settings: Settings) -> None:
             return
         if key in visiting:
             raise ConfigError("dependency cycle at %s" % name)
-        nodes = settings.signals if layer == "signal" else settings.algos
+        nodes = signals if layer == "signal" else algos
         node = nodes[name]
         visiting.add(key)
         for target in node["inputs"]:
             if layer == "signal" and target in ("bars", "bar_metadata", "events"):
                 continue
-            if target in settings.signals:
+            if target in signals:
                 visit("signal", target)
-            elif layer == "algo" and target in settings.algos:
+            elif layer == "algo" and target in algos:
                 visit("algo", target)
             else:
                 raise ConfigError("%s references unknown node %s" % (name, target))
         visiting.remove(key)
         complete.add(key)
+        if layer == "signal":
+            signal_order.append(name)
+        else:
+            dependencies = {name}
+            for target in node["inputs"]:
+                if target in algos:
+                    dependencies.update(algo_requirements[target])
+            algo_requirements[name] = frozenset(dependencies)
+            algo_order.append(name)
 
-    for name in settings.enabled_signals():
+    for name in signals:
         visit("signal", name)
-    for name in settings.enabled_algos():
+    for name in algos:
         visit("algo", name)
+    return tuple(signal_order), tuple(algo_order), algo_requirements
 
 
 def load_settings(
@@ -193,6 +244,16 @@ def load_settings(
     algo = document.get("algo", {})
     if not isinstance(algo, dict):
         raise ConfigError("algo must be an object")
+    polling = document.get("live_polling", {})
+    if not isinstance(polling, dict):
+        raise ConfigError("live_polling must be an object")
+    early_closes = document.get("early_closes", [])
+    if not isinstance(early_closes, list):
+        raise ConfigError("early_closes must be a list")
+    try:
+        early_close_days = frozenset(date.fromisoformat(value) for value in early_closes)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("early_closes must contain YYYY-MM-DD strings") from exc
     database_value = document.get("database", "../data/trader.sqlite3")
     if not isinstance(database_value, str) or not database_value:
         raise ConfigError("database must be a path string")
@@ -202,33 +263,65 @@ def load_settings(
     if database_override is not None:
         database = database_override
 
-    settings = Settings(
-        version=str(version),
-        database=database,
-        tickers=tuple(normalized),
-        evaluation_days=_positive_int(algo.get("evaluation_days", 60), "algo.evaluation_days"),
-        poll_seconds=_positive_int(algo.get("poll_seconds", 30), "algo.poll_seconds"),
-        api_port=_positive_int(algo.get("api_port", 8791), "algo.api_port", 1024),
-        signals=_nodes(document, "signals"),
-        algos=_nodes(document, "algos"),
-        document=document,
-        content=_json(document),
-    )
-    if set(settings.signals) & set(settings.algos):
+    signals = _nodes(document, "signals")
+    algos = _nodes(document, "algos")
+    if set(signals) & set(algos):
         raise ConfigError("signal and algo names must be unique")
     unknown_signals = {
-        node["function"]
-        for node in settings.signals.values()
-        if node["inputs"] != ["bar_metadata"]
+        node["function"] for node in signals.values()
     } - set(SIGNAL_FUNCTIONS)
     unknown_algos = {
-        node["function"] for node in settings.algos.values()
+        node["function"] for node in algos.values()
     } - set(ALGO_FUNCTIONS)
     if unknown_signals or unknown_algos:
         raise ConfigError(
             "unknown functions: %s" % ", ".join(sorted(unknown_signals | unknown_algos))
         )
-    _check_dependencies(settings)
+    for name, node in signals.items():
+        required = SIGNAL_FUNCTIONS[node["function"]].inputs
+        if tuple(node["inputs"]) != required:
+            raise ConfigError(
+                "signals.%s inputs must be %s" % (name, list(required))
+            )
+    for name, node in algos.items():
+        required = ALGO_FUNCTIONS[node["function"]].input_count
+        if len(node["inputs"]) != required:
+            raise ConfigError(
+                "algos.%s inputs must contain %d nodes" % (name, required)
+            )
+    signal_order, algo_order, algo_requirements = _compile_dependencies(
+        signals, algos
+    )
+    settings = Settings(
+        version=str(version),
+        database=database,
+        tickers=tuple(normalized),
+        evaluation_days=require_int(
+            algo.get("evaluation_days", 60), "algo.evaluation_days", error=ConfigError
+        ),
+        poll_seconds=require_int(
+            algo.get("poll_seconds", 30), "algo.poll_seconds", error=ConfigError
+        ),
+        api_port=require_int(
+            algo.get("api_port", 8791), "algo.api_port", 1024, error=ConfigError
+        ),
+        regular_open=_clock(
+            polling.get("regular_open", "09:30"), "live_polling.regular_open"
+        ),
+        regular_close=_clock(
+            polling.get("regular_close", "16:00"), "live_polling.regular_close"
+        ),
+        early_close=_clock(
+            polling.get("early_close", "13:00"), "live_polling.early_close"
+        ),
+        early_close_days=early_close_days,
+        signals=signals,
+        algos=algos,
+        signal_order=signal_order,
+        algo_order=algo_order,
+        algo_requirements=algo_requirements,
+        content=_json(document),
+    )
     return settings
 
 
@@ -287,14 +380,39 @@ def _bars(
     return list(reversed(rows))
 
 
+def _session_bars(
+    connection: sqlite3.Connection,
+    ticker: str,
+    session_open: int,
+    session_close: int,
+    through: int,
+    *,
+    limit: Optional[int] = None,
+    include_interpolated: bool = True,
+) -> list[sqlite3.Row]:
+    quality = "" if include_interpolated else "AND interpolated=0"
+    limit_sql = "" if limit is None else "LIMIT ?"
+    arguments: tuple[Any, ...] = (ticker, session_open, session_close, through)
+    if limit is not None:
+        arguments += (limit,)
+    return connection.execute(
+        """
+        SELECT ts,open,high,low,close,volume,interpolated
+        FROM bars
+        WHERE ticker=? AND ts>=? AND ts<? AND ts<=? %s
+        ORDER BY ts %s
+        """ % (quality, limit_sql),
+        arguments,
+    ).fetchall()
+
+
 def _bar_parameters(parameters: Mapping[str, Any]) -> tuple[str, int, bool]:
     field = parameters.get("field")
     period = parameters.get("period")
     include = parameters.get("include_interpolated")
     if field not in BAR_FIELDS:
         raise EvaluationError("field must name a stored bar field")
-    if isinstance(period, bool) or not isinstance(period, int) or period < 1:
-        raise EvaluationError("period must be a positive integer")
+    period = require_int(period, "period", error=EvaluationError)
     if not isinstance(include, bool):
         raise EvaluationError("include_interpolated must be boolean")
     return field, period, include
@@ -303,8 +421,6 @@ def _bar_parameters(parameters: Mapping[str, Any]) -> tuple[str, int, bool]:
 def _signal_sma(
     connection, ticker, ts, parameters, inputs, settings=None
 ) -> Optional[float]:
-    if list(inputs) != ["bars"]:
-        raise EvaluationError("sma inputs must be ['bars']")
     field, period, include = _bar_parameters(parameters)
     rows = _bars(connection, ticker, ts, period, include)
     if len(rows) < period:
@@ -315,8 +431,6 @@ def _signal_sma(
 def _signal_metadata(
     connection, ticker, ts, parameters, inputs, settings=None
 ) -> Any:
-    if list(inputs) != ["bar_metadata"]:
-        raise EvaluationError("provider metadata input must be ['bar_metadata']")
     name = parameters.get("name")
     if name not in METADATA_DEFAULTS:
         raise EvaluationError("name must be a supported provider indicator")
@@ -338,33 +452,18 @@ def _signal_metadata(
     return json.loads(row["value"]) if row else None
 
 
-def _configured_time(settings: Settings, key: str, default: str) -> clock_time:
-    polling = settings.document.get("live_polling", {})
-    if not isinstance(polling, dict):
-        raise EvaluationError("live_polling must be an object")
-    try:
-        return clock_time.fromisoformat(str(polling.get(key, default)))
-    except ValueError as exc:
-        raise EvaluationError("live_polling.%s must be HH:MM" % key) from exc
-
-
 def _session_window(settings: Settings, ts: int) -> tuple[date, int, int]:
     local_day = datetime.fromtimestamp(ts, tz=EASTERN).date()
-    early_closes = settings.document.get("early_closes", [])
-    if not isinstance(early_closes, list):
-        raise EvaluationError("early_closes must be a list")
-    close_key = "early_close" if local_day.isoformat() in {
-        str(value) for value in early_closes
-    } else "regular_close"
+    session_close_time = (
+        settings.early_close
+        if local_day in settings.early_close_days
+        else settings.regular_close
+    )
     session_open = datetime.combine(
-        local_day, _configured_time(settings, "regular_open", "09:30"), tzinfo=EASTERN
+        local_day, settings.regular_open, tzinfo=EASTERN
     )
     session_close = datetime.combine(
-        local_day,
-        _configured_time(
-            settings, close_key, "13:00" if close_key == "early_close" else "16:00"
-        ),
-        tzinfo=EASTERN,
+        local_day, session_close_time, tzinfo=EASTERN
     )
     return local_day, int(session_open.timestamp()), int(session_close.timestamp())
 
@@ -372,8 +471,8 @@ def _session_window(settings: Settings, ts: int) -> tuple[date, int, int]:
 def _signal_session(
     connection, ticker, ts, parameters, inputs, settings
 ) -> Optional[dict[str, Any]]:
-    if parameters or inputs:
-        raise EvaluationError("session takes no inputs or params")
+    if parameters:
+        raise EvaluationError("session takes no params")
     local_day, session_open, session_close = _session_window(settings, ts)
     if ts < session_open or ts >= session_close:
         return None
@@ -384,31 +483,23 @@ def _signal_session(
     }
 
 
-def _whole_number(parameters: Mapping[str, Any], name: str, minimum: int = 1) -> int:
-    value = parameters.get(name)
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-        raise EvaluationError("%s must be an integer >= %d" % (name, minimum))
-    return value
-
-
 def _signal_opening_range(
     connection, ticker, ts, parameters, inputs, settings
 ) -> Optional[dict[str, float]]:
-    if list(inputs) != ["bars", "session"]:
-        raise EvaluationError("opening_range inputs must be ['bars', 'session']")
-    minutes = _whole_number(parameters, "minutes")
+    minutes = require_int(parameters.get("minutes"), "minutes", error=EvaluationError)
     session = inputs["session"]
     if session is None or session.get("minute", -1) < minutes:
         return None
     _, session_open, session_close = _session_window(settings, ts)
-    rows = connection.execute(
-        """
-        SELECT high, low FROM bars
-        WHERE ticker=? AND ts>=? AND ts<? AND ts<=? AND interpolated=0
-        ORDER BY ts LIMIT ?
-        """,
-        (ticker, session_open, session_close, ts, minutes),
-    ).fetchall()
+    rows = _session_bars(
+        connection,
+        ticker,
+        session_open,
+        session_close,
+        ts,
+        limit=minutes,
+        include_interpolated=False,
+    )
     if len(rows) < minutes:
         return None
     high = max(float(row["high"]) for row in rows)
@@ -432,14 +523,15 @@ def _prior_volume_baseline(
     for _ in range(baseline_sessions * 4 + 60):
         probe = int(datetime.combine(candidate, clock_time(12), tzinfo=EASTERN).timestamp())
         _, session_open, session_close = _session_window(settings, probe)
-        rows = connection.execute(
-            """
-            SELECT volume FROM bars
-            WHERE ticker=? AND ts>=? AND ts<? AND interpolated=0
-            ORDER BY ts LIMIT ?
-            """,
-            (ticker, session_open, session_close, cap_bars),
-        ).fetchall()
+        rows = _session_bars(
+            connection,
+            ticker,
+            session_open,
+            session_close,
+            session_close - 1,
+            limit=cap_bars,
+            include_interpolated=False,
+        )
         if len(rows) == cap_bars:
             sessions.append([float(row["volume"]) for row in rows])
             if len(sessions) == baseline_sessions:
@@ -457,22 +549,25 @@ def _prior_volume_baseline(
 
 
 def _signal_rvol_open(connection, ticker, ts, parameters, inputs, settings) -> Optional[float]:
-    if list(inputs) != ["bars", "session"]:
-        raise EvaluationError("rvol_open inputs must be ['bars', 'session']")
-    cap_bars = _whole_number(parameters, "cap_bars")
-    baseline_sessions = _whole_number(parameters, "baseline_sessions")
+    cap_bars = require_int(
+        parameters.get("cap_bars"), "cap_bars", error=EvaluationError
+    )
+    baseline_sessions = require_int(
+        parameters.get("baseline_sessions"), "baseline_sessions", error=EvaluationError
+    )
     session = inputs["session"]
     if session is None:
         return None
     local_day, session_open, session_close = _session_window(settings, ts)
-    rows = connection.execute(
-        """
-        SELECT volume FROM bars
-        WHERE ticker=? AND ts>=? AND ts<? AND ts<=? AND interpolated=0
-        ORDER BY ts LIMIT ?
-        """,
-        (ticker, session_open, session_close, ts, cap_bars),
-    ).fetchall()
+    rows = _session_bars(
+        connection,
+        ticker,
+        session_open,
+        session_close,
+        ts,
+        limit=cap_bars,
+        include_interpolated=False,
+    )
     if not rows:
         return None
     baseline = _prior_volume_baseline(
@@ -486,8 +581,6 @@ def _signal_rvol_open(connection, ticker, ts, parameters, inputs, settings) -> O
 
 
 def _signal_last_close(connection, ticker, ts, parameters, inputs, settings) -> Optional[float]:
-    if list(inputs) != ["bars"]:
-        raise EvaluationError("last_close inputs must be ['bars']")
     include = parameters.get("include_interpolated")
     if not isinstance(include, bool):
         raise EvaluationError("include_interpolated must be boolean")
@@ -509,85 +602,84 @@ def _signal_shape_v1(connection, ticker, ts, parameters, inputs, settings) -> An
         inputs,
         settings,
         _session_window,
+        _session_bars,
     )
 
 
-SIGNAL_FUNCTIONS: dict[str, Callable[..., Any]] = {
-    "sma": _signal_sma,
-    "session": _signal_session,
-    "opening_range": _signal_opening_range,
-    "rvol_open": _signal_rvol_open,
-    "last_close": _signal_last_close,
-    "shape_v1": _signal_shape_v1,
+SIGNAL_FUNCTIONS: dict[str, SignalSpec] = {
+    "sma": SignalSpec(_signal_sma, ("bars",)),
+    "metadata": SignalSpec(_signal_metadata, ("bar_metadata",)),
+    "session": SignalSpec(_signal_session, ()),
+    "opening_range": SignalSpec(_signal_opening_range, ("bars", "session")),
+    "rvol_open": SignalSpec(_signal_rvol_open, ("bars", "session")),
+    "last_close": SignalSpec(_signal_last_close, ("bars",)),
+    "shape_v1": SignalSpec(_signal_shape_v1, ("bars",)),
 }
 
 
-def _number(value: Any, name: str) -> Optional[float]:
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
-        raise EvaluationError("%s must be a finite number or null" % name)
-    return float(value)
-
-
-def _algo_crossover(
-    connection, ticker, ts, name, version, parameters, inputs, previous,
-    open_entries, session_outputs, settings,
-):
-    if len(inputs) != 2:
-        raise EvaluationError("crossover requires [fast, slow] inputs")
+def _algo_crossover(context: AlgoContext) -> tuple[bool, bool, int]:
+    inputs = context.inputs
+    previous = context.previous
     fast_name, slow_name = inputs
-    fast = _number(inputs[fast_name], "fast")
-    slow = _number(inputs[slow_name], "slow")
-    old_fast = _number(previous.get(fast_name), "previous fast")
-    old_slow = _number(previous.get(slow_name), "previous slow")
+    fast = require_float(
+        inputs[fast_name], "fast", nullable=True, error=EvaluationError
+    )
+    slow = require_float(
+        inputs[slow_name], "slow", nullable=True, error=EvaluationError
+    )
+    old_fast = require_float(
+        previous.get(fast_name), "previous fast", nullable=True, error=EvaluationError
+    )
+    old_slow = require_float(
+        previous.get(slow_name), "previous slow", nullable=True, error=EvaluationError
+    )
     if None in (fast, slow, old_fast, old_slow):
         return False, False, 0
     is_entry = old_fast <= old_slow and fast > slow
     is_close = old_fast >= old_slow and fast < slow
     direction = 1 if is_entry else (
-        int(open_entries[0]["direction"]) if is_close and open_entries else 1 if is_close else 0
+        int(context.open_entries[0]["direction"])
+        if is_close and context.open_entries
+        else 1 if is_close else 0
     )
     return is_entry, is_close, direction
 
 
-def _parameter_number(
-    parameters: Mapping[str, Any], name: str, *, minimum: float = 0.0
-) -> float:
-    value = parameters.get(name)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise EvaluationError("%s must be a number" % name)
-    number = float(value)
-    if not math.isfinite(number) or number < minimum:
-        raise EvaluationError("%s must be finite and >= %g" % (name, minimum))
-    return number
-
-
-def _algo_range_breakout(
-    connection, ticker, ts, name, version, parameters, inputs, previous,
-    open_entries, session_outputs, settings,
-):
-    if len(inputs) != 4:
-        raise EvaluationError(
-            "range_breakout requires [session, opening_range, rvol_open, last_close] inputs"
-        )
+def _algo_range_breakout(context: AlgoContext) -> tuple[bool, bool, int]:
+    inputs = context.inputs
     session_name, range_name, rvol_name, price_name = inputs
     session = inputs[session_name]
     opening_range = inputs[range_name]
-    rvol = _number(inputs[rvol_name], "rvol_open")
-    price = _number(inputs[price_name], "last_close")
-    direction_param = parameters.get("direction")
+    rvol = require_float(
+        inputs[rvol_name], "rvol_open", nullable=True, error=EvaluationError
+    )
+    price = require_float(
+        inputs[price_name], "last_close", nullable=True, error=EvaluationError
+    )
+    direction_param = context.parameters.get("direction")
     if direction_param not in ("both", "long", "short"):
         raise EvaluationError("direction must be both, long, or short")
-    target_r = _parameter_number(parameters, "target_r", minimum=0.0)
-    min_rvol = _parameter_number(parameters, "min_rvol", minimum=0.0)
-    entry_cutoff = _parameter_number(parameters, "entry_cutoff_minutes", minimum=0.0)
-    flat_minutes = _parameter_number(parameters, "flat_minutes", minimum=0.0)
+    target_r = float(require_float(
+        context.parameters.get("target_r"), "target_r", minimum=0.0,
+        error=EvaluationError,
+    ))
+    min_rvol = float(require_float(
+        context.parameters.get("min_rvol"), "min_rvol", minimum=0.0,
+        error=EvaluationError,
+    ))
+    entry_cutoff = float(require_float(
+        context.parameters.get("entry_cutoff_minutes"),
+        "entry_cutoff_minutes", minimum=0.0, error=EvaluationError,
+    ))
+    flat_minutes = float(require_float(
+        context.parameters.get("flat_minutes"), "flat_minutes", minimum=0.0,
+        error=EvaluationError,
+    ))
     if session is None or opening_range is None or rvol is None or price is None:
         return False, False, 0
 
-    if open_entries:
-        entry = open_entries[0]
+    if context.open_entries:
+        entry = context.open_entries[0]
         direction = int(entry["direction"])
         entry_price = float(entry["price"])
         stop = float(opening_range["low" if direction == 1 else "high"])
@@ -599,7 +691,7 @@ def _algo_range_breakout(
             return False, True, direction
         return False, False, 0
 
-    if any(_algo_output(row["output"])[0] for row in session_outputs):
+    if any(_algo_output(row["output"])[0] for row in context.session_outputs):
         return False, False, 0
     if float(session["to_close"]) < entry_cutoff or rvol <= min_rvol:
         return False, False, 0
@@ -612,9 +704,9 @@ def _algo_range_breakout(
     return False, False, 0
 
 
-ALGO_FUNCTIONS: dict[str, Callable[..., tuple[bool, bool, int]]] = {
-    "crossover": _algo_crossover,
-    "range_breakout": _algo_range_breakout,
+ALGO_FUNCTIONS: dict[str, AlgoSpec] = {
+    "crossover": AlgoSpec(_algo_crossover, 2),
+    "range_breakout": AlgoSpec(_algo_range_breakout, 4),
 }
 
 
@@ -726,75 +818,58 @@ def run_core(
     if connection.execute("SELECT 1 FROM bars WHERE ticker=? AND ts=?", (ticker, ts)).fetchone() is None:
         raise EvaluationError("timestamp is not a stored bar: %s %s" % (ticker, ts))
 
-    values: dict[str, Any] = {}
     signal_values: dict[str, Any] = {}
-    algo_values: dict[str, tuple[bool, bool, int]] = {}
-    visiting: set[str] = set()
-
-    def evaluate_signal(name: str) -> Any:
-        if name in values:
-            return values[name]
-        if name in visiting:
-            raise EvaluationError("dependency cycle at %s" % name)
+    for name in settings.signal_order:
         node = settings.signals[name]
-        visiting.add(name)
         inputs = {
             target: None
             if target in ("bars", "bar_metadata", "events")
-            else evaluate_signal(target)
+            else signal_values[target]
             for target in node["inputs"]
         }
         try:
-            function = (
-                _signal_metadata
-                if node["inputs"] == ["bar_metadata"]
-                else SIGNAL_FUNCTIONS[node["function"]]
-            )
-            value = function(
+            value = SIGNAL_FUNCTIONS[node["function"]].function(
                 connection, ticker, ts, node["params"], inputs, settings
             )
             _json(value)
         except Exception as exc:
             raise EvaluationError("signal %s failed: %s" % (name, exc)) from exc
-        visiting.remove(name)
-        values[name] = value
         signal_values[name] = value
-        return value
 
-    def evaluate_algo(name: str) -> tuple[bool, bool, int]:
-        if name in algo_values:
-            return algo_values[name]
-        if name in visiting:
-            raise EvaluationError("dependency cycle at %s" % name)
+    selected = settings.enabled_algos() if algos is None else tuple(algos)
+    required_algos: set[str] = set()
+    for name in selected:
+        if name not in settings.algos:
+            raise EvaluationError("unknown algo: %s" % name)
+        required_algos.update(settings.algo_requirements[name])
+
+    algo_values: dict[str, tuple[bool, bool, int]] = {}
+    for name in settings.algo_order:
+        if name not in required_algos:
+            continue
         node = settings.algos[name]
-        visiting.add(name)
         inputs: dict[str, Any] = {}
         previous: dict[str, Any] = {
             "_self": _prior_output(connection, ticker, ts, name, settings.version)
         }
         for target in node["inputs"]:
             if target in settings.signals:
-                inputs[target] = evaluate_signal(target)
+                inputs[target] = signal_values[target]
             else:
-                output = evaluate_algo(target)
-                inputs[target] = list(output)
+                inputs[target] = list(algo_values[target])
             previous[target] = _prior_output(connection, ticker, ts, target, settings.version)
         open_entries, session_outputs = _output_state(
             connection, settings, ticker, name, ts
         )
         try:
-            output = ALGO_FUNCTIONS[node["function"]](
-                connection,
-                ticker,
-                ts,
-                name,
-                settings.version,
-                node["params"],
-                inputs,
-                previous,
-                open_entries,
-                session_outputs,
-                settings,
+            output = ALGO_FUNCTIONS[node["function"]].function(
+                AlgoContext(
+                    parameters=node["params"],
+                    inputs=inputs,
+                    previous=previous,
+                    open_entries=tuple(open_entries),
+                    session_outputs=tuple(session_outputs),
+                )
             )
         except Exception as exc:
             raise EvaluationError("algo %s failed: %s" % (name, exc)) from exc
@@ -802,18 +877,8 @@ def run_core(
             result = _algo_output(output)
         except EvaluationError as exc:
             raise EvaluationError("algo %s returned invalid output: %s" % (name, exc)) from exc
-        visiting.remove(name)
         algo_values[name] = result
-        values[name] = list(result)
-        return result
 
-    for name in settings.enabled_signals():
-        evaluate_signal(name)
-    selected = settings.enabled_algos() if algos is None else tuple(algos)
-    for name in selected:
-        if name not in settings.algos:
-            raise EvaluationError("unknown algo: %s" % name)
-        evaluate_algo(name)
     selected_values = {name: algo_values[name] for name in selected}
     return {"ticker": ticker, "ts": ts, "signals": signal_values, "algos": selected_values}
 
