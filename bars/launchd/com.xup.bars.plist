@@ -30,8 +30,8 @@
     <key>ProcessType</key>
     <string>Background</string>
     <key>StandardOutPath</key>
-    <string>/Users/xup/dh/trader/bars/logs/service.log</string>
+    <string>/Users/xup/dh/trader/log/service.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/xup/dh/trader/bars/logs/service.log</string>
+    <string>/Users/xup/dh/trader/log/service.log</string>
 </dict>
 </plist>

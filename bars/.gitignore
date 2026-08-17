@@ -1,7 +1,5 @@
 data/*
 !data/.gitkeep
-logs/*
-!logs/.gitkeep
 __pycache__/
 *.pyc
 .venv/

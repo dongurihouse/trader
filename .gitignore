@@ -1,5 +1,7 @@
 .DS_Store
 .pytest_cache/
+log/*
+!log/.gitkeep
 .venv/
 __pycache__/
 *.pyc
