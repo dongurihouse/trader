@@ -13,7 +13,7 @@ auth: sync
 	@$(PYTHON) bars/bars_service.py auth
 
 install: sync
-	@mkdir -p data log "$(HOME)/Library/LaunchAgents"
+	@mkdir -p data "$(HOME)/Library/LaunchAgents"
 	@cp config/$(LABEL).plist "$(PLIST)"
 	@launchctl bootout gui/$(UID)/$(LABEL) >/dev/null 2>&1 || true
 	@launchctl bootstrap gui/$(UID) "$(PLIST)"
@@ -32,7 +32,7 @@ status:
 	@$(PYTHON) bars/bars_service.py status
 
 logs:
-	@tail -f log/service.log
+	@tail -f data/service.log
 
 once:
 	@$(PYTHON) bars/bars_service.py once
