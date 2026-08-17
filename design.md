@@ -56,24 +56,26 @@ Nightly sweep:
 
 ## 2. events (service)
 
-- Maps events to tickers; the same shape as bars: one input, one table.
+- Collects events, maps each one to a ticker, and defines the date range
+  where the event has impact.
 - A row: ticker, event, event time, window start, window end, direction,
-  strength, volatility, known_at. The fact columns come from the source;
-  the service does no math on them.
-- known_at is the time the service first stored the row. A read at `t`
-  uses only rows with `known_at <= t`, so a backtest sees an event only
-  from the moment the live system knew it. A revision updates the facts in
-  place and keeps known_at; revision history is not tracked.
-- A non-directional event (earnings, implied move) stores direction 0 and
-  carries volatility only.
+  strength. Direction is a value from -1 to 1, and 0 is neutral. Strength
+  is the size of the impact; a high strength means high expected
+  volatility.
+- A non-directional event (earnings, implied move) stores direction 0 with
+  a high strength.
 - Cadence: once per day, before the open. A run upserts the current facts
   and deletes a future row that its source no longer lists. A row with an
-  ended window stays forever; those rows are the event history for
-  backtests.
+  ended window stays forever as history.
 
-Interpretation belongs to the consumer. A signal that reads events defines
-its own fade and its own aggregation; the events service fixes no query
-contract.
+The service also defines the impact formula. For a date `d` inside the
+window, the weight is 0 at the window edges, 1 at the event time, and
+linear between; the impact is the weight times (direction, strength).
+Outside the window the impact is (0, 0). The read interface returns each
+active event with its impact and does not consolidate across events.
+Consolidation belongs to a signal: a planned sentiment signal will produce
+one (direction, strength) from events, bars, or both. That signal is a
+separate task.
 
 ## 3. algo (service)
 
@@ -93,10 +95,10 @@ and exit points per algo.
 - A signal's output is opaque: a number for sma, a pair, anything. The algo
   that reads a signal interprets the output itself.
 - Everything reads only values at or before `t` — the whole no-lookahead
-  guarantee. For events this means rows with `known_at <= t`.
+  guarantee.
 - Each algo's config declares the signals it reads. A new signal or algo is
   a config entry, not an engine change.
-- Live and backtest are the same core with different timestamps.
+- Bulk and real time are the same core with different timestamps.
 
 ### Config defines every signal and every algo
 
@@ -116,8 +118,8 @@ That is the whole procedure. The algo service reacts on its own:
 
 1. It sees the new file hash and stores the file in configs.
 2. It backfills outputs for every enabled node over all stored bars, under
-   the new version. The backfill is the backtest loop, and the rows are
-   keyed, so the run is idempotent and resumable.
+   the new version. The backfill is a bulk run of the loop, and the rows
+   are keyed, so the run is idempotent and resumable.
 3. The dashboard shows the new version next to the old ones as the rows
    land.
 
@@ -128,9 +130,10 @@ live tick. A new function is the one case that also needs a code change.
 ### The output cache
 
 Every evaluation is stored in outputs: one row per signal and one per algo,
-keyed by ticker, timestamp, name, and the config version. Old versions stay
-as the history of what did not work. The dashboard reads the cache and
-never writes it.
+keyed by ticker, timestamp, name, and the config version. A rerun under the
+same version updates the row in place; a changed config writes rows under a
+new version, and the old rows stay for reference. The dashboard reads the
+cache and never writes it.
 
 Every enabled signal is evaluated and stored each tick, whether or not an
 algo reads it. A visual-aid signal, such as a shape forecast, is stored the
@@ -147,10 +150,10 @@ number.
   priced from bars, and the account result is the sum over units.
 - Writes an exit only while recorded exits are below entries. This is
   enforced in code; a CHECK cannot span rows.
-- Backtest is the same loop over past timestamps; it writes outputs and no
-  trades. Output rows are keyed and the core is deterministic, so a
-  backtest write is a safe upsert. Without it, a version that never ran
-  live would have no rows and stay invisible on the dashboard.
+- There is no separate backtest. The loop applies the core to timestamps,
+  in bulk over a past range or in real time each minute. A bulk run writes
+  outputs and no trades; the rows are keyed and the core is deterministic,
+  so a rerun is a safe upsert.
 
 ## 4. dashboard (webserver)
 
@@ -197,17 +200,15 @@ CREATE TABLE bars (
 CREATE TABLE events (
     ticker       TEXT    NOT NULL,
     event        TEXT    NOT NULL,  -- kind, e.g. 'earnings'
-    event_ts     INTEGER NOT NULL,  -- the event time
+    event_ts     INTEGER NOT NULL,  -- the event time, the impact peak
     window_start INTEGER NOT NULL,
     window_end   INTEGER NOT NULL,
-    direction    INTEGER NOT NULL DEFAULT 0,
-    strength     REAL    NOT NULL DEFAULT 0,
-    volatility   REAL    NOT NULL DEFAULT 0,
-    known_at     INTEGER NOT NULL,  -- first stored, epoch seconds, UTC
+    direction    REAL    NOT NULL DEFAULT 0,  -- -1 to 1; 0 is neutral
+    strength     REAL    NOT NULL DEFAULT 0,  -- high = high volatility
     PRIMARY KEY (ticker, event, event_ts),
     CHECK (window_start <= event_ts AND event_ts <= window_end),
-    CHECK (direction IN (-1, 0, 1)),
-    CHECK (strength >= 0 AND volatility >= 0)
+    CHECK (direction >= -1 AND direction <= 1),
+    CHECK (strength >= 0)
 ) WITHOUT ROWID;
 
 CREATE TABLE trades (
@@ -308,9 +309,9 @@ flowchart TB
    definitions for algo.
 10. Signals and algos are config-defined, config-versioned, and layered:
     signals read data and signals, algos read signal outputs only.
-11. A signal's output is opaque, and the consuming algo interprets it.
-    Events are stored facts; a signal that reads events defines its own
-    fade and its own aggregation.
+11. A signal's output is opaque, and the consuming algo interprets it. The
+    events service owns the per-event impact formula; consolidation across
+    events belongs to a planned sentiment signal, a separate task.
 12. The dashboard is served entirely by the tables; no service exposes an
     API. A configs table maps every stored version hash to the full config
     file, and every enabled signal is stored each tick, so visual-aid
@@ -321,11 +322,14 @@ flowchart TB
 14. The version is one hash of the whole config file; per-node composite
     hashes were dropped.
 15. A change is a standard operation: the algo service detects the new
-    file version and backfills outputs over all stored bars. A backtest
+    file version and backfills outputs over all stored bars. A bulk run
     writes outputs and no trades.
-16. Events carry known_at; a read at `t` uses rows with `known_at <= t`,
-    so a backtest sees an event only from the moment it was known. A
-    revision updates the facts in place and is not tracked.
+16. An event's impact is (direction, strength): direction is a value from
+    -1 to 1, and a high strength means high expected volatility. The
+    separate volatility column and known_at are gone.
+17. No backtest concept: the loop applies the core to timestamps, in bulk
+    or in real time. An output updates in place per version; old versions
+    stay for reference.
 
 ## Open
 
