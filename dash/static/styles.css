@@ -833,7 +833,7 @@ h1 em {
   gap: 8px;
 }
 
-.range-control,
+.date-strip-shell,
 .style-control,
 .zoom-control {
   display: flex;
@@ -844,7 +844,7 @@ h1 em {
   border-radius: 10px;
 }
 
-.range-control button,
+.date-button,
 .style-control button,
 .zoom-control button {
   min-width: 46px;
@@ -859,13 +859,13 @@ h1 em {
   cursor: pointer;
 }
 
-.range-control button:hover,
+.date-button:hover,
 .style-control button:hover,
 .zoom-control button:hover {
   color: var(--text);
 }
 
-.range-control button:disabled,
+.date-button:disabled,
 .style-control button:disabled,
 .zoom-control button:disabled {
   color: var(--subtle);
@@ -873,10 +873,72 @@ h1 em {
   opacity: 0.42;
 }
 
-.range-control button.active,
+.date-button.active,
 .style-control button.active {
   color: var(--ink);
   background: var(--text);
+}
+
+.date-strip-shell {
+  width: min(560px, 45vw);
+  min-width: 260px;
+  padding: 3px;
+  overflow: hidden;
+}
+
+.date-strip {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  gap: 3px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-color: var(--line-strong) transparent;
+  scrollbar-width: thin;
+  scroll-snap-type: x proximity;
+}
+
+.date-strip::-webkit-scrollbar {
+  height: 4px;
+}
+
+.date-strip::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 99px;
+}
+
+.date-button {
+  display: grid;
+  min-width: 65px;
+  padding: 5px 9px 6px;
+  flex: 0 0 auto;
+  gap: 2px;
+  scroll-snap-align: center;
+}
+
+.date-button small,
+.date-button span {
+  display: block;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+.date-button small {
+  font-size: 0.48rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.date-button span {
+  font-size: 0.63rem;
+}
+
+.date-strip-loading {
+  padding: 8px 10px;
+  color: var(--subtle);
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  white-space: nowrap;
 }
 
 .chart-summary {
@@ -1937,24 +1999,19 @@ pre {
     flex-direction: column;
   }
 
-  .range-control,
+  .date-strip-shell,
   .style-control,
   .zoom-control {
     width: 100%;
   }
 
-  .range-control button,
   .style-control button,
   .zoom-control button {
     flex: 1;
   }
 
-  .range-control {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .range-control button {
+  .date-strip-shell {
+    max-width: none;
     min-width: 0;
   }
 

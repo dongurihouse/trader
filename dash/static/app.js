@@ -3,10 +3,12 @@ const $ = (selector) => document.querySelector(selector);
 const state = {
   overview: null,
   ticker: null,
-  range: "1D",
+  range: "HISTORY",
   style: "line",
   algo: null,
   bars: null,
+  sessions: [],
+  selectedDate: null,
   chartRequest: 0,
 };
 
@@ -34,6 +36,31 @@ const easternClock = new Intl.DateTimeFormat("en-US", {
 const easternDay = new Intl.DateTimeFormat("en-US", {
   timeZone: "America/New_York",
   month: "short",
+  day: "numeric",
+});
+
+const easternDateKeyFormat = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+const easternDateButton = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  month: "short",
+  day: "numeric",
+});
+
+const easternWeekday = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  weekday: "short",
+});
+
+const easternFullDate = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  year: "numeric",
+  month: "long",
   day: "numeric",
 });
 
@@ -91,6 +118,31 @@ function formatProbability(value) {
 
 function dateFromEpoch(epoch) {
   return new Date(Number(epoch) * 1000);
+}
+
+function easternDateKey(epoch) {
+  const parts = easternDateKeyFormat.formatToParts(dateFromEpoch(epoch));
+  const value = (type) => parts.find((part) => part.type === type)?.value || "";
+  return `${value("year")}-${value("month")}-${value("day")}`;
+}
+
+function sessionDateRanges(bars) {
+  const sessions = [];
+  bars.forEach((bar, index) => {
+    const date = easternDateKey(bar.ts);
+    const previous = sessions.at(-1);
+    if (!previous || previous.date !== date) {
+      sessions.push({
+        date,
+        startIndex: index,
+        endIndex: index,
+        ts: Number(bar.ts),
+      });
+    } else {
+      previous.endIndex = index;
+    }
+  });
+  return sessions;
 }
 
 function formatCoverage(payload) {
@@ -322,11 +374,14 @@ class PriceChart {
 
   notifyViewChange() {
     this.updateLabel();
+    const visibleBars = this.visibleBars();
     this.onViewChange?.({
       visible: this.viewLength(),
       total: this.totalBars(),
       canZoomIn: this.viewLength() > Math.min(this.minimumViewPoints, this.totalBars()),
       canZoomOut: this.viewLength() < this.totalBars(),
+      firstDate: visibleBars.length ? easternDateKey(visibleBars[0].ts) : null,
+      lastDate: visibleBars.length ? easternDateKey(visibleBars.at(-1).ts) : null,
     });
   }
 
@@ -756,7 +811,7 @@ class PriceChart {
   }
 }
 
-function renderViewport({ visible, total, canZoomIn, canZoomOut }) {
+function renderViewport({ visible, total, canZoomIn, canZoomOut, firstDate, lastDate }) {
   const payload = state.bars;
   const isFullView = visible === total;
   if (payload?.source_count === payload?.bars?.length) {
@@ -771,9 +826,73 @@ function renderViewport({ visible, total, canZoomIn, canZoomOut }) {
   $("#zoom-in").disabled = !canZoomIn;
   $("#zoom-out").disabled = !canZoomOut;
   $("#zoom-reset").disabled = !canZoomOut;
+  renderDateSelection(firstDate && firstDate === lastDate ? firstDate : null);
 }
 
 const chart = new PriceChart($("#price-chart"), $("#chart-tooltip"), renderViewport);
+
+function renderDateStrip(payload) {
+  const strip = $("#date-strip");
+  const hadSessions = state.sessions.length > 0;
+  const previousScroll = strip.scrollLeft;
+  const wasAtEnd = !hadSessions
+    || strip.scrollLeft + strip.clientWidth >= strip.scrollWidth - 12;
+  state.sessions = sessionDateRanges(payload?.bars || []);
+
+  if (!state.sessions.length) {
+    strip.replaceChildren(createElement("span", "date-strip-loading", "No dates available"));
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  state.sessions.forEach((session) => {
+    const date = dateFromEpoch(session.ts);
+    const button = createElement("button", "date-button");
+    button.type = "button";
+    button.dataset.date = session.date;
+    button.setAttribute("aria-pressed", "false");
+    button.title = `Show ${easternFullDate.format(date)}`;
+    button.append(
+      createElement("small", "", easternWeekday.format(date)),
+      createElement("span", "", easternDateButton.format(date)),
+    );
+    fragment.append(button);
+  });
+  strip.replaceChildren(fragment);
+  renderDateSelection(state.selectedDate);
+
+  requestAnimationFrame(() => {
+    if (state.selectedDate) {
+      strip.querySelector(`[data-date="${state.selectedDate}"]`)?.scrollIntoView({
+        block: "nearest",
+        inline: "center",
+      });
+    } else if (wasAtEnd) {
+      strip.scrollLeft = strip.scrollWidth;
+    } else {
+      strip.scrollLeft = previousScroll;
+    }
+  });
+}
+
+function renderDateSelection(date) {
+  state.selectedDate = date;
+  document.querySelectorAll("#date-strip button[data-date]").forEach((button) => {
+    const active = button.dataset.date === date;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+}
+
+function focusDate(date) {
+  const session = state.sessions.find((candidate) => candidate.date === date);
+  if (!session) return;
+  chart.setView(session.startIndex, session.endIndex);
+  $("#date-strip").querySelector(`[data-date="${date}"]`)?.scrollIntoView({
+    block: "nearest",
+    inline: "center",
+  });
+}
 
 function renderAlgoOverlay(payload = null) {
   const configured = Object.entries(state.overview?.config?.algos || {})
@@ -798,10 +917,11 @@ function renderAlgoOverlay(payload = null) {
   $("#algo-range-legend").hidden = !rangeMinutes;
   if (rangeMinutes) $("#algo-range-label").textContent = `${rangeMinutes}m range`;
   const actionCount = (payload?.trades || []).filter((trade) => trade.algo === state.algo).length;
+  const rangeLabel = payload?.range === "HISTORY" ? "loaded history" : payload?.range;
   $("#algo-overlay-count").textContent = payload
     ? actionCount
-      ? `${integerFormat.format(actionCount)} ${actionCount === 1 ? "action" : "actions"} in ${payload.range}`
-      : `No trade actions in ${payload.range}`
+      ? `${integerFormat.format(actionCount)} ${actionCount === 1 ? "action" : "actions"} in ${rangeLabel}`
+      : `No trade actions in ${rangeLabel}`
     : "Loading actions…";
 }
 
@@ -809,7 +929,7 @@ async function loadOverview({ quiet = false } = {}) {
   const refresh = $("#refresh-button");
   if (!quiet) refresh.classList.add("is-spinning");
   try {
-    const overview = await api("/api/overview");
+    const overview = await api("/api/overview?compact=1");
     state.overview = overview;
     if (!state.ticker || !overview.quotes.some((quote) => quote.ticker === state.ticker)) {
       const preferred = overview.quotes.find((quote) => quote.ticker === "SNDK" && quote.available);
@@ -831,7 +951,7 @@ function renderOverview() {
   $("#market-label").textContent = overview.market.label;
   $("#market-time").textContent = easternTime.format(dateFromEpoch(overview.market.eastern_time));
   $("#market-dot").classList.toggle("live", overview.market.state === "live");
-  renderAlgoOverlay();
+  renderAlgoOverlay(state.bars);
   renderTickers(overview.quotes);
   renderQuote();
 }
@@ -891,6 +1011,7 @@ async function loadBars({ quiet = false } = {}) {
     if (request !== state.chartRequest) return;
     state.bars = payload;
     renderAlgoOverlay(payload);
+    renderDateStrip(payload);
     chart.setData(payload);
     $("#chart-empty").hidden = payload.bars.length > 0;
     $("#stat-coverage").textContent = formatCoverage(payload);
@@ -901,16 +1022,29 @@ async function loadBars({ quiet = false } = {}) {
   }
 }
 
-$("#range-control").addEventListener("click", (event) => {
-  const button = event.target.closest("button[data-range]");
-  if (!button || button.dataset.range === state.range) return;
-  state.range = button.dataset.range;
-  document.querySelectorAll("#range-control button").forEach((candidate) => {
-    const active = candidate === button;
-    candidate.classList.toggle("active", active);
-    candidate.setAttribute("aria-pressed", String(active));
-  });
-  loadBars();
+$("#date-strip").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-date]");
+  if (!button) return;
+  focusDate(button.dataset.date);
+});
+
+$("#date-strip").addEventListener("wheel", (event) => {
+  const strip = event.currentTarget;
+  if (strip.scrollWidth <= strip.clientWidth) return;
+  const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+  strip.scrollLeft += delta;
+  event.preventDefault();
+}, { passive: false });
+
+$("#date-strip").addEventListener("keydown", (event) => {
+  if (!event.target.matches("button[data-date]") || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+  const offset = event.key === "ArrowLeft" ? -1 : 1;
+  const buttons = [...event.currentTarget.querySelectorAll("button[data-date]")];
+  const target = buttons[buttons.indexOf(event.target) + offset];
+  if (!target) return;
+  target.focus();
+  focusDate(target.dataset.date);
+  event.preventDefault();
 });
 
 $("#style-control").addEventListener("click", (event) => {

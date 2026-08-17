@@ -25,6 +25,7 @@ UTC = ZoneInfo("UTC")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,24}$")
 SERVICE_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+CHART_HISTORY_START = int(datetime(2026, 7, 6, tzinfo=EASTERN).timestamp())
 
 
 class DashboardError(Exception):
@@ -73,7 +74,7 @@ class DashboardData:
             if "connection" in locals():
                 connection.close()
 
-    def overview(self) -> dict[str, Any]:
+    def overview(self, compact: bool = False) -> dict[str, Any]:
         config = self.config()
         configured_tickers = [str(item) for item in config.get("tickers", [])]
         with self.connection() as connection:
@@ -85,31 +86,41 @@ class DashboardData:
             ]
             tickers = list(dict.fromkeys(configured_tickers + database_tickers))
             quotes = [self._quote(connection, ticker) for ticker in tickers]
-            services = self._services(connection, config)
-            problems = self._logs(
-                connection,
-                "WHERE level IN ('warn', 'error')",
-                limit=24,
-            )
-            history = self._logs(
-                connection,
-                "WHERE level = 'info' AND lower(message) NOT LIKE 'heartbeat%'",
-                limit=36,
-            )
-            nodes = self._nodes(connection, config)
-            stored_versions = [
-                {
-                    "version": row["version"],
-                    "first_seen": row["first_seen"],
-                }
-                for row in connection.execute(
-                    "SELECT version, first_seen FROM configs ORDER BY first_seen DESC"
+            if compact:
+                services = []
+                problems = []
+                history = []
+                nodes = []
+                stored_versions = []
+                counts = {}
+            else:
+                services = self._services(connection, config)
+                problems = self._logs(
+                    connection,
+                    "WHERE level IN ('warn', 'error')",
+                    limit=24,
                 )
-            ]
-            counts = {
-                table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                for table in ("bars", "events", "trades", "outputs")
-            }
+                history = self._logs(
+                    connection,
+                    "WHERE level = 'info' AND lower(message) NOT LIKE 'heartbeat%'",
+                    limit=36,
+                )
+                nodes = self._nodes(connection, config)
+                stored_versions = [
+                    {
+                        "version": row["version"],
+                        "first_seen": row["first_seen"],
+                    }
+                    for row in connection.execute(
+                        "SELECT version, first_seen FROM configs ORDER BY first_seen DESC"
+                    )
+                ]
+                counts = {
+                    table: connection.execute(
+                        f"SELECT COUNT(*) FROM {table}"
+                    ).fetchone()[0]
+                    for table in ("bars", "events", "trades", "outputs")
+                }
 
         return {
             "generated_at": int(datetime.now(tz=UTC).timestamp()),
@@ -135,8 +146,10 @@ class DashboardData:
     def bars(self, ticker: str, span: str) -> dict[str, Any]:
         ticker = self._valid_symbol(ticker)
         span = span.upper()
-        if span not in {"1D", "5D", "1M", "3M", "120D", "ALL"}:
-            raise DashboardError("Range must be 1D, 5D, 1M, 3M, 120D, or ALL")
+        if span not in {"HISTORY", "1D", "5D", "1M", "3M", "120D", "ALL"}:
+            raise DashboardError(
+                "Range must be HISTORY, 1D, 5D, 1M, 3M, 120D, or ALL"
+            )
         config = self.config()
 
         with self.connection() as connection:
@@ -632,6 +645,8 @@ class DashboardData:
     def _range_start(
         self, connection: sqlite3.Connection, ticker: str, latest: int, span: str
     ) -> int:
+        if span == "HISTORY":
+            return CHART_HISTORY_START
         if span == "ALL":
             return 0
         if span in {"1M", "3M", "120D"}:
@@ -919,9 +934,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _api(self, path: str, query: dict[str, list[str]]) -> None:
         try:
             if path == "/api/overview":
-                payload = self.data.overview()
+                payload = self.data.overview(
+                    self._param(query, "compact", "0") == "1"
+                )
             elif path == "/api/bars":
-                payload = self.data.bars(self._param(query, "ticker"), self._param(query, "range", "1D"))
+                payload = self.data.bars(
+                    self._param(query, "ticker"),
+                    self._param(query, "range", "HISTORY"),
+                )
             elif path == "/api/logs":
                 payload = self.data.logs(
                     self._param(query, "service", None),
