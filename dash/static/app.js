@@ -908,7 +908,8 @@ async function loadOverview({ quiet = false } = {}) {
 function renderOverview() {
   const overview = state.overview;
   $("#updated-at").textContent = `Updated ${localUpdated.format(dateFromEpoch(overview.generated_at))}`;
-  $("#market-label").textContent = overview.market.label;
+  $("#market-status").setAttribute("aria-label", overview.market.label);
+  $("#market-status").title = overview.market.label;
   $("#market-dot").classList.toggle("live", overview.market.state === "live");
   renderAlgoOverlay(state.bars);
   renderTickers(overview.quotes);

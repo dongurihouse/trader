@@ -1972,10 +1972,6 @@ pre {
     height: auto;
   }
 
-  .header-market #market-label {
-    display: none;
-  }
-
   .market-heading {
     display: grid;
     align-items: start;
