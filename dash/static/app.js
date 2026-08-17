@@ -242,39 +242,6 @@ class PriceChart {
     );
   }
 
-  openingRangeOverlay() {
-    return (this.payload?.algo_overlays || []).find(
-      (overlay) => overlay.algo === this.algo && overlay.kind === "opening_range",
-    ) || null;
-  }
-
-  openingRangeAt(timestamp) {
-    const value = Number(timestamp);
-    return (this.openingRangeOverlay()?.ranges || []).find(
-      (range) => value >= Number(range.start) && value < Number(range.end),
-    ) || null;
-  }
-
-  openingRangeSegments(bars) {
-    if (!bars.length) return [];
-    const lowerBound = (target) => {
-      let low = 0;
-      let high = bars.length;
-      while (low < high) {
-        const middle = Math.floor((low + high) / 2);
-        if (Number(bars[middle].ts) < target) low = middle + 1;
-        else high = middle;
-      }
-      return low;
-    };
-    return (this.openingRangeOverlay()?.ranges || []).flatMap((range) => {
-      const startIndex = lowerBound(Number(range.start));
-      const endIndex = lowerBound(Number(range.end)) - 1;
-      if (startIndex >= bars.length || endIndex < startIndex) return [];
-      return [{ ...range, startIndex, endIndex }];
-    });
-  }
-
   shapeAt(timestamp) {
     const forecast = this.payload?.shape_forecast;
     const snapshots = forecast?.snapshots || [];
@@ -356,9 +323,8 @@ class PriceChart {
     const first = visible[0];
     const last = visible.at(-1);
     const actionCount = this.visibleTrades(visible).length;
-    const rangeLabel = this.openingRangeOverlay() ? ", opening range shown" : "";
     const overlayLabel = this.algo
-      ? `, ${this.algo} overlay${rangeLabel} with ${actionCount.toLocaleString()} ${actionCount === 1 ? "action" : "actions"}`
+      ? `, ${this.algo} overlay with ${actionCount.toLocaleString()} ${actionCount === 1 ? "action" : "actions"}`
       : "";
     this.canvas.setAttribute(
       "aria-label",
@@ -491,42 +457,6 @@ class PriceChart {
     ctx.restore();
   }
 
-  drawOpeningRanges(ctx, segments, x, y) {
-    if (!segments.length) return;
-    const name = this.algo?.toUpperCase() || "ALGO";
-    const minutes = this.openingRangeOverlay()?.minutes || "";
-    ctx.save();
-    segments.forEach((range) => {
-      const startX = x(range.startIndex);
-      const endX = x(range.endIndex);
-      const highY = y(range.high);
-      const lowY = y(range.low);
-      const width = Math.max(1, endX - startX);
-
-      ctx.fillStyle = "rgba(244, 197, 106, 0.065)";
-      ctx.fillRect(startX, highY, width, Math.max(1, lowY - highY));
-      ctx.beginPath();
-      ctx.moveTo(startX, highY);
-      ctx.lineTo(endX, highY);
-      ctx.moveTo(startX, lowY);
-      ctx.lineTo(endX, lowY);
-      ctx.strokeStyle = "rgba(244, 197, 106, 0.72)";
-      ctx.lineWidth = 1;
-      ctx.setLineDash([4, 4]);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      if (width >= 78) {
-        ctx.fillStyle = "rgba(244, 197, 106, 0.86)";
-        ctx.font = "9px ui-monospace, SFMono-Regular, monospace";
-        ctx.textAlign = "right";
-        ctx.textBaseline = "top";
-        ctx.fillText(`${name} ${minutes}M RANGE`, endX - 4, highY + 4);
-      }
-    });
-    ctx.restore();
-  }
-
   draw() {
     const { width, height } = this.size();
     const ctx = this.context;
@@ -541,11 +471,6 @@ class PriceChart {
     const plotHeight = priceBottom - margin.top;
     const lows = bars.map((bar) => Number(bar.low));
     const highs = bars.map((bar) => Number(bar.high));
-    const openingRanges = this.openingRangeSegments(bars);
-    openingRanges.forEach((range) => {
-      lows.push(Number(range.low));
-      highs.push(Number(range.high));
-    });
     let minimum = Math.min(...lows);
     let maximum = Math.max(...highs);
     const priceSpan = maximum - minimum || Math.max(maximum * 0.01, 1);
@@ -610,8 +535,6 @@ class PriceChart {
         ctx.fillText(easternClock.format(dateFromEpoch(bars[index].ts)), x(index), height - 10);
       }
     }
-
-    this.drawOpeningRanges(ctx, openingRanges, x, y);
 
     const maximumVolume = Math.max(...bars.map((bar) => Number(bar.volume)), 1);
     bars.forEach((bar, index) => {
@@ -733,16 +656,6 @@ class PriceChart {
       createElement("span", "", `L ${formatPrice(bar.low)} · C ${formatPrice(bar.close)}`),
       createElement("span", "", `Vol ${compactFormat.format(bar.volume)}`),
     ];
-    const openingRange = this.openingRangeAt(bar.ts);
-    if (openingRange) {
-      contents.push(
-        createElement(
-          "span",
-          "algo-range",
-          `${this.algo.toUpperCase()} range ${formatPrice(openingRange.low)}–${formatPrice(openingRange.high)}`,
-        ),
-      );
-    }
     this.tradesAt(bar.ts).forEach((trade) => {
       const action = trade.action === "exit_all" ? "exit" : "entry";
       const direction = Number(trade.direction) < 0 ? "Short" : "Long";
@@ -991,16 +904,6 @@ function renderAlgoOverlay(payload = null) {
   if (!state.algo) return;
 
   $("#algo-overlay-name").textContent = state.algo.toUpperCase();
-  const payloadRange = (payload?.algo_overlays || []).find(
-    (overlayDefinition) => overlayDefinition.algo === state.algo && overlayDefinition.kind === "opening_range",
-  );
-  const algoDefinition = state.overview?.config?.algos?.[state.algo];
-  const configuredRange = (algoDefinition?.inputs || [])
-    .map((name) => state.overview?.config?.signals?.[name])
-    .find((definition) => definition?.function === "opening_range");
-  const rangeMinutes = payloadRange?.minutes || configuredRange?.params?.minutes || null;
-  $("#algo-range-legend").hidden = !rangeMinutes;
-  if (rangeMinutes) $("#algo-range-label").textContent = `${rangeMinutes}m range`;
   const actionCount = (payload?.trades || []).filter((trade) => trade.algo === state.algo).length;
   const rangeLabel = payload?.range === "HISTORY" ? "loaded history" : payload?.range;
   $("#algo-overlay-count").textContent = payload
