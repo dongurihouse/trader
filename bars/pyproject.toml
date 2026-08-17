@@ -2,7 +2,7 @@
 name = "bars"
 version = "0.1.0"
 description = "Always-on Robinhood equity minute-bar collector"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "httpx2>=2.5,<3",
     "mcp>=2,<3",
