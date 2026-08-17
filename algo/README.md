@@ -55,10 +55,12 @@ The service has these signal functions:
 | function | params | output |
 | --- | --- | --- |
 | `sma` | `field`, `period`, `include_interpolated` | number or `null` |
-| `session` | none | `{date, minute, to_close}` or `null` |
+| `session` | none | `{date, minute, to_close, ts, open_ts}` or `null` |
 | `opening_range` | `minutes` | `{high, low, range}` or `null` |
 | `rvol_open` | `cap_bars`, `baseline_sessions` | number or `null` |
 | `last_close` | `include_interpolated` | number or `null` |
+| `opening_sentiment` | `target_tickers`, `market_tickers`, `minutes`, `min_market_move_pct`, `require_target_agreement` | fixed opening direction, target agreement, and live pattern validity |
+| `pullback` | `early_minutes`, `early_window_minutes`, `late_window_minutes`, `entry_cutoff_minutes`, `baseline_sessions`, `min_baseline_sessions`, `percentile`, `min_extreme_distance_pct` | current countertrend move, prior-session threshold, and entry trigger |
 | `shape_v1` | `history_sessions`, `min_sessions`, `stride_minutes`, `shape_base_rate_w`, `age_halflife_days`, `support_k` | path funnel, eight shape probabilities, and evidence; otherwise `null` |
 
 Supported fields are `open`, `high`, `low`, `close`, and `volume`. Every read
@@ -81,6 +83,7 @@ It has these algo functions:
 | --- | --- | --- |
 | `crossover` | `fast`, `slow` | none |
 | `range_breakout` | `session`, `opening_range`, `rvol_open`, `last_close` | `direction`, `target_r`, `min_rvol`, `entry_cutoff_minutes`, `flat_minutes` |
+| `sentiment_pullback` | `session`, `opening_sentiment`, `pullback`, `last_close` | `early_minutes`, `early_hold_minutes`, `late_hold_minutes`, `take_profit_pct`, `stop_loss_pct`, `pattern_exit`, `flat_minutes`, `capital_fraction` |
 
 Every algo output is `[is_entry, is_close_all, direction]`. Direction is `1`
 for long, `-1` for short, and `0` when quiet. Both actions cannot be true. A
@@ -92,6 +95,16 @@ volume above `1.0`, and enters on the first close outside that range. The
 opposite range edge is the stop and the target is `2R`. It enters at most once
 per session, blocks new entries inside ten minutes to close, and closes any
 open unit five minutes before the configured regular or early close.
+
+`sentiment_pullback` trades SNDK only. It fixes the opening direction after five
+minutes from the median SPY, QQQ, and SOXX return, requires SNDK to agree, and
+then waits for an unusually large move against that direction. The move uses a
+five-minute window
+inside the first 30 minutes and a 30-minute window later. Its threshold uses
+only complete prior sessions. It enters at most once per session, never adds to
+an open unit, and exits on its configured close-based profit, close-based loss,
+time, market-pattern, or end-of-session rule. One unit maps to at most 50% of
+capital; this signal service does not place or size brokerage orders.
 
 Example:
 

@@ -1,5 +1,5 @@
 {
-  "version": 5,
+  "version": 6,
   "database": "../data/trader.sqlite3",
   "tickers": ["SNDK", "SNXX", "SNDQ", "MU", "SPY", "QQQ", "SOXX"],
   "early_closes": ["2026-11-27", "2026-12-24"],
@@ -136,6 +136,29 @@
         "include_interpolated": false
       }
     },
+    "opening_sentiment": {
+      "inputs": ["bars", "session"],
+      "params": {
+        "target_tickers": ["SNDK"],
+        "market_tickers": ["SPY", "QQQ", "SOXX"],
+        "minutes": 5,
+        "min_market_move_pct": 0.0,
+        "require_target_agreement": true
+      }
+    },
+    "pullback": {
+      "inputs": ["bars", "session", "opening_sentiment"],
+      "params": {
+        "early_minutes": 30,
+        "early_window_minutes": 5,
+        "late_window_minutes": 30,
+        "entry_cutoff_minutes": 60,
+        "baseline_sessions": 20,
+        "min_baseline_sessions": 5,
+        "percentile": 0.9,
+        "min_extreme_distance_pct": 0.5
+      }
+    },
     "shape": {
       "function": "shape_v1",
       "inputs": ["bars"],
@@ -159,6 +182,20 @@
         "min_rvol": 1.0,
         "entry_cutoff_minutes": 10,
         "flat_minutes": 5
+      },
+      "trades": true
+    },
+    "sentiment_pullback": {
+      "inputs": ["session", "opening_sentiment", "pullback", "last_close"],
+      "params": {
+        "early_minutes": 30,
+        "early_hold_minutes": 3,
+        "late_hold_minutes": 10,
+        "take_profit_pct": 1.0,
+        "stop_loss_pct": 1.5,
+        "pattern_exit": true,
+        "flat_minutes": 5,
+        "capital_fraction": 0.5
       },
       "trades": true
     }

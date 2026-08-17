@@ -57,6 +57,10 @@ METADATA_DEFAULTS = {
 _RVOL_BASELINES: dict[
     tuple[str, str, date, int, int], Optional[tuple[float, ...]]
 ] = {}
+_PULLBACK_BASELINES: dict[
+    tuple[str, str, date, int, int, int, int, int, int, float],
+    Optional[tuple[float, float]],
+] = {}
 _OUTPUT_SESSION_SEEDS: dict[
     tuple[str, str, str, str, int], tuple[tuple[int, float, int], ...]
 ] = {}
@@ -485,6 +489,8 @@ def _signal_session(
         "date": local_day.isoformat(),
         "minute": int((ts - session_open) // 60),
         "to_close": (session_close - ts) / 60.0,
+        "ts": ts,
+        "open_ts": session_open,
     }
 
 
@@ -598,6 +604,354 @@ def _signal_last_close(connection, ticker, ts, parameters, inputs, settings) -> 
     return float(row["close"]) if row else None
 
 
+def _ticker_list(value: Any, name: str, settings: Settings) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        raise EvaluationError("%s must be a non-empty ticker list" % name)
+    tickers: list[str] = []
+    for item in value:
+        ticker = item.strip().upper() if isinstance(item, str) else ""
+        if ticker not in settings.tickers:
+            raise EvaluationError(
+                "%s contains an unconfigured ticker: %r" % (name, item)
+            )
+        if ticker not in tickers:
+            tickers.append(ticker)
+    return tuple(tickers)
+
+
+def _session_return_pct(
+    connection: sqlite3.Connection,
+    ticker: str,
+    session_open: int,
+    through: int,
+) -> Optional[float]:
+    opening = connection.execute(
+        "SELECT open FROM bars WHERE ticker=? AND ts=? AND interpolated=0",
+        (ticker, session_open),
+    ).fetchone()
+    latest = connection.execute(
+        "SELECT close FROM bars WHERE ticker=? AND ts=? AND interpolated=0",
+        (ticker, through),
+    ).fetchone()
+    if opening is None or latest is None or float(opening["open"]) <= 0.0:
+        return None
+    return (float(latest["close"]) / float(opening["open"]) - 1.0) * 100.0
+
+
+def _signal_opening_sentiment(
+    connection, ticker, ts, parameters, inputs, settings
+) -> Optional[dict[str, Any]]:
+    session = inputs["session"]
+    if session is None:
+        return None
+    targets = _ticker_list(
+        parameters.get("target_tickers"), "target_tickers", settings
+    )
+    markets = _ticker_list(
+        parameters.get("market_tickers"), "market_tickers", settings
+    )
+    minutes = require_int(
+        parameters.get("minutes"), "minutes", error=EvaluationError
+    )
+    min_market_move = float(
+        require_float(
+            parameters.get("min_market_move_pct"),
+            "min_market_move_pct",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    require_agreement = parameters.get("require_target_agreement")
+    if not isinstance(require_agreement, bool):
+        raise EvaluationError("require_target_agreement must be boolean")
+    if ticker not in targets or int(session["minute"]) < minutes:
+        return None
+
+    session_open = int(session["open_ts"])
+    opening_end = session_open + (minutes - 1) * 60
+    market_opening_returns = [
+        _session_return_pct(connection, market, session_open, opening_end)
+        for market in markets
+    ]
+    target_return = _session_return_pct(
+        connection, ticker, session_open, opening_end
+    )
+    if target_return is None or any(
+        value is None for value in market_opening_returns
+    ):
+        return None
+    market_return = float(statistics.median(market_opening_returns))
+    market_direction = (
+        1
+        if market_return >= min_market_move and market_return > 0.0
+        else -1
+        if market_return <= -min_market_move and market_return < 0.0
+        else 0
+    )
+    agreed = market_direction != 0 and target_return * market_direction > 0.0
+    direction = market_direction if agreed or not require_agreement else 0
+
+    current_returns = [
+        _session_return_pct(connection, market, session_open, ts)
+        for market in markets
+    ]
+    current_market_return = (
+        float(statistics.median(current_returns))
+        if all(value is not None for value in current_returns)
+        else None
+    )
+    pattern_valid = bool(
+        direction
+        and current_market_return is not None
+        and current_market_return * direction > 0.0
+    )
+    return {
+        "direction": direction,
+        "market_direction": market_direction,
+        "market_return_pct": market_return,
+        "target_return_pct": target_return,
+        "target_agreed": agreed,
+        "current_market_return_pct": current_market_return,
+        "pattern_valid": pattern_valid,
+        "minutes": minutes,
+    }
+
+
+def _percentile(values: Sequence[float], quantile: float) -> float:
+    ordered = sorted(float(value) for value in values)
+    if not ordered:
+        raise EvaluationError("percentile requires at least one value")
+    position = (len(ordered) - 1) * quantile
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    portion = position - lower
+    return ordered[lower] + portion * (ordered[upper] - ordered[lower])
+
+
+def _prior_pullback_baseline(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    ticker: str,
+    local_day: date,
+    early_window: int,
+    late_window: int,
+    early_minutes: int,
+    entry_cutoff: int,
+    baseline_sessions: int,
+    min_baseline_sessions: int,
+    percentile: float,
+) -> Optional[tuple[float, float]]:
+    key = (
+        str(settings.database),
+        ticker,
+        local_day,
+        early_window,
+        late_window,
+        early_minutes,
+        entry_cutoff,
+        baseline_sessions,
+        min_baseline_sessions,
+        percentile,
+    )
+    if key in _PULLBACK_BASELINES:
+        return _PULLBACK_BASELINES[key]
+    early_values: list[float] = []
+    late_values: list[float] = []
+    complete_sessions = 0
+    candidate = local_day - timedelta(days=1)
+    for _ in range(baseline_sessions * 4 + 60):
+        probe = int(
+            datetime.combine(candidate, clock_time(12), tzinfo=EASTERN).timestamp()
+        )
+        _, session_open, session_close = _session_window(settings, probe)
+        rows = _session_bars(
+            connection,
+            ticker,
+            session_open,
+            session_close,
+            session_close - 1,
+            include_interpolated=False,
+        )
+        expected = (session_close - session_open) // 60
+        continuous = len(rows) == expected and all(
+            int(row["ts"]) == session_open + index * 60
+            for index, row in enumerate(rows)
+        )
+        if continuous:
+            early_stop = min(early_minutes, len(rows) - entry_cutoff)
+            for index in range(early_window, max(early_window, early_stop)):
+                early_values.append(
+                    abs(
+                        float(rows[index]["close"])
+                        / float(rows[index - early_window]["close"])
+                        - 1.0
+                    )
+                    * 100.0
+                )
+            late_start = max(early_minutes, late_window)
+            late_stop = max(late_start, len(rows) - entry_cutoff)
+            for index in range(late_start, late_stop):
+                late_values.append(
+                    abs(
+                        float(rows[index]["close"])
+                        / float(rows[index - late_window]["close"])
+                        - 1.0
+                    )
+                    * 100.0
+                )
+            complete_sessions += 1
+            if complete_sessions == baseline_sessions:
+                break
+        candidate -= timedelta(days=1)
+    if (
+        complete_sessions < min_baseline_sessions
+        or not early_values
+        or not late_values
+    ):
+        _PULLBACK_BASELINES[key] = None
+        return None
+    result = (
+        _percentile(early_values, percentile),
+        _percentile(late_values, percentile),
+    )
+    _PULLBACK_BASELINES[key] = result
+    return result
+
+
+def _signal_pullback(
+    connection, ticker, ts, parameters, inputs, settings
+) -> Optional[dict[str, Any]]:
+    session = inputs["session"]
+    sentiment = inputs["opening_sentiment"]
+    if session is None or sentiment is None:
+        return None
+    early_minutes = require_int(
+        parameters.get("early_minutes"), "early_minutes", error=EvaluationError
+    )
+    early_window = require_int(
+        parameters.get("early_window_minutes"),
+        "early_window_minutes",
+        error=EvaluationError,
+    )
+    late_window = require_int(
+        parameters.get("late_window_minutes"),
+        "late_window_minutes",
+        error=EvaluationError,
+    )
+    entry_cutoff = require_int(
+        parameters.get("entry_cutoff_minutes"),
+        "entry_cutoff_minutes",
+        minimum=0,
+        error=EvaluationError,
+    )
+    baseline_sessions = require_int(
+        parameters.get("baseline_sessions"),
+        "baseline_sessions",
+        error=EvaluationError,
+    )
+    min_baseline_sessions = require_int(
+        parameters.get("min_baseline_sessions"),
+        "min_baseline_sessions",
+        error=EvaluationError,
+    )
+    if min_baseline_sessions > baseline_sessions:
+        raise EvaluationError("min_baseline_sessions cannot exceed baseline_sessions")
+    percentile = float(
+        require_float(
+            parameters.get("percentile"),
+            "percentile",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    if percentile > 1.0:
+        raise EvaluationError("percentile must be <= 1")
+    min_extreme_distance = float(
+        require_float(
+            parameters.get("min_extreme_distance_pct"),
+            "min_extreme_distance_pct",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    minute = int(session["minute"])
+    direction = int(sentiment["direction"])
+    regime = "early" if minute < early_minutes else "late"
+    window = early_window if regime == "early" else late_window
+    current = connection.execute(
+        "SELECT close FROM bars WHERE ticker=? AND ts=? AND interpolated=0",
+        (ticker, ts),
+    ).fetchone()
+    previous = connection.execute(
+        "SELECT close FROM bars WHERE ticker=? AND ts=? AND interpolated=0",
+        (ticker, ts - window * 60),
+    ).fetchone()
+    if current is None:
+        return None
+    price = float(current["close"])
+    movement = (
+        (price / float(previous["close"]) - 1.0) * 100.0
+        if previous is not None and float(previous["close"]) > 0.0
+        else None
+    )
+    local_day, session_open, _ = _session_window(settings, ts)
+    extremes = connection.execute(
+        """
+        SELECT MAX(high) AS high,MIN(low) AS low
+        FROM bars
+        WHERE ticker=? AND ts>=? AND ts<=? AND interpolated=0
+        """,
+        (ticker, session_open, ts),
+    ).fetchone()
+    running_high = float(extremes["high"]) if extremes["high"] is not None else price
+    running_low = float(extremes["low"]) if extremes["low"] is not None else price
+    distance = (
+        (running_high / price - 1.0) * 100.0
+        if direction == 1 and price > 0.0
+        else (price / running_low - 1.0) * 100.0
+        if direction == -1 and running_low > 0.0
+        else 0.0
+    )
+    baseline = _prior_pullback_baseline(
+        connection,
+        settings,
+        ticker,
+        local_day,
+        early_window,
+        late_window,
+        early_minutes,
+        entry_cutoff,
+        baseline_sessions,
+        min_baseline_sessions,
+        percentile,
+    )
+    threshold = (
+        baseline[0 if regime == "early" else 1] if baseline is not None else None
+    )
+    trigger = bool(
+        direction
+        and minute > int(sentiment["minutes"])
+        and float(session["to_close"]) > entry_cutoff
+        and bool(sentiment["pattern_valid"])
+        and movement is not None
+        and threshold is not None
+        and movement * direction <= -threshold
+        and distance >= min_extreme_distance
+    )
+    return {
+        "trigger": trigger,
+        "direction": direction,
+        "regime": regime,
+        "window_minutes": window,
+        "move_pct": movement,
+        "threshold_pct": threshold,
+        "distance_from_extreme_pct": distance,
+        "pattern_valid": bool(sentiment["pattern_valid"]),
+        "price": price,
+        "ts": ts,
+    }
+
+
 def _signal_shape_v1(connection, ticker, ts, parameters, inputs, settings) -> Any:
     return shape_v1(
         connection,
@@ -618,6 +972,12 @@ SIGNAL_FUNCTIONS: dict[str, SignalSpec] = {
     "opening_range": SignalSpec(_signal_opening_range, ("bars", "session")),
     "rvol_open": SignalSpec(_signal_rvol_open, ("bars", "session")),
     "last_close": SignalSpec(_signal_last_close, ("bars",)),
+    "opening_sentiment": SignalSpec(
+        _signal_opening_sentiment, ("bars", "session")
+    ),
+    "pullback": SignalSpec(
+        _signal_pullback, ("bars", "session", "opening_sentiment")
+    ),
     "shape_v1": SignalSpec(_signal_shape_v1, ("bars",)),
 }
 
@@ -709,9 +1069,101 @@ def _algo_range_breakout(context: AlgoContext) -> tuple[bool, bool, int]:
     return False, False, 0
 
 
+def _algo_sentiment_pullback(context: AlgoContext) -> tuple[bool, bool, int]:
+    session_name, sentiment_name, pullback_name, price_name = context.inputs
+    session = context.inputs[session_name]
+    sentiment = context.inputs[sentiment_name]
+    pullback = context.inputs[pullback_name]
+    price = require_float(
+        context.inputs[price_name], "last_close", nullable=True, error=EvaluationError
+    )
+    early_minutes = require_int(
+        context.parameters.get("early_minutes"),
+        "early_minutes",
+        error=EvaluationError,
+    )
+    early_hold = require_int(
+        context.parameters.get("early_hold_minutes"),
+        "early_hold_minutes",
+        error=EvaluationError,
+    )
+    late_hold = require_int(
+        context.parameters.get("late_hold_minutes"),
+        "late_hold_minutes",
+        error=EvaluationError,
+    )
+    take_profit = float(
+        require_float(
+            context.parameters.get("take_profit_pct"),
+            "take_profit_pct",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    stop_loss = float(
+        require_float(
+            context.parameters.get("stop_loss_pct"),
+            "stop_loss_pct",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    flat_minutes = float(
+        require_float(
+            context.parameters.get("flat_minutes"),
+            "flat_minutes",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    capital_fraction = float(
+        require_float(
+            context.parameters.get("capital_fraction"),
+            "capital_fraction",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    if capital_fraction <= 0.0 or capital_fraction > 0.5:
+        raise EvaluationError("capital_fraction must be > 0 and <= 0.5")
+    pattern_exit = context.parameters.get("pattern_exit")
+    if not isinstance(pattern_exit, bool):
+        raise EvaluationError("pattern_exit must be boolean")
+    if session is None or price is None:
+        return False, False, 0
+
+    if context.open_entries:
+        entry = context.open_entries[0]
+        direction = int(entry["direction"])
+        elapsed = (int(session["ts"]) - int(entry["ts"])) / 60.0
+        entry_minute = (int(entry["ts"]) - int(session["open_ts"])) / 60.0
+        hold_minutes = early_hold if entry_minute < early_minutes else late_hold
+        pnl_pct = direction * (float(price) / float(entry["price"]) - 1.0) * 100.0
+        pattern_broke = (
+            pattern_exit
+            and (sentiment is None or not bool(sentiment["pattern_valid"]))
+        )
+        if (
+            (take_profit > 0.0 and pnl_pct >= take_profit)
+            or (stop_loss > 0.0 and pnl_pct <= -stop_loss)
+            or elapsed >= hold_minutes
+            or pattern_broke
+            or float(session["to_close"]) <= flat_minutes
+        ):
+            return False, True, direction
+        return False, False, 0
+
+    if any(_algo_output(row["output"])[0] for row in context.session_outputs):
+        return False, False, 0
+    if pullback is not None and bool(pullback["trigger"]):
+        return True, False, int(pullback["direction"])
+    return False, False, 0
+
+
 ALGO_FUNCTIONS: dict[str, AlgoSpec] = {
     "crossover": AlgoSpec(_algo_crossover, 2),
     "range_breakout": AlgoSpec(_algo_range_breakout, 4),
+    "sentiment_pullback": AlgoSpec(_algo_sentiment_pullback, 4),
 }
 
 
@@ -1088,6 +1540,7 @@ def cycle(
     config_path: Path, stop_event: Optional[threading.Event] = None
 ) -> tuple[dict[str, int], Settings]:
     _RVOL_BASELINES.clear()
+    _PULLBACK_BASELINES.clear()
     _OUTPUT_SESSION_SEEDS.clear()
     clear_shape_cache()
     config_path = config_path.resolve()
