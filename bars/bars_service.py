@@ -37,8 +37,8 @@ from mcp.shared.auth import (
 from pydantic import AnyUrl
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_CONFIG_PATH = ROOT / "config.json"
-SCHEMA_PATH = ROOT / "schema.sql"
+DEFAULT_CONFIG_PATH = ROOT / "config" / "config.json"
+SCHEMA_PATH = ROOT / "config" / "schema.sql"
 EASTERN = ZoneInfo("America/New_York")
 UTC = timezone.utc
 SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.-]{0,14}$")
@@ -148,13 +148,13 @@ def load_settings(path: Path) -> Settings:
     database_value = raw.get("database", "data/trader.sqlite3")
     database = Path(database_value).expanduser()
     if not database.is_absolute():
-        database = path.parent / database
+        database = (path.parent / database).resolve()
     oauth_store_value = provider.get(
         "oauth_store", "data/robinhood_oauth.json"
     )
     oauth_store = Path(oauth_store_value).expanduser()
     if not oauth_store.is_absolute():
-        oauth_store = path.parent / oauth_store
+        oauth_store = (path.parent / oauth_store).resolve()
 
     return Settings(
         tickers=tuple(tickers),
