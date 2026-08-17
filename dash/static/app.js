@@ -4,6 +4,7 @@ const state = {
   overview: null,
   ticker: null,
   range: "ALL",
+  style: "line",
   bars: null,
   chartRequest: 0,
 };
@@ -82,6 +83,7 @@ class PriceChart {
     this.canvas = canvas;
     this.tooltip = tooltip;
     this.context = canvas.getContext("2d");
+    this.style = "line";
     this.payload = null;
     this.hoverIndex = null;
     this.bounds = null;
@@ -96,13 +98,25 @@ class PriceChart {
     this.payload = payload;
     this.hoverIndex = null;
     this.tooltip.hidden = true;
+    this.updateLabel();
+    this.draw();
+  }
+
+  setStyle(style) {
+    if (!['line', 'candles'].includes(style)) return;
+    this.style = style;
+    this.updateLabel();
+    this.draw();
+  }
+
+  updateLabel() {
+    const label = this.style === "candles" ? "candlestick" : "line";
     this.canvas.setAttribute(
       "aria-label",
-      payload?.bars?.length
-        ? `${payload.ticker} price chart, ${payload.source_count.toLocaleString()} minute bars in the ${payload.range} range`
-        : `${payload?.ticker || "Ticker"} price chart with no available bars`,
+      this.payload?.bars?.length
+        ? `${this.payload.ticker} ${label} chart, ${this.payload.source_count.toLocaleString()} minute bars in the ${this.payload.range} range`
+        : `${this.payload?.ticker || "Ticker"} ${label} chart with no available bars`,
     );
-    this.draw();
   }
 
   size() {
@@ -199,36 +213,20 @@ class PriceChart {
     fill.addColorStop(0, rising ? "rgba(216,255,114,0.17)" : "rgba(255,123,115,0.15)");
     fill.addColorStop(1, "rgba(16,23,33,0)");
 
-    ctx.beginPath();
-    bars.forEach((bar, index) => {
-      const pointX = x(index);
-      const pointY = y(bar.close);
-      if (index === 0) ctx.moveTo(pointX, pointY);
-      else ctx.lineTo(pointX, pointY);
-    });
-    ctx.lineTo(x(bars.length - 1), priceBottom);
-    ctx.lineTo(x(0), priceBottom);
-    ctx.closePath();
-    ctx.fillStyle = fill;
-    ctx.fill();
-
-    if (step >= 3.2) {
-      const candleWidth = Math.max(1.5, Math.min(6, step * 0.6));
+    if (this.style === "line") {
+      ctx.beginPath();
       bars.forEach((bar, index) => {
         const pointX = x(index);
-        const up = Number(bar.close) >= Number(bar.open);
-        ctx.strokeStyle = up ? "#d8ff72" : "#ff7b73";
-        ctx.fillStyle = up ? "#d8ff72" : "#ff7b73";
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(pointX, y(bar.high));
-        ctx.lineTo(pointX, y(bar.low));
-        ctx.stroke();
-        const top = Math.min(y(bar.open), y(bar.close));
-        const bodyHeight = Math.max(1.2, Math.abs(y(bar.open) - y(bar.close)));
-        ctx.fillRect(pointX - candleWidth / 2, top, candleWidth, bodyHeight);
+        const pointY = y(bar.close);
+        if (index === 0) ctx.moveTo(pointX, pointY);
+        else ctx.lineTo(pointX, pointY);
       });
-    } else {
+      ctx.lineTo(x(bars.length - 1), priceBottom);
+      ctx.lineTo(x(0), priceBottom);
+      ctx.closePath();
+      ctx.fillStyle = fill;
+      ctx.fill();
+
       ctx.beginPath();
       bars.forEach((bar, index) => {
         if (index === 0) ctx.moveTo(x(index), y(bar.close));
@@ -238,6 +236,34 @@ class PriceChart {
       ctx.lineWidth = 1.5;
       ctx.lineJoin = "round";
       ctx.stroke();
+    } else {
+      const candleWidth = Math.max(0.55, Math.min(6, step * 0.7));
+      const candleLineWidth = Math.max(0.5, Math.min(1, step * 0.55));
+      const directions = [
+        { rising: true, color: "#d8ff72" },
+        { rising: false, color: "#ff7b73" },
+      ];
+      directions.forEach(({ rising: direction, color: candleColor }) => {
+        ctx.beginPath();
+        bars.forEach((bar, index) => {
+          const isRising = Number(bar.close) >= Number(bar.open);
+          if (isRising !== direction) return;
+          const pointX = x(index);
+          ctx.moveTo(pointX, y(bar.high));
+          ctx.lineTo(pointX, y(bar.low));
+        });
+        ctx.strokeStyle = candleColor;
+        ctx.lineWidth = candleLineWidth;
+        ctx.stroke();
+        ctx.fillStyle = candleColor;
+        bars.forEach((bar, index) => {
+          const isRising = Number(bar.close) >= Number(bar.open);
+          if (isRising !== direction) return;
+          const top = Math.min(y(bar.open), y(bar.close));
+          const bodyHeight = Math.max(1, Math.abs(y(bar.open) - y(bar.close)));
+          ctx.fillRect(x(index) - candleWidth / 2, top, candleWidth, bodyHeight);
+        });
+      });
     }
 
     if (this.hoverIndex !== null) {
@@ -394,6 +420,18 @@ $("#range-control").addEventListener("click", (event) => {
     candidate.classList.toggle("active", candidate === button);
   });
   loadBars();
+});
+
+$("#style-control").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-style]");
+  if (!button || button.dataset.style === state.style) return;
+  state.style = button.dataset.style;
+  document.querySelectorAll("#style-control button").forEach((candidate) => {
+    const active = candidate === button;
+    candidate.classList.toggle("active", active);
+    candidate.setAttribute("aria-pressed", String(active));
+  });
+  chart.setStyle(state.style);
 });
 
 $("#refresh-button").addEventListener("click", () => loadOverview());

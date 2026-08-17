@@ -750,7 +750,14 @@ h1 em {
   color: var(--red);
 }
 
-.range-control {
+.chart-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.range-control,
+.style-control {
   display: flex;
   gap: 3px;
   padding: 3px;
@@ -759,7 +766,8 @@ h1 em {
   border-radius: 10px;
 }
 
-.range-control button {
+.range-control button,
+.style-control button {
   min-width: 46px;
   padding: 8px 10px;
   color: var(--muted);
@@ -772,11 +780,13 @@ h1 em {
   cursor: pointer;
 }
 
-.range-control button:hover {
+.range-control button:hover,
+.style-control button:hover {
   color: var(--text);
 }
 
-.range-control button.active {
+.range-control button.active,
+.style-control button.active {
   color: var(--ink);
   background: var(--text);
 }
@@ -1714,11 +1724,18 @@ pre {
     display: grid;
   }
 
-  .range-control {
+  .chart-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .range-control,
+  .style-control {
     width: 100%;
   }
 
-  .range-control button {
+  .range-control button,
+  .style-control button {
     flex: 1;
   }
 

@@ -46,6 +46,7 @@ and refreshes the live view every 30 seconds.
 
 - Opens with all stored minute data across past and current sessions.
 - Optional one-day, five-session, and one-month ranges.
+- Switchable line and candlestick chart styles.
 - Ticker switching from the configured ticker list.
 - Current price, session change, open, high, low, and volume.
 - Automatic refresh every 30 seconds.
