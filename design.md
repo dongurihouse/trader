@@ -9,15 +9,16 @@ lives in one SQLite database. Each table has exactly one writing service;
 every other part reads it read-only. Parts communicate through data, never
 through calls between services.
 
-| table   | writing service       | readers         |
-| ------- | --------------------- | --------------- |
-| bars    | bars                  | algo, dashboard |
-| bar_jobs | bars                 | bars            |
-| events  | events                | algo, dashboard |
-| trades  | algo                  | dashboard       |
-| outputs | algo                  | dashboard       |
-| configs | algo                  | dashboard       |
-| logs    | every service, own rows only | dashboard |
+| table        | writing service       | readers         |
+| ------------ | --------------------- | --------------- |
+| bars         | bars                  | algo, dashboard |
+| bar_jobs     | bars                  | bars            |
+| bar_metadata | bars                  | algo, dashboard |
+| events       | events                | algo, dashboard |
+| trades       | algo                  | dashboard       |
+| outputs      | algo                  | dashboard       |
+| configs      | algo                  | dashboard       |
+| logs         | every service, own rows only | dashboard |
 
 One shared config file holds the ticker list, the signal and algo
 definitions, the early-close days, the live-polling window, and the
@@ -67,6 +68,18 @@ Nightly sweep:
 - Store every returned bar and preserve the `interpolated` flag so each reader
   can decide how to use it.
 
+Bar metadata:
+
+- The provider also computes per-bar values over the same bars, such as rsi
+  and macd. Bars pulls the values that config declares and writes them to
+  `bar_metadata`.
+- A row is one value for one bar. The key is ticker, timestamp, name, and
+  params, so two periods of the same name live side by side.
+- Bars fetches a range and stores the series, the same way it fetches and
+  stores bars. The cadence is the sweep, not the minute poll.
+- Bars is the only process that holds the provider token. No other service
+  calls the provider, and no service calls bars.
+
 ## 2. events (service)
 
 Deferred: this service is not part of the current build. The section below
@@ -105,11 +118,11 @@ algo; a list restricts the call to those algos.
 
 ### The core
 
-- No clock, no side effects. Data input: the bars, events, and trades
-  tables, read-only.
+- No clock, no side effects. Data input: the bars, bar_metadata, events, and
+  trades tables, read-only.
 - Two layers with a strict rule: a signal (vwap, sma, and so on) queries
-  bars, the events table, and other signals; an algo queries signal
-  outputs, the outputs of other algos, and its own prior outputs.
+  bars, bar metadata, the events table, and other signals; an algo queries
+  signal outputs, the outputs of other algos, and its own prior outputs.
 - Algos are independent. Nothing combines them; to combine behavior,
   compose an algo from other algos. Every entry and exit belongs to
   exactly one algo. An algo that another algo reads evaluates like a
@@ -147,6 +160,8 @@ algo; a list restricts the call to those algos.
   ```json
   "signals": {
     "sma20": { "inputs": ["bars"], "params": { "length": 20 } },
+    "rsi14": { "inputs": ["bar_metadata"],
+               "params": { "name": "rsi", "period": 14 } },
     "shape": { "inputs": ["bars"], "function": "shape_v1", "params": {} }
   },
   "algos": {
@@ -160,6 +175,9 @@ algo; a list restricts the call to those algos.
   the version.
 - `inputs` declares what a node reads. `trades` marks an algo that writes
   trade rows; an algo without it evaluates like a signal.
+- A `bar_metadata` input is also the fetch order. Bars reads the same config
+  file and keeps the declared names populated. No service requests a fetch.
+  The `name` param is the provider value; the rest are its parameters.
 - All parameters live in `params`. A complicated node adds `function`,
   which points to a function in the code, and the function hard-codes
   nothing.
@@ -287,6 +305,16 @@ CREATE TABLE bar_jobs (
     CHECK (completed_at IS NULL OR progress_ts IS NOT NULL)
 );
 
+CREATE TABLE bar_metadata (
+    ticker     TEXT    NOT NULL,
+    ts         INTEGER NOT NULL,  -- the bar it belongs to, epoch seconds, UTC
+    name       TEXT    NOT NULL,  -- the provider value, e.g. 'rsi'
+    params     TEXT    NOT NULL,  -- the request parameters, JSON
+    value      TEXT    NOT NULL,  -- JSON
+    fetched_at INTEGER NOT NULL,  -- write time, epoch seconds, UTC
+    PRIMARY KEY (ticker, ts, name, params)
+);
+
 CREATE TABLE events (
     ticker       TEXT    NOT NULL,
     event        TEXT    NOT NULL,  -- kind, e.g. 'earnings'
@@ -345,6 +373,9 @@ Notes:
   never control work.
 - `bars.interpolated` preserves Robinhood's gap-fill flag; no returned bar is
   discarded at ingest.
+- `bar_metadata` holds provider values, not computed ones. `params` is in the
+  key, so one name can hold two parameter sets. A signal that a function can
+  compute from bars belongs in `outputs`, not here.
 - `trades` binds every row to one algo; nothing consolidates across algos.
   No price (recomputable) and no size (a row is one unit).
 - `outputs` grows fastest; `logs` grows steadily.
@@ -362,11 +393,13 @@ flowchart TB
 
     BARS --> BT[(bars)]
     BARS --> BJ[(bar_jobs)]
+    BARS --> BM[(bar_metadata)]
     EVENTS --> ET[(events)]
 
     subgraph DB [one database — one writing service per table]
         BT
         BJ
+        BM
         ET
         TR[(trades)]
         OUT[(outputs)]
@@ -379,6 +412,7 @@ flowchart TB
     end
 
     BT -. read only .-> CORE
+    BM -. read only .-> CORE
     ET -. read only .-> CORE
     LOOP --> TR
     LOOP --> OUT
@@ -395,6 +429,9 @@ flowchart TB
    or in real time. An output updates in place per version; old versions
    stay for reference.
 3. No version hash: the user bumps the version field in config by hand.
+4. Bar metadata comes from bars, never from algo. The handoff is a table, not
+   a call, so the core stays deterministic and each service restarts alone.
+   Config declares what to pull; nothing requests a fetch.
 
 ## Open
 
