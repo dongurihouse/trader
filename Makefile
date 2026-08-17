@@ -14,7 +14,7 @@ auth: sync
 
 install: sync
 	@mkdir -p data log "$(HOME)/Library/LaunchAgents"
-	@cp bars/launchd/$(LABEL).plist "$(PLIST)"
+	@cp launchd/$(LABEL).plist "$(PLIST)"
 	@launchctl bootout gui/$(UID)/$(LABEL) >/dev/null 2>&1 || true
 	@launchctl bootstrap gui/$(UID) "$(PLIST)"
 	@echo "started $(LABEL)"
