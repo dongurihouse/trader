@@ -16,6 +16,10 @@ outputs only. An algo without `"trades": true` also writes outputs only.
 No strategy is enabled in the default config. Add definitions and bump
 `version` before installing the service.
 
+The service exposes read-only process health at
+`http://127.0.0.1:8791/health` for Dash. It stores completed work summaries,
+warnings, and errors in `logs`. It does not write heartbeat or idle-cycle rows.
+
 ## Config
 
 `signals` and `algos` are objects keyed by node name. Each node has this shape:
@@ -96,7 +100,8 @@ Example:
 
 The rest of the shared config, including `database`, `tickers`, and `algo`,
 stays in the same file. `algo.evaluation_days` bounds the cache fill and
-`algo.poll_seconds` sets the service cadence.
+`algo.poll_seconds` sets the service cadence. `algo.api_port` sets the
+loopback health API port.
 
 The service stores the full config the first time it sees a version. If the
 file later changes without a version bump, it logs a warning and keeps using

@@ -404,7 +404,10 @@ class DashboardData:
         return {
             "ok": True,
             "database": "read-only",
-            "services": {"bars": self._bars_health(self.config())},
+            "services": {
+                "bars": self._service_health(self.config(), "bars", 8789),
+                "algo": self._service_health(self.config(), "algo", 8791),
+            },
         }
 
     def _quote(self, connection: sqlite3.Connection, ticker: str) -> dict[str, Any]:
@@ -461,7 +464,7 @@ class DashboardData:
                            PARTITION BY service ORDER BY ts DESC
                        ) AS position
                 FROM logs
-                WHERE service != 'bars'
+                WHERE service NOT IN ('bars', 'algo')
             )
             WHERE position = 1
             ORDER BY service
@@ -471,9 +474,7 @@ class DashboardData:
         services = []
         for row in rows:
             age = max(0, now - int(row["ts"]))
-            if row["service"] == "algo":
-                cadence = config.get("algo", {}).get("poll_seconds", 30)
-            elif row["service"] == "events":
+            if row["service"] == "events":
                 cadence = 86_400
             else:
                 cadence = 60
@@ -494,24 +495,31 @@ class DashboardData:
                     "state": state,
                 }
             )
-        services.append(self._bars_health(config))
+        services.extend(
+            (
+                self._service_health(config, "bars", 8789),
+                self._service_health(config, "algo", 8791),
+            )
+        )
         services.sort(key=lambda service: service["service"])
         return services
 
     @staticmethod
-    def _bars_health(config: dict[str, Any]) -> dict[str, Any]:
+    def _service_health(
+        config: dict[str, Any], service: str, default_port: int
+    ) -> dict[str, Any]:
         now = int(datetime.now(tz=UTC).timestamp())
         try:
-            port = int(config.get("bars", {}).get("api_port", 8789))
+            port = int(config.get(service, {}).get("api_port", default_port))
             with urlopen("http://127.0.0.1:%d/health" % port, timeout=0.5) as response:
                 payload = json.loads(response.read())
             if not isinstance(payload, dict):
-                raise ValueError("invalid Bars health response")
-            if payload.get("ok") is not True or payload.get("service") != "bars":
-                raise ValueError("invalid Bars health response")
+                raise ValueError("invalid health response")
+            if payload.get("ok") is not True or payload.get("service") != service:
+                raise ValueError("invalid health response")
             timestamp = int(payload.get("ts", now))
             return {
-                "service": "bars",
+                "service": service,
                 "ts": timestamp,
                 "level": "info",
                 "message": "health API: %s" % payload.get("status", "running"),
@@ -522,7 +530,7 @@ class DashboardData:
             }
         except (json.JSONDecodeError, OSError, TypeError, ValueError):
             return {
-                "service": "bars",
+                "service": service,
                 "ts": now,
                 "level": "error",
                 "message": "health API unavailable",

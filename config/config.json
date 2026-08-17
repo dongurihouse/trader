@@ -28,6 +28,7 @@
     }
   },
   "algo": {
+    "api_port": 8791,
     "evaluation_days": 60,
     "poll_seconds": 30
   },

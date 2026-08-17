@@ -7,6 +7,7 @@ import argparse
 import json
 import logging
 import math
+import os
 import re
 import signal
 import sqlite3
@@ -14,8 +15,10 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
+from urllib.parse import urlparse
 
 
 ROOT = Path(__file__).resolve().parent
@@ -41,6 +44,7 @@ class Settings:
     tickers: tuple[str, ...]
     evaluation_days: int
     poll_seconds: int
+    api_port: int
     signals: Mapping[str, Mapping[str, Any]]
     algos: Mapping[str, Mapping[str, Any]]
     content: str
@@ -62,9 +66,9 @@ def _json(value: Any) -> str:
         raise ConfigError("value is not finite JSON") from exc
 
 
-def _positive_int(value: Any, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ConfigError("%s must be a positive integer" % name)
+def _positive_int(value: Any, name: str, minimum: int = 1) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ConfigError("%s must be an integer >= %d" % (name, minimum))
     return value
 
 
@@ -175,6 +179,7 @@ def load_settings(
         tickers=tuple(normalized),
         evaluation_days=_positive_int(algo.get("evaluation_days", 60), "algo.evaluation_days"),
         poll_seconds=_positive_int(algo.get("poll_seconds", 30), "algo.poll_seconds"),
+        api_port=_positive_int(algo.get("api_port", 8791), "algo.api_port", 1024),
         signals=_nodes(document, "signals"),
         algos=_nodes(document, "algos"),
         content=_json(document),
@@ -573,7 +578,6 @@ def cycle(config_path: Path) -> tuple[dict[str, int], Settings]:
     connection = _connect(current.database)
     try:
         now = int(time.time())
-        _log(connection, "info", "heartbeat", now)
         row = connection.execute(
             "SELECT 1 FROM configs WHERE version=?", (current.version,)
         ).fetchone()
@@ -604,9 +608,12 @@ def cycle(config_path: Path) -> tuple[dict[str, int], Settings]:
         message = "cycle complete pairs=%d outputs=%d entries=%d exits=%d" % (
             stats["pairs"], stats["outputs"], stats["entries"], stats["exits"]
         )
-        _log(connection, "info", message)
-        connection.commit()
-        logging.info(message)
+        if stats["pairs"]:
+            _log(connection, "info", message)
+            connection.commit()
+            logging.info(message)
+        else:
+            logging.debug(message)
         return stats, settings
     finally:
         connection.close()
@@ -660,7 +667,19 @@ def status(settings: Settings) -> str:
 class Service:
     def __init__(self, config_path: Path):
         self.config_path = config_path.resolve()
+        self.settings = load_settings(self.config_path)
         self.stop_event = threading.Event()
+        self.started_at = int(time.time())
+
+    def health(self) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "service": "algo",
+            "status": "running",
+            "ts": int(time.time()),
+            "started_at": self.started_at,
+            "pid": os.getpid(),
+        }
 
     def stop(self, signum=None, frame=None) -> None:
         self.stop_event.set()
@@ -668,17 +687,53 @@ class Service:
     def run(self) -> None:
         signal.signal(signal.SIGINT, self.stop)
         signal.signal(signal.SIGTERM, self.stop)
+        health_server = ThreadingHTTPServer(
+            ("127.0.0.1", self.settings.api_port), _HealthHandler
+        )
+        health_server.service = self
+        health_thread = threading.Thread(
+            target=health_server.serve_forever,
+            name="algo-health-api",
+            daemon=True,
+        )
+        health_thread.start()
         delay = 30
-        _best_effort_log(self.config_path, "info", "service started")
-        while not self.stop_event.is_set():
-            try:
-                _, settings = cycle(self.config_path)
-                delay = settings.poll_seconds
-            except Exception as exc:
-                logging.exception("cycle failed")
-                _best_effort_log(self.config_path, "error", "cycle failed: %s" % exc)
-            self.stop_event.wait(delay)
-        _best_effort_log(self.config_path, "info", "service stopped")
+        try:
+            logging.info("service started api=127.0.0.1:%d", self.settings.api_port)
+            _best_effort_log(self.config_path, "info", "service started")
+            while not self.stop_event.is_set():
+                try:
+                    _, settings = cycle(self.config_path)
+                    delay = settings.poll_seconds
+                except Exception as exc:
+                    logging.exception("cycle failed")
+                    _best_effort_log(self.config_path, "error", "cycle failed: %s" % exc)
+                self.stop_event.wait(delay)
+            _best_effort_log(self.config_path, "info", "service stopped")
+        finally:
+            health_server.shutdown()
+            health_server.server_close()
+            health_thread.join(timeout=2)
+
+
+class _HealthHandler(BaseHTTPRequestHandler):
+    server_version = "AlgoHealth/1.0"
+
+    def do_GET(self) -> None:  # noqa: N802
+        if urlparse(self.path).path != "/health":
+            self.send_error(404)
+            return
+        body = json.dumps(
+            self.server.service.health(), separators=(",", ":")
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args) -> None:
+        return
 
 
 def _timestamp(value: str) -> int:

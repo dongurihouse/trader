@@ -2,7 +2,8 @@
 
 This is a local, read-only market chart for the shared trading database. It
 reads the database path and ticker list from `config/config.json`. It does not
-write to SQLite. It calls the Bars loopback health API only for service status.
+write to SQLite. It calls the Bars and Algo loopback health APIs only for
+service status.
 
 ## Install as a service
 
@@ -40,8 +41,8 @@ python3 dash/server.py --config /absolute/path/to/config.json --host 0.0.0.0 --p
 
 The server uses only the Python standard library. It opens SQLite in read-only
 mode with `PRAGMA query_only = ON`, serves the interface from `dash/static`,
-refreshes the live view every 30 seconds, and reads Bars status from the
-loopback port configured by `bars.api_port`.
+refreshes the live view every 30 seconds, and reads Bars and Algo status from
+the loopback ports configured by `bars.api_port` and `algo.api_port`.
 
 ## Chart
 

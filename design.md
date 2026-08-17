@@ -263,11 +263,12 @@ Ad-hoc views may call the core directly; the call writes nothing.
 
 ## Service status and logs
 
-Bars exposes `GET /health` on a loopback-only port. Dash calls it to check
-process liveness; the call writes nothing. Bars appends only run summaries and
-problems to the logs table, not periodic heartbeats. The dashboard reads logs
-for history, warnings, and errors. The table remains safe because it is
-append-only and each service writes only rows tagged with its own name.
+Bars and Algo each expose `GET /health` on a loopback-only port. Dash calls
+them to check process liveness; the calls write nothing. Each service appends
+only completed work summaries and problems to the logs table, not periodic
+heartbeats or idle-cycle rows. The dashboard reads logs for history, warnings,
+and errors. The table remains safe because it is append-only and each service
+writes only rows tagged with its own name.
 
 ## Database schema
 
@@ -420,6 +421,7 @@ flowchart TB
     BARS & EVENTS & LOOP --> LG
     DB -. read only .-> DASH[dashboard<br/>read-only webserver]
     BARS -. GET /health .-> DASH
+    LOOP -. GET /health .-> DASH
 ```
 
 ## Decisions (2026-08-17)
