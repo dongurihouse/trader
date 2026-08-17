@@ -837,7 +837,8 @@ function renderDateStrip(payload) {
   const previousScroll = strip.scrollLeft;
   const wasAtEnd = !hadSessions
     || strip.scrollLeft + strip.clientWidth >= strip.scrollWidth - 12;
-  state.sessions = sessionDateRanges(payload?.bars || []);
+  state.sessions = sessionDateRanges(payload?.bars || [])
+    .sort((left, right) => left.ts - right.ts);
 
   if (!state.sessions.length) {
     strip.replaceChildren(createElement("span", "date-strip-loading", "No dates available"));
@@ -1008,10 +1009,14 @@ async function loadBars({ quiet = false } = {}) {
   try {
     const payload = await api(`/api/bars?ticker=${encodeURIComponent(state.ticker)}&range=${state.range}`);
     if (request !== state.chartRequest) return;
+    const shouldFocusLatest = state.bars?.ticker !== payload.ticker;
     state.bars = payload;
     renderAlgoOverlay(payload);
     renderDateStrip(payload);
     chart.setData(payload);
+    if (shouldFocusLatest && state.sessions.length) {
+      focusDate(state.sessions.at(-1).date);
+    }
     $("#chart-empty").hidden = payload.bars.length > 0;
     $("#stat-coverage").textContent = formatCoverage(payload);
   } catch (error) {
