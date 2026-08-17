@@ -13,8 +13,7 @@ backtest path.
 Only a ticker's newest stored bar can create a trade. Older evaluations write
 outputs only. An algo without `"trades": true` also writes outputs only.
 
-No strategy is enabled in the default config. Add definitions and bump
-`version` before installing the service.
+The default config enables the two-sided `orb5` opening-range breakout.
 
 The service exposes read-only process health at
 `http://127.0.0.1:8791/health` for Dash. It stores completed work summaries,
@@ -48,24 +47,39 @@ its ticker and timestamp. Its `params.name` selects the indicator and the other
 params select its parameter set. Single-output and multi-output indicators both
 return JSON objects.
 
-The first service slice has one signal function:
+The service has these signal functions:
 
 | function | params | output |
 | --- | --- | --- |
 | `sma` | `field`, `period`, `include_interpolated` | number or `null` |
+| `session` | none | `{date, minute, to_close}` or `null` |
+| `opening_range` | `minutes` | `{high, low, range}` or `null` |
+| `rvol_open` | `cap_bars`, `baseline_sessions` | number or `null` |
+| `last_close` | `include_interpolated` | number or `null` |
 
 Supported fields are `open`, `high`, `low`, `close`, and `volume`. Every read
-is at or before the evaluation timestamp.
+is at or before the evaluation timestamp. Opening-range and relative-volume
+signals ignore interpolated bars. Relative volume uses the median volume for
+each elapsed opening slot across the configured number of complete prior data
+sessions.
 
-It has one algo function:
+It has these algo functions:
 
 | function | inputs | params |
 | --- | --- | --- |
 | `crossover` | `fast`, `slow` | none |
+| `range_breakout` | `session`, `opening_range`, `rvol_open`, `last_close` | `direction`, `target_r`, `min_rvol`, `entry_cutoff_minutes`, `flat_minutes` |
 
-Its output is `[is_entry, is_close_all]`. Both values cannot be true. Add a
-new code function only when a strategy cannot be expressed as another
-parameter set of these functions.
+Every algo output is `[is_entry, is_close_all, direction]`. Direction is `1`
+for long, `-1` for short, and `0` when quiet. Both actions cannot be true. A
+new code function is needed only when a strategy cannot be expressed as
+another parameter set of these functions.
+
+`orb5` forms the first five regular-session bars, requires elapsed relative
+volume above `1.0`, and enters on the first close outside that range. The
+opposite range edge is the stop and the target is `2R`. It enters at most once
+per session, blocks new entries inside ten minutes to close, and closes any
+open unit five minutes before the configured regular or early close.
 
 Example:
 

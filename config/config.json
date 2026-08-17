@@ -1,10 +1,11 @@
 {
-  "version": 2,
+  "version": 3,
   "database": "../data/trader.sqlite3",
   "tickers": ["SNDK", "SNXX", "SNDQ", "MU", "SPY", "QQQ", "SOXX"],
   "early_closes": ["2026-11-27", "2026-12-24"],
   "live_polling": {
     "start": "04:00",
+    "regular_open": "09:30",
     "regular_close": "16:00",
     "early_close": "13:00",
     "after_close_minutes": 5,
@@ -109,7 +110,45 @@
     "pivot_classic": {
       "inputs": ["bar_metadata"],
       "params": {"name": "pivot_points", "method": "classic"}
+    },
+    "session": {
+      "inputs": [],
+      "params": {}
+    },
+    "orb5_range": {
+      "function": "opening_range",
+      "inputs": ["bars", "session"],
+      "params": {
+        "minutes": 5
+      }
+    },
+    "orb5_rvol": {
+      "function": "rvol_open",
+      "inputs": ["bars", "session"],
+      "params": {
+        "cap_bars": 30,
+        "baseline_sessions": 20
+      }
+    },
+    "last_close": {
+      "inputs": ["bars"],
+      "params": {
+        "include_interpolated": false
+      }
     }
   },
-  "algos": {}
+  "algos": {
+    "orb5": {
+      "function": "range_breakout",
+      "inputs": ["session", "orb5_range", "orb5_rvol", "last_close"],
+      "params": {
+        "direction": "both",
+        "target_r": 2.0,
+        "min_rvol": 1.0,
+        "entry_cutoff_minutes": 10,
+        "flat_minutes": 5
+      },
+      "trades": true
+    }
+  }
 }

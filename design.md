@@ -114,13 +114,14 @@ One service runs the algos and contains the algo logic: a core plus a
 loop. Input: the ticker list and the signal and algo definitions; the
 bar timestamps supply `t`. One call carries all work:
 `core(ticker, t, algos=None)` returns the signal values at `t` and one
-`(is_entry, is_close_all)` pair per algo. `algos=None` runs every enabled
+`(is_entry, is_close_all, direction)` result per algo. `direction` is `1` for
+long, `-1` for short, and `0` when the algo is quiet. `algos=None` runs every enabled
 algo; a list restricts the call to those algos.
 
 ### The core
 
 - No clock, no side effects. Data input: the bars, bar_metadata, events, and
-  trades tables, read-only.
+  prior outputs tables, read-only.
 - Two layers with a strict rule: a signal (vwap, sma, and so on) queries
   bars, bar metadata, the events table, and other signals; an algo queries
   signal outputs, the outputs of other algos, and its own prior outputs.
@@ -138,19 +139,22 @@ algo; a list restricts the call to those algos.
 
 ### The algo output contract
 
-- Input: besides its signals, an algo receives its open entries at `t`
-  from the trades table; entry prices come from bars.
-- Output at `t` is one pair of booleans: `(is_entry, is_close_all)`. The
+- Input: besides its signals, an algo receives its simulated open entries at
+  `t` from its own prior versioned outputs. Entry prices come from bars. The
+  trades table remains the live action record and is not historical state.
+- Output at `t` is `(is_entry, is_close_all, direction)`. The first two values
+  are booleans and direction is `1`, `-1`, or `0`. The
   algo decides among three moves from its open entries: `is_entry` opens
   one more unit, `is_close_all` closes every open unit, and both false is
   quiet. Both true does not occur.
-- An exit device such as a trail stop lives inside the algo: the open
-  entries give the anchor, and the bars since the anchor give the level.
-- Position state lives in the database only: open units are the entries
-  since the last `exit_all` in the trades table, regardless of version.
-  The loop keeps no position in memory. Work under one ticker runs oldest
-  first, so an algo's prior outputs exist when it reads them.
-- The pair is the one fixed shape in outputs, because the loop and the
+- An exit device such as a bracket lives inside the algo: the open entries give
+  the anchor and declared signals provide the current levels.
+- Historical position state lives in the database only: open units are entry
+  outputs since the last close output under the same config version. Live
+  trade state is the entries since the last `exit_all` in trades. The loop
+  keeps no position in memory. Work under one ticker runs oldest first, so an
+  algo's prior outputs exist when it reads them.
+- The triple is the one fixed shape in outputs, because the loop and the
   dashboard both read it. A signal's output stays opaque JSON.
 
 ### Config defines every signal and every algo
@@ -234,7 +238,7 @@ number.
   keyed and the core is deterministic. Only the newest bar of a ticker
   also trades: the loop writes trade rows for its points, and older work
   never writes a trade.
-- A trade row is ticker, algo, exact timestamp, action. `is_entry` writes
+- A trade row is ticker, algo, exact timestamp, action, and direction. `is_entry` writes
   an entry row and opens one unit. `is_close_all` writes an `exit_all` row
   and closes every open unit of the algo.
 - An algo exits only while it has open units for the ticker. This is
@@ -336,8 +340,10 @@ CREATE TABLE trades (
     algo   TEXT    NOT NULL,
     ts     INTEGER NOT NULL,  -- exact entry or exit time, epoch seconds, UTC
     action TEXT    NOT NULL,
+    direction INTEGER NOT NULL DEFAULT 1,  -- 1 long, -1 short
     PRIMARY KEY (ticker, algo, ts, action),
-    CHECK (action IN ('entry', 'exit_all'))
+    CHECK (action IN ('entry', 'exit_all')),
+    CHECK (direction IN (-1, 1))
 );
 
 CREATE TABLE outputs (
@@ -378,8 +384,8 @@ Notes:
 - `bar_metadata` holds provider values, not computed ones. `params` is in the
   key, so one name can hold two parameter sets. A signal that a function can
   compute from bars belongs in `outputs`, not here.
-- `trades` binds every row to one algo; nothing consolidates across algos.
-  No price (recomputable) and no size (a row is one unit).
+- `trades` binds every row to one algo and direction; nothing consolidates
+  across algos. No price (recomputable) and no size (a row is one unit).
 - `outputs` grows fastest; `logs` grows steadily.
 - `configs` maps every stored version back to the full config file.
 - `logs` is append-only and the one table with an extra index.

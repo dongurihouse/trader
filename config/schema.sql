@@ -58,12 +58,14 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE TABLE IF NOT EXISTS trades (
-    ticker TEXT    NOT NULL,
-    algo   TEXT    NOT NULL,
-    ts     INTEGER NOT NULL,
-    action TEXT    NOT NULL,
+    ticker    TEXT    NOT NULL,
+    algo      TEXT    NOT NULL,
+    ts        INTEGER NOT NULL,
+    action    TEXT    NOT NULL,
+    direction INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (ticker, algo, ts, action),
-    CHECK (action IN ('entry', 'exit_all'))
+    CHECK (action IN ('entry', 'exit_all')),
+    CHECK (direction IN (-1, 1))
 );
 
 CREATE TABLE IF NOT EXISTS outputs (

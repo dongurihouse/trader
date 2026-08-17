@@ -166,11 +166,17 @@ class DashboardData:
             # Every range returns the literal stored minute history. The chart's
             # client-side viewport handles display density, zoom, and panning.
             chart_bars = self._compact_bars(rows, limit=max(1, len(rows)))
+            trade_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(trades)")
+            }
+            direction_column = (
+                "direction" if "direction" in trade_columns else "1 AS direction"
+            )
             trades = [
                 dict(row)
                 for row in connection.execute(
-                    """
-                    SELECT ticker, algo, ts, action
+                    f"""
+                    SELECT ticker, algo, ts, action, {direction_column}
                     FROM trades
                     WHERE ticker = ? AND ts >= ?
                     ORDER BY ts
@@ -357,30 +363,32 @@ class DashboardData:
                     "closed_units": 0,
                     "wins": 0,
                     "realized_pct": 0.0,
-                    "open_prices": [],
+                    "open_units": [],
                     "last_price": float(row["close"]),
                 },
             )
             price = float(row["close"])
             group["last_price"] = price
-            is_entry, is_close = self._output_pair(self._json_value(row["output"]))
+            is_entry, is_close, direction = self._output_action(
+                self._json_value(row["output"])
+            )
             if is_close:
-                for entry_price in group["open_prices"]:
-                    result = ((price / entry_price) - 1.0) * 100.0
+                for entry_price, entry_direction in group["open_units"]:
+                    result = ((price / entry_price) - 1.0) * 100.0 * entry_direction
                     group["realized_pct"] += result
                     group["closed_units"] += 1
                     if result > 0:
                         group["wins"] += 1
-                group["open_prices"] = []
+                group["open_units"] = []
             elif is_entry:
                 group["entries"] += 1
-                group["open_prices"].append(price)
+                group["open_units"].append((price, direction))
 
         performance_rows = []
         for group in groups.values():
             unrealized = sum(
-                ((group["last_price"] / entry_price) - 1.0) * 100.0
-                for entry_price in group["open_prices"]
+                ((group["last_price"] / entry_price) - 1.0) * 100.0 * direction
+                for entry_price, direction in group["open_units"]
             )
             closed = group["closed_units"]
             performance_rows.append(
@@ -389,7 +397,7 @@ class DashboardData:
                     "version": group["version"],
                     "entries": group["entries"],
                     "closed_units": closed,
-                    "open_units": len(group["open_prices"]),
+                    "open_units": len(group["open_units"]),
                     "realized_pct": round(group["realized_pct"], 4),
                     "total_pct": round(group["realized_pct"] + unrealized, 4),
                     "win_rate": round((group["wins"] / closed) * 100.0, 1) if closed else None,
@@ -713,15 +721,22 @@ class DashboardData:
             return value
 
     @staticmethod
-    def _output_pair(value: Any) -> tuple[bool, bool]:
+    def _output_action(value: Any) -> tuple[bool, bool, int]:
         if isinstance(value, (list, tuple)) and len(value) >= 2:
-            return bool(value[0]), bool(value[1])
+            direction = value[2] if len(value) >= 3 else (1 if value[0] else 0)
+            return bool(value[0]), bool(value[1]), int(direction)
         if isinstance(value, dict):
             return (
                 bool(value.get("is_entry", value.get("entry", False))),
                 bool(value.get("is_close_all", value.get("close_all", False))),
+                int(
+                    value.get(
+                        "direction",
+                        1 if value.get("is_entry", value.get("entry", False)) else 0,
+                    )
+                ),
             )
-        return False, False
+        return False, False, 0
 
     @staticmethod
     def _valid_symbol(value: str) -> str:

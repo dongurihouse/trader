@@ -11,20 +11,23 @@ import os
 import re
 import signal
 import sqlite3
+import statistics
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, time as clock_time, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG = ROOT.parent / "config" / "config.json"
 SCHEMA = ROOT.parent / "config" / "schema.sql"
 UTC = timezone.utc
+EASTERN = ZoneInfo("America/New_York")
 SYMBOL = re.compile(r"^[A-Z][A-Z0-9.-]{0,14}$")
 BAR_FIELDS = {"open", "high", "low", "close", "volume"}
 METADATA_DEFAULTS = {
@@ -47,6 +50,9 @@ METADATA_DEFAULTS = {
     "obv": {},
     "pivot_points": {"method": "classic"},
 }
+_RVOL_BASELINES: dict[
+    tuple[str, str, date, int, int], Optional[tuple[float, ...]]
+] = {}
 
 
 class ConfigError(ValueError):
@@ -67,6 +73,7 @@ class Settings:
     api_port: int
     signals: Mapping[str, Mapping[str, Any]]
     algos: Mapping[str, Mapping[str, Any]]
+    document: Mapping[str, Any]
     content: str
 
     def enabled_signals(self) -> tuple[str, ...]:
@@ -202,6 +209,7 @@ def load_settings(
         api_port=_positive_int(algo.get("api_port", 8791), "algo.api_port", 1024),
         signals=_nodes(document, "signals"),
         algos=_nodes(document, "algos"),
+        document=document,
         content=_json(document),
     )
     if set(settings.signals) & set(settings.algos):
@@ -245,6 +253,14 @@ def _init_database(path: Path) -> None:
     connection = _connect(path)
     try:
         connection.executescript(schema)
+        trade_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(trades)")
+        }
+        if "direction" not in trade_columns:
+            connection.execute(
+                "ALTER TABLE trades ADD COLUMN direction INTEGER NOT NULL DEFAULT 1 "
+                "CHECK(direction IN (-1, 1))"
+            )
         connection.commit()
     finally:
         connection.close()
@@ -282,7 +298,9 @@ def _bar_parameters(parameters: Mapping[str, Any]) -> tuple[str, int, bool]:
     return field, period, include
 
 
-def _signal_sma(connection, ticker, ts, parameters, inputs) -> Optional[float]:
+def _signal_sma(
+    connection, ticker, ts, parameters, inputs, settings=None
+) -> Optional[float]:
     if list(inputs) != ["bars"]:
         raise EvaluationError("sma inputs must be ['bars']")
     field, period, include = _bar_parameters(parameters)
@@ -292,7 +310,9 @@ def _signal_sma(connection, ticker, ts, parameters, inputs) -> Optional[float]:
     return sum(float(row[field]) for row in rows) / period
 
 
-def _signal_metadata(connection, ticker, ts, parameters, inputs) -> Any:
+def _signal_metadata(
+    connection, ticker, ts, parameters, inputs, settings=None
+) -> Any:
     if list(inputs) != ["bar_metadata"]:
         raise EvaluationError("provider metadata input must be ['bar_metadata']")
     name = parameters.get("name")
@@ -316,8 +336,174 @@ def _signal_metadata(connection, ticker, ts, parameters, inputs) -> Any:
     return json.loads(row["value"]) if row else None
 
 
+def _configured_time(settings: Settings, key: str, default: str) -> clock_time:
+    polling = settings.document.get("live_polling", {})
+    if not isinstance(polling, dict):
+        raise EvaluationError("live_polling must be an object")
+    try:
+        return clock_time.fromisoformat(str(polling.get(key, default)))
+    except ValueError as exc:
+        raise EvaluationError("live_polling.%s must be HH:MM" % key) from exc
+
+
+def _session_window(settings: Settings, ts: int) -> tuple[date, int, int]:
+    local_day = datetime.fromtimestamp(ts, tz=EASTERN).date()
+    early_closes = settings.document.get("early_closes", [])
+    if not isinstance(early_closes, list):
+        raise EvaluationError("early_closes must be a list")
+    close_key = "early_close" if local_day.isoformat() in {
+        str(value) for value in early_closes
+    } else "regular_close"
+    session_open = datetime.combine(
+        local_day, _configured_time(settings, "regular_open", "09:30"), tzinfo=EASTERN
+    )
+    session_close = datetime.combine(
+        local_day,
+        _configured_time(
+            settings, close_key, "13:00" if close_key == "early_close" else "16:00"
+        ),
+        tzinfo=EASTERN,
+    )
+    return local_day, int(session_open.timestamp()), int(session_close.timestamp())
+
+
+def _signal_session(
+    connection, ticker, ts, parameters, inputs, settings
+) -> Optional[dict[str, Any]]:
+    if parameters or inputs:
+        raise EvaluationError("session takes no inputs or params")
+    local_day, session_open, session_close = _session_window(settings, ts)
+    if ts < session_open or ts >= session_close:
+        return None
+    return {
+        "date": local_day.isoformat(),
+        "minute": int((ts - session_open) // 60),
+        "to_close": (session_close - ts) / 60.0,
+    }
+
+
+def _whole_number(parameters: Mapping[str, Any], name: str, minimum: int = 1) -> int:
+    value = parameters.get(name)
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise EvaluationError("%s must be an integer >= %d" % (name, minimum))
+    return value
+
+
+def _signal_opening_range(
+    connection, ticker, ts, parameters, inputs, settings
+) -> Optional[dict[str, float]]:
+    if list(inputs) != ["bars", "session"]:
+        raise EvaluationError("opening_range inputs must be ['bars', 'session']")
+    minutes = _whole_number(parameters, "minutes")
+    session = inputs["session"]
+    if session is None or session.get("minute", -1) < minutes:
+        return None
+    _, session_open, session_close = _session_window(settings, ts)
+    rows = connection.execute(
+        """
+        SELECT high, low FROM bars
+        WHERE ticker=? AND ts>=? AND ts<? AND ts<=? AND interpolated=0
+        ORDER BY ts LIMIT ?
+        """,
+        (ticker, session_open, session_close, ts, minutes),
+    ).fetchall()
+    if len(rows) < minutes:
+        return None
+    high = max(float(row["high"]) for row in rows)
+    low = min(float(row["low"]) for row in rows)
+    return {"high": high, "low": low, "range": high - low}
+
+
+def _prior_volume_baseline(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    ticker: str,
+    local_day: date,
+    cap_bars: int,
+    baseline_sessions: int,
+) -> Optional[tuple[float, ...]]:
+    key = (str(settings.database), ticker, local_day, cap_bars, baseline_sessions)
+    if key in _RVOL_BASELINES:
+        return _RVOL_BASELINES[key]
+    sessions: list[list[float]] = []
+    candidate = local_day - timedelta(days=1)
+    for _ in range(baseline_sessions * 4 + 60):
+        probe = int(datetime.combine(candidate, clock_time(12), tzinfo=EASTERN).timestamp())
+        _, session_open, session_close = _session_window(settings, probe)
+        rows = connection.execute(
+            """
+            SELECT volume FROM bars
+            WHERE ticker=? AND ts>=? AND ts<? AND interpolated=0
+            ORDER BY ts LIMIT ?
+            """,
+            (ticker, session_open, session_close, cap_bars),
+        ).fetchall()
+        if len(rows) == cap_bars:
+            sessions.append([float(row["volume"]) for row in rows])
+            if len(sessions) == baseline_sessions:
+                break
+        candidate -= timedelta(days=1)
+    if len(sessions) < baseline_sessions:
+        _RVOL_BASELINES[key] = None
+        return None
+    baseline = tuple(
+        float(statistics.median(session[slot] for session in sessions))
+        for slot in range(cap_bars)
+    )
+    _RVOL_BASELINES[key] = baseline
+    return baseline
+
+
+def _signal_rvol_open(connection, ticker, ts, parameters, inputs, settings) -> Optional[float]:
+    if list(inputs) != ["bars", "session"]:
+        raise EvaluationError("rvol_open inputs must be ['bars', 'session']")
+    cap_bars = _whole_number(parameters, "cap_bars")
+    baseline_sessions = _whole_number(parameters, "baseline_sessions")
+    session = inputs["session"]
+    if session is None:
+        return None
+    local_day, session_open, session_close = _session_window(settings, ts)
+    rows = connection.execute(
+        """
+        SELECT volume FROM bars
+        WHERE ticker=? AND ts>=? AND ts<? AND ts<=? AND interpolated=0
+        ORDER BY ts LIMIT ?
+        """,
+        (ticker, session_open, session_close, ts, cap_bars),
+    ).fetchall()
+    if not rows:
+        return None
+    baseline = _prior_volume_baseline(
+        connection, settings, ticker, local_day, cap_bars, baseline_sessions
+    )
+    if baseline is None or len(baseline) < len(rows):
+        return None
+    actual = sum(float(row["volume"]) for row in rows)
+    expected = sum(baseline[: len(rows)]) or 1.0
+    return actual / expected
+
+
+def _signal_last_close(connection, ticker, ts, parameters, inputs, settings) -> Optional[float]:
+    if list(inputs) != ["bars"]:
+        raise EvaluationError("last_close inputs must be ['bars']")
+    include = parameters.get("include_interpolated")
+    if not isinstance(include, bool):
+        raise EvaluationError("include_interpolated must be boolean")
+    quality = "" if include else "AND interpolated=0"
+    row = connection.execute(
+        "SELECT close FROM bars WHERE ticker=? AND ts<=? %s ORDER BY ts DESC LIMIT 1"
+        % quality,
+        (ticker, ts),
+    ).fetchone()
+    return float(row["close"]) if row else None
+
+
 SIGNAL_FUNCTIONS: dict[str, Callable[..., Any]] = {
     "sma": _signal_sma,
+    "session": _signal_session,
+    "opening_range": _signal_opening_range,
+    "rvol_open": _signal_rvol_open,
+    "last_close": _signal_last_close,
 }
 
 
@@ -329,7 +515,10 @@ def _number(value: Any, name: str) -> Optional[float]:
     return float(value)
 
 
-def _algo_crossover(connection, ticker, ts, name, version, parameters, inputs, previous, open_entries):
+def _algo_crossover(
+    connection, ticker, ts, name, version, parameters, inputs, previous,
+    open_entries, session_outputs, settings,
+):
     if len(inputs) != 2:
         raise EvaluationError("crossover requires [fast, slow] inputs")
     fast_name, slow_name = inputs
@@ -338,13 +527,96 @@ def _algo_crossover(connection, ticker, ts, name, version, parameters, inputs, p
     old_fast = _number(previous.get(fast_name), "previous fast")
     old_slow = _number(previous.get(slow_name), "previous slow")
     if None in (fast, slow, old_fast, old_slow):
-        return False, False
-    return old_fast <= old_slow and fast > slow, old_fast >= old_slow and fast < slow
+        return False, False, 0
+    is_entry = old_fast <= old_slow and fast > slow
+    is_close = old_fast >= old_slow and fast < slow
+    direction = 1 if is_entry else (
+        int(open_entries[0]["direction"]) if is_close and open_entries else 1 if is_close else 0
+    )
+    return is_entry, is_close, direction
 
 
-ALGO_FUNCTIONS: dict[str, Callable[..., tuple[bool, bool]]] = {
+def _parameter_number(
+    parameters: Mapping[str, Any], name: str, *, minimum: float = 0.0
+) -> float:
+    value = parameters.get(name)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise EvaluationError("%s must be a number" % name)
+    number = float(value)
+    if not math.isfinite(number) or number < minimum:
+        raise EvaluationError("%s must be finite and >= %g" % (name, minimum))
+    return number
+
+
+def _algo_range_breakout(
+    connection, ticker, ts, name, version, parameters, inputs, previous,
+    open_entries, session_outputs, settings,
+):
+    if len(inputs) != 4:
+        raise EvaluationError(
+            "range_breakout requires [session, opening_range, rvol_open, last_close] inputs"
+        )
+    session_name, range_name, rvol_name, price_name = inputs
+    session = inputs[session_name]
+    opening_range = inputs[range_name]
+    rvol = _number(inputs[rvol_name], "rvol_open")
+    price = _number(inputs[price_name], "last_close")
+    direction_param = parameters.get("direction")
+    if direction_param not in ("both", "long", "short"):
+        raise EvaluationError("direction must be both, long, or short")
+    target_r = _parameter_number(parameters, "target_r", minimum=0.0)
+    min_rvol = _parameter_number(parameters, "min_rvol", minimum=0.0)
+    entry_cutoff = _parameter_number(parameters, "entry_cutoff_minutes", minimum=0.0)
+    flat_minutes = _parameter_number(parameters, "flat_minutes", minimum=0.0)
+    if session is None or opening_range is None or rvol is None or price is None:
+        return False, False, 0
+
+    if open_entries:
+        entry = open_entries[0]
+        direction = int(entry["direction"])
+        entry_price = float(entry["price"])
+        stop = float(opening_range["low" if direction == 1 else "high"])
+        risk = entry_price - stop if direction == 1 else stop - entry_price
+        target = entry_price + direction * target_r * risk
+        hit_stop = price <= stop if direction == 1 else price >= stop
+        hit_target = price >= target if direction == 1 else price <= target
+        if risk <= 0 or hit_stop or hit_target or float(session["to_close"]) <= flat_minutes:
+            return False, True, direction
+        return False, False, 0
+
+    if any(_algo_output(row["output"])[0] for row in session_outputs):
+        return False, False, 0
+    if float(session["to_close"]) < entry_cutoff or rvol <= min_rvol:
+        return False, False, 0
+    high = float(opening_range["high"])
+    low = float(opening_range["low"])
+    if direction_param in ("both", "long") and price > high:
+        return True, False, 1
+    if direction_param in ("both", "short") and price < low:
+        return True, False, -1
+    return False, False, 0
+
+
+ALGO_FUNCTIONS: dict[str, Callable[..., tuple[bool, bool, int]]] = {
     "crossover": _algo_crossover,
+    "range_breakout": _algo_range_breakout,
 }
+
+
+def _algo_output(value: Any) -> tuple[bool, bool, int]:
+    if not isinstance(value, (list, tuple)) or len(value) not in (2, 3):
+        raise EvaluationError("algo output must be [is_entry,is_close_all,direction]")
+    is_entry, is_close = value[:2]
+    if not isinstance(is_entry, bool) or not isinstance(is_close, bool) or (is_entry and is_close):
+        raise EvaluationError("algo actions must be exclusive booleans")
+    direction = value[2] if len(value) == 3 else (1 if is_entry or is_close else 0)
+    if isinstance(direction, bool) or not isinstance(direction, int) or direction not in (-1, 0, 1):
+        raise EvaluationError("algo direction must be -1, 0, or 1")
+    if (is_entry or is_close) and direction == 0:
+        raise EvaluationError("an algo action must include direction")
+    if not (is_entry or is_close) and direction != 0:
+        raise EvaluationError("a quiet algo output must use direction 0")
+    return is_entry, is_close, direction
 
 
 def _prior_output(
@@ -361,7 +633,7 @@ def _prior_output(
     return json.loads(row["output"]) if row else None
 
 
-def _open_entries(
+def _trade_open_entries(
     connection: sqlite3.Connection, ticker: str, algo: str, ts: int
 ) -> list[dict[str, Any]]:
     last_exit = connection.execute(
@@ -370,14 +642,60 @@ def _open_entries(
     ).fetchone()[0]
     rows = connection.execute(
         """
-        SELECT tr.ts, b.close FROM trades tr
+        SELECT tr.ts, tr.direction, b.close FROM trades tr
         JOIN bars b ON b.ticker=tr.ticker AND b.ts=tr.ts
         WHERE tr.ticker=? AND tr.algo=? AND tr.action='entry'
           AND tr.ts>? AND tr.ts<? ORDER BY tr.ts
         """,
         (ticker, algo, last_exit if last_exit is not None else -1, ts),
     ).fetchall()
-    return [{"ts": int(row["ts"]), "price": float(row["close"])} for row in rows]
+    return [
+        {
+            "ts": int(row["ts"]),
+            "price": float(row["close"]),
+            "direction": int(row["direction"]),
+        }
+        for row in rows
+    ]
+
+
+def _output_state(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    ticker: str,
+    algo: str,
+    ts: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    _, session_open, _ = _session_window(settings, ts)
+    rows = connection.execute(
+        """
+        SELECT o.ts, o.output, b.close
+        FROM outputs o
+        JOIN bars b ON b.ticker=o.ticker AND b.ts=o.ts
+        WHERE o.ticker=? AND o.kind=? AND o.config=?
+          AND o.ts>=? AND o.ts<?
+          AND (substr(o.output,1,6)='[true,' OR substr(o.output,1,12)='[false,true,')
+        ORDER BY o.ts
+        """,
+        (ticker, algo, settings.version, session_open, ts),
+    ).fetchall()
+    prior: list[dict[str, Any]] = []
+    open_entries: list[dict[str, Any]] = []
+    for row in rows:
+        output = json.loads(row["output"])
+        is_entry, is_close, direction = _algo_output(output)
+        prior.append({"ts": int(row["ts"]), "output": output})
+        if is_close:
+            open_entries = []
+        elif is_entry:
+            open_entries.append(
+                {
+                    "ts": int(row["ts"]),
+                    "price": float(row["close"]),
+                    "direction": direction,
+                }
+            )
+    return open_entries, prior
 
 
 def run_core(
@@ -395,7 +713,7 @@ def run_core(
 
     values: dict[str, Any] = {}
     signal_values: dict[str, Any] = {}
-    algo_values: dict[str, tuple[bool, bool]] = {}
+    algo_values: dict[str, tuple[bool, bool, int]] = {}
     visiting: set[str] = set()
 
     def evaluate_signal(name: str) -> Any:
@@ -417,7 +735,9 @@ def run_core(
                 if node["inputs"] == ["bar_metadata"]
                 else SIGNAL_FUNCTIONS[node["function"]]
             )
-            value = function(connection, ticker, ts, node["params"], inputs)
+            value = function(
+                connection, ticker, ts, node["params"], inputs, settings
+            )
             _json(value)
         except Exception as exc:
             raise EvaluationError("signal %s failed: %s" % (name, exc)) from exc
@@ -426,7 +746,7 @@ def run_core(
         signal_values[name] = value
         return value
 
-    def evaluate_algo(name: str) -> tuple[bool, bool]:
+    def evaluate_algo(name: str) -> tuple[bool, bool, int]:
         if name in algo_values:
             return algo_values[name]
         if name in visiting:
@@ -441,11 +761,14 @@ def run_core(
             if target in settings.signals:
                 inputs[target] = evaluate_signal(target)
             else:
-                pair = evaluate_algo(target)
-                inputs[target] = [pair[0], pair[1]]
+                output = evaluate_algo(target)
+                inputs[target] = list(output)
             previous[target] = _prior_output(connection, ticker, ts, target, settings.version)
+        open_entries, session_outputs = _output_state(
+            connection, settings, ticker, name, ts
+        )
         try:
-            pair = ALGO_FUNCTIONS[node["function"]](
+            output = ALGO_FUNCTIONS[node["function"]](
                 connection,
                 ticker,
                 ts,
@@ -454,21 +777,19 @@ def run_core(
                 node["params"],
                 inputs,
                 previous,
-                _open_entries(connection, ticker, name, ts),
+                open_entries,
+                session_outputs,
+                settings,
             )
         except Exception as exc:
             raise EvaluationError("algo %s failed: %s" % (name, exc)) from exc
-        if (
-            not isinstance(pair, (list, tuple))
-            or len(pair) != 2
-            or not all(isinstance(value, bool) for value in pair)
-            or all(pair)
-        ):
-            raise EvaluationError("algo %s returned an invalid pair" % name)
+        try:
+            result = _algo_output(output)
+        except EvaluationError as exc:
+            raise EvaluationError("algo %s returned invalid output: %s" % (name, exc)) from exc
         visiting.remove(name)
-        result = (pair[0], pair[1])
         algo_values[name] = result
-        values[name] = [result[0], result[1]]
+        values[name] = list(result)
         return result
 
     for name in settings.enabled_signals():
@@ -575,8 +896,8 @@ def _write_result(
     rows = []
     for name, value in result["signals"].items():
         rows.append((result["ticker"], result["ts"], name, settings.version, _json(value), computed_at))
-    for name, pair in result["algos"].items():
-        rows.append((result["ticker"], result["ts"], name, settings.version, _json(pair), computed_at))
+    for name, output in result["algos"].items():
+        rows.append((result["ticker"], result["ts"], name, settings.version, _json(output), computed_at))
 
     stats = {"pairs": 1, "outputs": len(rows), "entries": 0, "exits": 0}
     connection.execute("BEGIN IMMEDIATE")
@@ -594,16 +915,20 @@ def _write_result(
             "SELECT MAX(ts) FROM bars WHERE ticker=?", (result["ticker"],)
         ).fetchone()[0]
         if latest == result["ts"]:
-            for name, pair in result["algos"].items():
+            for name, output in result["algos"].items():
                 if not settings.algos[name]["trades"]:
                     continue
-                action = "exit_all" if pair[1] else "entry" if pair[0] else None
+                is_entry, is_close, direction = _algo_output(output)
+                action = "exit_all" if is_close else "entry" if is_entry else None
                 if action is None:
                     continue
-                if action == "exit_all" and not _open_entries(
-                    connection, result["ticker"], name, result["ts"]
-                ):
-                    continue
+                if action == "exit_all":
+                    live_entries = _trade_open_entries(
+                        connection, result["ticker"], name, result["ts"]
+                    )
+                    if not live_entries:
+                        continue
+                    direction = int(live_entries[0]["direction"])
                 exists = connection.execute(
                     "SELECT 1 FROM trades WHERE ticker=? AND algo=? AND ts=?",
                     (result["ticker"], name, result["ts"]),
@@ -611,8 +936,8 @@ def _write_result(
                 if exists:
                     continue
                 connection.execute(
-                    "INSERT INTO trades(ticker,algo,ts,action) VALUES (?,?,?,?)",
-                    (result["ticker"], name, result["ts"], action),
+                    "INSERT INTO trades(ticker,algo,ts,action,direction) VALUES (?,?,?,?,?)",
+                    (result["ticker"], name, result["ts"], action, direction),
                 )
                 stats["exits" if action == "exit_all" else "entries"] += 1
         connection.commit()
@@ -623,6 +948,7 @@ def _write_result(
 
 
 def cycle(config_path: Path) -> tuple[dict[str, int], Settings]:
+    _RVOL_BASELINES.clear()
     config_path = config_path.resolve()
     current = load_settings(config_path)
     _init_database(current.database)
