@@ -22,6 +22,8 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
+from shape_signal import clear_shape_cache, shape_v1
+
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG = ROOT.parent / "config" / "config.json"
@@ -498,12 +500,25 @@ def _signal_last_close(connection, ticker, ts, parameters, inputs, settings) -> 
     return float(row["close"]) if row else None
 
 
+def _signal_shape_v1(connection, ticker, ts, parameters, inputs, settings) -> Any:
+    return shape_v1(
+        connection,
+        ticker,
+        ts,
+        parameters,
+        inputs,
+        settings,
+        _session_window,
+    )
+
+
 SIGNAL_FUNCTIONS: dict[str, Callable[..., Any]] = {
     "sma": _signal_sma,
     "session": _signal_session,
     "opening_range": _signal_opening_range,
     "rvol_open": _signal_rvol_open,
     "last_close": _signal_last_close,
+    "shape_v1": _signal_shape_v1,
 }
 
 
@@ -949,6 +964,7 @@ def _write_result(
 
 def cycle(config_path: Path) -> tuple[dict[str, int], Settings]:
     _RVOL_BASELINES.clear()
+    clear_shape_cache()
     config_path = config_path.resolve()
     current = load_settings(config_path)
     _init_database(current.database)

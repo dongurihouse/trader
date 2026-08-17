@@ -13,7 +13,8 @@ backtest path.
 Only a ticker's newest stored bar can create a trade. Older evaluations write
 outputs only. An algo without `"trades": true` also writes outputs only.
 
-The default config enables the two-sided `orb5` opening-range breakout.
+The default config enables the two-sided `orb5` opening-range breakout and the
+read-only `shape` path forecast.
 
 The service exposes read-only process health at
 `http://127.0.0.1:8791/health` for Dash. It stores completed work summaries,
@@ -56,12 +57,20 @@ The service has these signal functions:
 | `opening_range` | `minutes` | `{high, low, range}` or `null` |
 | `rvol_open` | `cap_bars`, `baseline_sessions` | number or `null` |
 | `last_close` | `include_interpolated` | number or `null` |
+| `shape_v1` | `history_sessions`, `min_sessions`, `stride_minutes`, `shape_base_rate_w`, `age_halflife_days`, `support_k` | path funnel, eight shape probabilities, and evidence; otherwise `null` |
 
 Supported fields are `open`, `high`, `low`, `close`, and `volume`. Every read
 is at or before the evaluation timestamp. Opening-range and relative-volume
 signals ignore interpolated bars. Relative volume uses the median volume for
 each elapsed opening slot across the configured number of complete prior data
 sessions.
+
+`shape_v1` evaluates regular-session bars on the configured stride. It compares
+only the completed prefix with prior sessions, centers historical continuations
+to avoid directional bias, and classifies the completed path into eight fixed
+shapes. It needs at least `min_sessions` prior sessions. It returns `null` for
+all other bars, including extended-hours bars, while the service still stores
+that output row. No algo reads this signal, so it cannot create a trade.
 
 It has these algo functions:
 
