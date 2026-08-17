@@ -51,12 +51,6 @@ make sweep                   # run the trailing 30-day sweep now
 make uninstall               # stop it; keep the database
 ```
 
-To import the old `bar` table into the shared schema:
-
-```sh
-make migrate LEGACY=/absolute/path/to/bars.sqlite3
-```
-
 ## Query stored bars
 
 CSV is the default output:

@@ -738,46 +738,6 @@ class BarStore:
         with self.connect() as connection:
             return connection.execute(query, tuple(tickers)).fetchall()
 
-    def migrate_legacy(self, source: Path) -> Dict[str, int]:
-        if source.resolve() == self.path.resolve():
-            raise ConfigError("legacy and destination databases must differ")
-        if not source.is_file():
-            raise ConfigError("legacy database does not exist: %s" % source)
-        stats = {"read": 0, "written": 0}
-        fetched_at = _epoch(datetime.now(UTC))
-        rows: List[tuple] = []
-        legacy = sqlite3.connect(str(source))
-        legacy.row_factory = sqlite3.Row
-        try:
-            cursor = legacy.execute(
-                "SELECT symbol, begins_at, open, high, low, close, volume FROM bar"
-            )
-            for row in cursor:
-                stats["read"] += 1
-                values = tuple(float(row[name]) for name in ("open", "high", "low", "close"))
-                rows.append(
-                    (
-                        row["symbol"],
-                        _epoch(_parse_iso(row["begins_at"])),
-                        *values,
-                        int(row["volume"]),
-                        0,
-                        fetched_at,
-                    )
-                )
-        except sqlite3.Error as exc:
-            raise ConfigError("cannot read legacy database %s: %s" % (source, exc)) from exc
-        finally:
-            legacy.close()
-        self._upsert(rows)
-        stats["written"] = len(rows)
-        self.append_log(
-            "info",
-            "migration complete source=%s read=%d written=%d"
-            % (source, stats["read"], stats["written"]),
-        )
-        return stats
-
     def query(
         self,
         ticker: str,
@@ -1100,9 +1060,6 @@ def _parser() -> argparse.ArgumentParser:
     subparsers.add_parser("sweep", help="fetch the configured trailing window")
     subparsers.add_parser("status", help="show local bar coverage")
 
-    migrate = subparsers.add_parser("migrate", help="import the legacy bar table")
-    migrate.add_argument("source", type=Path)
-
     query = subparsers.add_parser("query", help="read stored bars")
     query.add_argument("symbol")
     query.add_argument("--start")
@@ -1139,12 +1096,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(collector.status_text())
         elif arguments.command == "status":
             print(collector.status_text())
-        elif arguments.command == "migrate":
-            stats = store.migrate_legacy(arguments.source.expanduser().resolve())
-            print(
-                "migrated read=%d written=%d"
-                % (stats["read"], stats["written"])
-            )
         elif arguments.command == "query":
             ticker = arguments.symbol.strip().upper()
             if ticker not in settings.tickers:
