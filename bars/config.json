@@ -23,6 +23,10 @@
       "max_symbols_per_call": 3
     }
   },
+  "algo": {
+    "evaluation_days": 60,
+    "poll_seconds": 30
+  },
   "signals": {},
   "algos": {}
 }

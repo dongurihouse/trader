@@ -613,14 +613,17 @@ class BarStore:
         with self.connect() as connection:
             connection.executemany(
                 """
-                INSERT INTO bars (ticker, ts, open, high, low, close, volume)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO bars (
+                    ticker, ts, open, high, low, close, volume, fetched_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(ticker, ts) DO UPDATE SET
                     open=excluded.open,
                     high=excluded.high,
                     low=excluded.low,
                     close=excluded.close,
-                    volume=excluded.volume
+                    volume=excluded.volume,
+                    fetched_at=excluded.fetched_at
                 """,
                 rows,
             )
@@ -634,6 +637,7 @@ class BarStore:
             "invalid": 0,
         }
         results = payload["data"]["results"]
+        fetched_at = _epoch(datetime.now(UTC))
         rows: List[tuple] = []
         for result in results:
             ticker = result["symbol"]
@@ -666,6 +670,7 @@ class BarStore:
                         prices[2],
                         prices[3],
                         int(volume_value),
+                        fetched_at,
                     )
                 )
         self._upsert(rows)
@@ -719,6 +724,7 @@ class BarStore:
         if not source.is_file():
             raise ConfigError("legacy database does not exist: %s" % source)
         stats = {"read": 0, "written": 0, "rejected": 0}
+        fetched_at = _epoch(datetime.now(UTC))
         rows: List[tuple] = []
         legacy = sqlite3.connect(str(source))
         legacy.row_factory = sqlite3.Row
@@ -745,6 +751,7 @@ class BarStore:
                         _epoch(_parse_iso(row["begins_at"])),
                         *values,
                         int(volume),
+                        fetched_at,
                     )
                 )
         except sqlite3.Error as exc:
