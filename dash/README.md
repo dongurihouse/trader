@@ -51,6 +51,7 @@ the loopback ports configured by `bars.api_port` and `algo.api_port`.
 - Minute-level bars remain available in every range for zooming and panning.
 - Switchable line and candlestick chart styles.
 - Automatic entry and exit markers for the configured trading algo, read from `trades`.
+- Visible opening-range bands for configured range-breakout algos, derived from bars and config.
 - Up/down marker direction for long and short actions, with action details on hover.
 - Time zoom with the `+`, `−`, and Reset controls or the mouse wheel.
 - Horizontal wheel, trackpad, Shift+wheel, and drag panning across the loaded minute history.

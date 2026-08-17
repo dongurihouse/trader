@@ -964,6 +964,10 @@ h1 em {
   color: var(--red);
 }
 
+.chart-tooltip .algo-range {
+  color: var(--amber);
+}
+
 .chart-loading,
 .chart-empty {
   position: absolute;
@@ -1075,6 +1079,12 @@ h1 em {
 .legend-entry {
   background: var(--cyan);
   clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+
+.legend-range {
+  height: 7px !important;
+  background: rgba(244, 197, 106, 0.12);
+  border-block: 1px solid var(--amber);
 }
 
 .legend-exit {

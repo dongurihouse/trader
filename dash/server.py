@@ -137,6 +137,7 @@ class DashboardData:
         span = span.upper()
         if span not in {"1D", "5D", "1M", "3M", "120D", "ALL"}:
             raise DashboardError("Range must be 1D, 5D, 1M, 3M, 120D, or ALL")
+        config = self.config()
 
         with self.connection() as connection:
             latest = connection.execute(
@@ -149,6 +150,7 @@ class DashboardData:
                     "bars": [],
                     "trades": [],
                     "events": [],
+                    "algo_overlays": self._algo_overlays([], config),
                     "source_count": 0,
                     "interpolated_count": 0,
                 }
@@ -207,6 +209,7 @@ class DashboardData:
             "bars": chart_bars,
             "trades": trades,
             "events": events,
+            "algo_overlays": self._algo_overlays(rows, config),
         }
 
     def logs(
@@ -643,6 +646,83 @@ class DashboardData:
             (ticker, latest, session_count),
         ).fetchone()
         return int(row[0] or latest)
+
+    def _algo_overlays(
+        self, rows: list[sqlite3.Row], config: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        signals = self._mapping(config.get("signals"))
+        algos = self._mapping(config.get("algos"))
+        polling = self._mapping(config.get("live_polling"))
+        early_dates = {str(value) for value in config.get("early_closes", [])}
+        try:
+            regular_open = time.fromisoformat(str(polling.get("regular_open", "09:30")))
+            regular_close = time.fromisoformat(str(polling.get("regular_close", "16:00")))
+            early_close = time.fromisoformat(str(polling.get("early_close", "13:00")))
+        except ValueError:
+            regular_open, regular_close, early_close = time(9, 30), time(16), time(13)
+
+        overlays = []
+        for algo_name, definition in algos.items():
+            if not isinstance(definition, dict) or not definition.get("trades", False):
+                continue
+            if definition.get("function", algo_name) != "range_breakout":
+                continue
+            inputs = definition.get("inputs", [])
+            if not isinstance(inputs, list):
+                continue
+            range_definition = next(
+                (
+                    signals.get(name)
+                    for name in inputs
+                    if isinstance(signals.get(name), dict)
+                    and signals[name].get("function", name) == "opening_range"
+                ),
+                None,
+            )
+            params = range_definition.get("params", {}) if range_definition else {}
+            minutes = params.get("minutes") if isinstance(params, dict) else None
+            if isinstance(minutes, bool) or not isinstance(minutes, int) or minutes < 1:
+                continue
+
+            sessions: dict[str, list[sqlite3.Row]] = {}
+            session_bounds: dict[str, tuple[int, int]] = {}
+            for row in rows:
+                timestamp = int(row["ts"])
+                local = datetime.fromtimestamp(timestamp, tz=EASTERN)
+                session = local.date().isoformat()
+                close_time = early_close if session in early_dates else regular_close
+                session_open = datetime.combine(local.date(), regular_open, tzinfo=EASTERN)
+                session_close = datetime.combine(local.date(), close_time, tzinfo=EASTERN)
+                start = int(session_open.timestamp())
+                end = int(session_close.timestamp())
+                if start <= timestamp < end and not int(row["interpolated"]):
+                    sessions.setdefault(session, []).append(row)
+                    session_bounds[session] = (start, end)
+
+            ranges = []
+            for session, session_rows in sessions.items():
+                opening_rows = session_rows[:minutes]
+                if len(opening_rows) < minutes:
+                    continue
+                start, end = session_bounds[session]
+                ranges.append(
+                    {
+                        "date": session,
+                        "start": start + minutes * 60,
+                        "end": end,
+                        "high": max(float(row["high"]) for row in opening_rows),
+                        "low": min(float(row["low"]) for row in opening_rows),
+                    }
+                )
+            overlays.append(
+                {
+                    "algo": algo_name,
+                    "kind": "opening_range",
+                    "minutes": minutes,
+                    "ranges": ranges,
+                }
+            )
+        return overlays
 
     def _compact_bars(self, rows: list[sqlite3.Row], limit: int = 1400) -> list[dict[str, Any]]:
         if not rows:
