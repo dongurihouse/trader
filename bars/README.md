@@ -4,7 +4,7 @@
 minute OHLCV data through Robinhood's official Trading MCP and upserts it into
 `../data/trader.sqlite3`.
 
-The service reads `config/config.json`. It does not store a Robinhood
+The service reads `../config/config.json`. It does not store a Robinhood
 password. Its ignored `../data/robinhood_oauth.json` file contains the OAuth
 refresh token with owner-only permissions.
 
@@ -21,11 +21,11 @@ refresh token with owner-only permissions.
 - Let `launchd` restart the process after login or a crash.
 
 The collector supports one data contract: minute bars with UTC epoch-second
-timestamps. The shared schema is in `config/schema.sql`.
+timestamps. The shared schema is in `../config/schema.sql`.
 
 ## Configure
 
-Edit `config/config.json`. It contains the ticker list, early-close dates, live
+Edit `../config/config.json`. It contains the ticker list, early-close dates, live
 polling window, sweep length, and provider settings. The default live window is
 04:00 Eastern through five minutes after the regular or configured early close.
 
