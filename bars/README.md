@@ -31,7 +31,7 @@ polling window, sweep length, and provider settings. The default live window is
 
 ## Operate
 
-Run these commands from this directory:
+Run these commands from the repository root:
 
 ```sh
 make auth                    # one-time Robinhood browser approval
@@ -61,7 +61,7 @@ make query SYMBOL=SNDK ARGS='--start 2026-08-14 --end 2026-08-14'
 JSON is also available:
 
 ```sh
-.venv/bin/python bars_service.py query SNDK --limit 5 --format json
+bars/.venv/bin/python bars/bars_service.py query SNDK --limit 5 --format json
 ```
 
 The stored columns are `ticker`, `ts`, `open`, `high`, `low`, `close`, and
