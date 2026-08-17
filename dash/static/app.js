@@ -810,7 +810,7 @@ function renderDateStrip(payload) {
   const wasAtEnd = !hadSessions
     || strip.scrollLeft + strip.clientWidth >= strip.scrollWidth - 12;
   state.sessions = sessionDateRanges(payload?.bars || [])
-    .sort((left, right) => left.ts - right.ts);
+    .sort((left, right) => right.ts - left.ts);
 
   if (!state.sessions.length) {
     strip.replaceChildren(createElement("span", "date-strip-loading", "No dates available"));
@@ -983,7 +983,7 @@ async function loadBars({ quiet = false } = {}) {
     renderDateStrip(payload);
     chart.setData(payload);
     if (shouldFocusLatest && state.sessions.length) {
-      focusDate(state.sessions.at(-1).date);
+      focusDate(state.sessions[0].date);
     }
     $("#chart-empty").hidden = payload.bars.length > 0;
   } catch (error) {
