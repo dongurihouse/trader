@@ -66,6 +66,24 @@ TECHNICAL_DEFAULTS = {
     "obv": {},
     "pivot_points": {"method": "classic"},
 }
+LIVE_INT_FIELDS = (
+    ("after_close_minutes", 240, 0),
+    ("poll_seconds", 60, 30),
+)
+BARS_INT_FIELDS = (
+    ("api_port", 8789, 1024),
+    ("backfill_days", 120, 1),
+    ("sweep_days", 30, 1),
+    ("poll_catchup_days", 7, 1),
+    ("idle_seconds", 300, 30),
+    ("retry_seconds", 30, 5),
+    ("retry_max_seconds", 900, 30),
+)
+PROVIDER_INT_FIELDS = (
+    ("oauth_callback_port", 8765, 1024),
+    ("timeout_seconds", 300, 30),
+    ("max_symbols_per_call", 3, 1),
+)
 
 
 class ConfigError(ValueError):
@@ -124,6 +142,19 @@ def _positive_int(value, name: str, minimum: int = 1) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise ConfigError("%s must be an integer >= %d" % (name, minimum))
     return value
+
+
+def _positive_int_fields(
+    raw: dict,
+    section: str,
+    fields: Sequence[Tuple[str, int, int]],
+) -> Dict[str, int]:
+    return {
+        name: _positive_int(
+            raw.get(name, default), "%s.%s" % (section, name), minimum
+        )
+        for name, default, minimum in fields
+    }
 
 
 def _clock(value, name: str) -> clock_time:
@@ -259,6 +290,12 @@ def load_settings(path: Path) -> Settings:
     if not oauth_store.is_absolute():
         oauth_store = (path.parent / oauth_store).resolve()
 
+    live_ints = _positive_int_fields(live, "live_polling", LIVE_INT_FIELDS)
+    bars_ints = _positive_int_fields(bars, "bars", BARS_INT_FIELDS)
+    provider_ints = _positive_int_fields(
+        provider, "bars.provider", PROVIDER_INT_FIELDS
+    )
+
     return Settings(
         tickers=tuple(tickers),
         live_start=_clock(live.get("start", "04:00"), "live_polling.start"),
@@ -271,33 +308,15 @@ def load_settings(path: Path) -> Settings:
             "live_polling.early_close",
         ),
         early_close_days=early_close_days,
-        after_close_minutes=_positive_int(
-            live.get("after_close_minutes", 240),
-            "live_polling.after_close_minutes",
-            0,
-        ),
-        poll_seconds=_positive_int(
-            live.get("poll_seconds", 60), "live_polling.poll_seconds", 30
-        ),
-        api_port=_positive_int(bars.get("api_port", 8789), "bars.api_port", 1024),
-        backfill_days=_positive_int(
-            bars.get("backfill_days", 120), "bars.backfill_days"
-        ),
-        sweep_days=_positive_int(bars.get("sweep_days", 30), "bars.sweep_days"),
-        poll_catchup_days=_positive_int(
-            bars.get("poll_catchup_days", 7), "bars.poll_catchup_days"
-        ),
-        idle_seconds=_positive_int(
-            bars.get("idle_seconds", 300), "bars.idle_seconds", 30
-        ),
-        retry_seconds=_positive_int(
-            bars.get("retry_seconds", 30), "bars.retry_seconds", 5
-        ),
-        retry_max_seconds=_positive_int(
-            bars.get("retry_max_seconds", 900),
-            "bars.retry_max_seconds",
-            30,
-        ),
+        after_close_minutes=live_ints["after_close_minutes"],
+        poll_seconds=live_ints["poll_seconds"],
+        api_port=bars_ints["api_port"],
+        backfill_days=bars_ints["backfill_days"],
+        sweep_days=bars_ints["sweep_days"],
+        poll_catchup_days=bars_ints["poll_catchup_days"],
+        idle_seconds=bars_ints["idle_seconds"],
+        retry_seconds=bars_ints["retry_seconds"],
+        retry_max_seconds=bars_ints["retry_max_seconds"],
         database=database,
         provider=ProviderSettings(
             bounds=bounds,
@@ -305,20 +324,9 @@ def load_settings(path: Path) -> Settings:
                 provider.get("url", "https://agent.robinhood.com/mcp/trading")
             ),
             oauth_store=oauth_store,
-            oauth_callback_port=_positive_int(
-                provider.get("oauth_callback_port", 8765),
-                "bars.provider.oauth_callback_port",
-                1024,
-            ),
-            timeout_seconds=_positive_int(
-                provider.get("timeout_seconds", 300),
-                "bars.provider.timeout_seconds",
-                30,
-            ),
-            max_symbols_per_call=_positive_int(
-                provider.get("max_symbols_per_call", 3),
-                "bars.provider.max_symbols_per_call",
-            ),
+            oauth_callback_port=provider_ints["oauth_callback_port"],
+            timeout_seconds=provider_ints["timeout_seconds"],
+            max_symbols_per_call=provider_ints["max_symbols_per_call"],
         ),
         technical_specs=_technical_specs(raw),
     )
@@ -1024,35 +1032,38 @@ class BarStore:
         points: Sequence[MetadataPoint],
         ticker: str,
         spec: TechnicalSpec,
-        start: datetime,
-        end: datetime,
     ) -> Dict[str, int]:
-        allowed = {
-            row["ts"]
-            for row in self.connection.execute(
-                "SELECT ts FROM bars WHERE ticker=? AND ts BETWEEN ? AND ?",
-                (ticker, _epoch(start), _epoch(end)),
-            ).fetchall()
-        }
         fetched_at = _epoch(datetime.now(UTC))
         rows = [
-            (ticker, point.ts, spec.name, spec.params, point.value, fetched_at)
+            (
+                ticker,
+                point.ts,
+                spec.name,
+                spec.params,
+                point.value,
+                fetched_at,
+                ticker,
+                point.ts,
+            )
             for point in points
-            if point.ts in allowed
         ]
         with self.connection as connection:
-            connection.executemany(
+            cursor = connection.executemany(
                 """
                 INSERT INTO bar_metadata (
                     ticker, ts, name, params, value, fetched_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                )
+                SELECT ?, ?, ?, ?, ?, ?
+                WHERE EXISTS (
+                    SELECT 1 FROM bars WHERE ticker=? AND ts=?
+                )
                 ON CONFLICT(ticker, ts, name, params) DO UPDATE SET
                     value=excluded.value,
                     fetched_at=excluded.fetched_at
                 """,
                 rows,
             )
-        return {"received": len(points), "written": len(rows)}
+        return {"received": len(points), "written": cursor.rowcount}
 
     def latest_metadata(
         self, ticker: str, spec: TechnicalSpec, refreshed_after: int
@@ -1279,8 +1290,6 @@ class Collector:
                             points,
                             ticker,
                             spec,
-                            chunk_start,
-                            chunk_end,
                         )
                         total.update(stats)
                         total["requests"] += 1
