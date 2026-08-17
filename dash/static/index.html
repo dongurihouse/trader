@@ -39,7 +39,6 @@
         <span class="header-market" id="market-status" aria-label="Checking market" title="Checking market">
           <span class="status-dot" id="market-dot"></span>
         </span>
-        <span class="updated" id="updated-at">Connecting…</span>
       </div>
     </header>
 
@@ -61,7 +60,16 @@
           <div class="quote-block">
             <div class="quote-row">
               <strong id="quote-price">—</strong>
-              <span id="quote-change">—</span>
+              <div class="quote-details">
+                <span id="quote-change">—</span>
+                <time id="quote-time">Waiting for bars</time>
+              </div>
+            </div>
+          </div>
+          <div class="shape-forest" id="shape-forest" aria-live="polite">
+            <small class="shape-forest-title" id="shape-forest-title">Shape forest</small>
+            <div class="shape-forest-list" id="shape-forest-list">
+              <span class="shape-unavailable">Waiting for evaluation</span>
             </div>
           </div>
         </div>
@@ -77,7 +85,7 @@
         </div>
 
         <div class="chart-stage" id="chart-stage">
-          <canvas id="price-chart" role="img" aria-label="Minute price chart" title="Choose a date above, scroll horizontally, or drag to pan. Scroll vertically to zoom."></canvas>
+          <canvas id="price-chart" role="img" tabindex="0" aria-label="Minute price chart" title="Hover to inspect a bar or click to keep it focused. Scroll horizontally or drag to pan. Scroll vertically to zoom."></canvas>
           <div class="chart-tooltip" id="chart-tooltip" hidden></div>
           <div class="chart-loading" id="chart-loading">
             <span></span>

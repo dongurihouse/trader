@@ -20,6 +20,15 @@ const easternDateTime = new Intl.DateTimeFormat("en-US", {
   minute: "2-digit",
 });
 
+const easternInspectionTime = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+  timeZoneName: "short",
+});
+
 const easternClock = new Intl.DateTimeFormat("en-US", {
   timeZone: "America/New_York",
   hour: "numeric",
@@ -49,12 +58,6 @@ const easternFullDate = new Intl.DateTimeFormat("en-US", {
   year: "numeric",
   month: "long",
   day: "numeric",
-});
-
-const localUpdated = new Intl.DateTimeFormat("en-US", {
-  hour: "numeric",
-  minute: "2-digit",
-  second: "2-digit",
 });
 
 const integerFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
@@ -143,19 +146,22 @@ function showToast(message) {
 }
 
 class PriceChart {
-  constructor(canvas, tooltip, onViewChange) {
+  constructor(canvas, tooltip, onViewChange, onInspect) {
     this.canvas = canvas;
     this.tooltip = tooltip;
     this.onViewChange = onViewChange;
+    this.onInspect = onInspect;
     this.context = canvas.getContext("2d");
     this.style = "line";
     this.algo = null;
     this.payload = null;
     this.hoverIndex = null;
+    this.focusedTimestamp = null;
     this.bounds = null;
     this.viewStart = 0;
     this.viewEnd = -1;
     this.drag = null;
+    this.suppressClick = false;
     this.wheelPanRemainder = 0;
     this.minimumViewPoints = 10;
     this.resizeObserver = new ResizeObserver(() => this.draw());
@@ -164,6 +170,13 @@ class PriceChart {
     canvas.addEventListener("pointerdown", (event) => this.onPointerDown(event));
     canvas.addEventListener("pointerup", (event) => this.onPointerUp(event));
     canvas.addEventListener("pointercancel", (event) => this.onPointerUp(event));
+    canvas.addEventListener("click", (event) => this.onClick(event));
+    canvas.addEventListener("blur", () => this.clearFocus());
+    canvas.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || this.focusedTimestamp === null) return;
+      this.clearFocus();
+      event.preventDefault();
+    });
     canvas.addEventListener("pointerleave", () => {
       if (!this.drag) this.clearPointer();
     });
@@ -181,6 +194,7 @@ class PriceChart {
     this.payload = payload;
     this.wheelPanRemainder = 0;
     this.hoverIndex = null;
+    if (!sameSeries) this.focusedTimestamp = null;
     this.tooltip.hidden = true;
     if (sameSeries && wasZoomed && payload.bars.length) {
       let start = 0;
@@ -195,6 +209,7 @@ class PriceChart {
       this.resetView({ notify: false, redraw: false });
     }
     this.notifyViewChange();
+    this.notifyInspection();
     this.draw();
   }
 
@@ -274,8 +289,65 @@ class PriceChart {
     }
     const snapshot = snapshots[low - 1];
     if (!snapshot) return null;
-    const maximumAge = Math.max(1, Number(forecast.stride_minutes) || 5) * 60;
-    return target - Number(snapshot.ts) <= maximumAge ? snapshot : null;
+    return easternDateKey(snapshot.ts) === easternDateKey(timestamp) ? snapshot : null;
+  }
+
+  focusedIndex() {
+    if (this.focusedTimestamp === null) return null;
+    const index = this.payload?.bars?.findIndex(
+      (bar) => Number(bar.ts) === Number(this.focusedTimestamp),
+    );
+    return index >= 0 ? index : null;
+  }
+
+  highlightedVisibleIndex() {
+    if (this.hoverIndex !== null) {
+      return Math.max(0, Math.min(this.viewLength() - 1, this.hoverIndex));
+    }
+    const focused = this.focusedIndex();
+    if (focused === null || focused < this.viewStart || focused > this.viewEnd) return null;
+    return focused - this.viewStart;
+  }
+
+  changeAt(index) {
+    const bars = this.payload?.bars || [];
+    const bar = bars[index];
+    if (!bar) return { change: null, changePct: null };
+    const session = easternDateKey(bar.ts);
+    let sessionStart = index;
+    while (sessionStart > 0 && easternDateKey(bars[sessionStart - 1].ts) === session) {
+      sessionStart -= 1;
+    }
+    const baseline = Number(
+      sessionStart > 0 ? bars[sessionStart - 1].close : bars[sessionStart].open,
+    );
+    const price = Number(bar.close);
+    const change = price - baseline;
+    return {
+      change,
+      changePct: baseline ? (change / baseline) * 100 : 0,
+    };
+  }
+
+  notifyInspection() {
+    const bars = this.payload?.bars || [];
+    if (!bars.length) {
+      this.onInspect?.(null);
+      return;
+    }
+    const focused = this.hoverIndex === null ? this.focusedIndex() : null;
+    const index = this.hoverIndex !== null
+      ? this.viewStart + Math.max(0, Math.min(this.viewLength() - 1, this.hoverIndex))
+      : focused ?? bars.length - 1;
+    const bar = bars[index];
+    const { change, changePct } = this.changeAt(index);
+    this.onInspect?.({
+      bar,
+      change,
+      changePct,
+      shape: this.shapeAt(bar.ts),
+      mode: this.hoverIndex !== null ? "hover" : focused !== null ? "focused" : "latest",
+    });
   }
 
   updateLabel() {
@@ -323,6 +395,7 @@ class PriceChart {
     this.hoverIndex = null;
     this.tooltip.hidden = true;
     if (notify) this.notifyViewChange();
+    if (notify || redraw) this.notifyInspection();
     if (redraw) this.draw();
   }
 
@@ -617,32 +690,42 @@ class PriceChart {
 
     this.drawTradeMarkers(ctx, bars, x, y, margin, priceBottom);
 
-    if (this.hoverIndex !== null) {
-      const index = Math.max(0, Math.min(bars.length - 1, this.hoverIndex));
+    const highlightedIndex = this.highlightedVisibleIndex();
+    if (highlightedIndex !== null) {
+      const index = Math.max(0, Math.min(bars.length - 1, highlightedIndex));
       const pointX = x(index);
       const pointY = y(bars[index].close);
+      const focused = this.hoverIndex === null;
       ctx.beginPath();
-      ctx.strokeStyle = "rgba(237, 241, 239, 0.36)";
+      ctx.strokeStyle = focused ? "rgba(112, 216, 220, 0.62)" : "rgba(237, 241, 239, 0.36)";
       ctx.setLineDash([3, 4]);
       ctx.moveTo(pointX, margin.top);
       ctx.lineTo(pointX, height - margin.bottom);
       ctx.stroke();
       ctx.setLineDash([]);
       ctx.beginPath();
-      ctx.fillStyle = "#edf1ef";
-      ctx.arc(pointX, pointY, 3.2, 0, Math.PI * 2);
+      ctx.fillStyle = focused ? "#70d8dc" : "#edf1ef";
+      ctx.arc(pointX, pointY, focused ? 3.8 : 3.2, 0, Math.PI * 2);
       ctx.fill();
     }
   }
 
-  onPointer(event) {
+  pointerIndex(event) {
     const bars = this.visibleBars();
-    if (!bars.length || !this.bounds) return;
+    if (!bars.length || !this.bounds) return null;
     const rectangle = this.canvas.getBoundingClientRect();
     const localX = event.clientX - rectangle.left;
     const ratio = (localX - this.bounds.margin.left) / this.bounds.plotWidth;
-    this.hoverIndex = Math.round(ratio * (bars.length - 1));
-    this.hoverIndex = Math.max(0, Math.min(bars.length - 1, this.hoverIndex));
+    return Math.max(0, Math.min(bars.length - 1, Math.round(ratio * (bars.length - 1))));
+  }
+
+  onPointer(event) {
+    const bars = this.visibleBars();
+    const index = this.pointerIndex(event);
+    if (!bars.length || index === null) return;
+    const rectangle = this.canvas.getBoundingClientRect();
+    const localX = event.clientX - rectangle.left;
+    this.hoverIndex = index;
     const bar = bars[this.hoverIndex];
     const contents = [
       createElement("strong", "", easternDateTime.format(dateFromEpoch(bar.ts))),
@@ -671,33 +754,6 @@ class PriceChart {
         ),
       );
     });
-    if (this.payload?.shape_forecast) {
-      const shape = this.shapeAt(bar.ts);
-      const section = createElement("div", "shape-forecast");
-      section.append(
-        createElement(
-          "small",
-          "shape-forecast-title",
-          shape
-            ? `Shape forecast · ${easternClock.format(dateFromEpoch(shape.ts))}`
-            : "Shape forecast",
-        ),
-      );
-      if (shape) {
-        shape.top_shapes.slice(0, 3).forEach((item, index) => {
-          const row = createElement("div", `shape-row rank-${index + 1}`);
-          row.append(
-            createElement("span", "shape-rank", String(index + 1)),
-            createElement("span", "shape-name", formatShapeName(item.shape)),
-            createElement("strong", "shape-probability", formatProbability(item.probability)),
-          );
-          section.append(row);
-        });
-      } else {
-        section.append(createElement("span", "shape-unavailable", "No evaluation at this point"));
-      }
-      contents.push(section);
-    }
     this.tooltip.replaceChildren(...contents);
     this.tooltip.hidden = false;
     const tooltipWidth = this.tooltip.offsetWidth || 150;
@@ -706,6 +762,7 @@ class PriceChart {
     const top = Math.max(6, Math.min(rectangle.height - tooltipHeight - 6, event.clientY - rectangle.top - 42));
     this.tooltip.style.left = `${left}px`;
     this.tooltip.style.top = `${top}px`;
+    this.notifyInspection();
     this.draw();
   }
 
@@ -733,6 +790,7 @@ class PriceChart {
     }
     const distance = event.clientX - this.drag.startX;
     if (Math.abs(distance) < 3 && !this.drag.moved) return;
+    if (!this.drag.moved) this.focusedTimestamp = null;
     this.drag.moved = true;
     const barsMoved = Math.round((-distance / this.bounds.plotWidth) * this.viewLength());
     this.panTo(this.drag.startView + barsMoved);
@@ -743,9 +801,25 @@ class PriceChart {
     if (!this.drag || this.drag.pointerId !== event.pointerId) return;
     const moved = this.drag.moved;
     this.drag = null;
+    this.suppressClick = moved && event.type !== "pointercancel";
     this.canvas.classList.remove("is-dragging");
     if (this.canvas.hasPointerCapture?.(event.pointerId)) this.canvas.releasePointerCapture(event.pointerId);
     if (!moved && event.type !== "pointercancel") this.onPointer(event);
+  }
+
+  onClick(event) {
+    if (this.suppressClick) {
+      this.suppressClick = false;
+      return;
+    }
+    const index = this.pointerIndex(event);
+    const bar = index === null ? null : this.visibleBars()[index];
+    if (!bar) return;
+    this.canvas.focus({ preventScroll: true });
+    this.hoverIndex = index;
+    this.focusedTimestamp = Number(bar.ts);
+    this.notifyInspection();
+    this.draw();
   }
 
   onWheel(event) {
@@ -784,6 +858,14 @@ class PriceChart {
   clearPointer() {
     this.hoverIndex = null;
     this.tooltip.hidden = true;
+    this.notifyInspection();
+    this.draw();
+  }
+
+  clearFocus() {
+    if (this.focusedTimestamp === null) return;
+    this.focusedTimestamp = null;
+    this.notifyInspection();
     this.draw();
   }
 }
@@ -792,7 +874,46 @@ function renderViewport({ firstDate, lastDate }) {
   renderDateSelection(firstDate && firstDate === lastDate ? firstDate : null);
 }
 
-const chart = new PriceChart($("#price-chart"), $("#chart-tooltip"), renderViewport);
+function renderShapeForest(shape) {
+  const title = $("#shape-forest-title");
+  const list = $("#shape-forest-list");
+  title.textContent = shape
+    ? `Shape forest · ${easternClock.format(dateFromEpoch(shape.ts))}`
+    : "Shape forest";
+  if (!shape) {
+    list.replaceChildren(createElement("span", "shape-unavailable", "No evaluation yet"));
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  shape.top_shapes.slice(0, 3).forEach((item, index) => {
+    const row = createElement("div", `shape-row rank-${index + 1}`);
+    row.append(
+      createElement("span", "shape-rank", String(index + 1)),
+      createElement("span", "shape-name", formatShapeName(item.shape)),
+      createElement("strong", "shape-probability", formatProbability(item.probability)),
+    );
+    fragment.append(row);
+  });
+  list.replaceChildren(fragment);
+}
+
+function renderInspection(inspection) {
+  if (!inspection?.bar) return;
+  $("#quote-price").textContent = `$${formatPrice(inspection.bar.close)}`;
+  const change = $("#quote-change");
+  change.textContent = `${formatSigned(inspection.change)}  ${formatSigned(inspection.changePct, "%")}`;
+  change.classList.toggle("down", Number(inspection.change) < 0);
+  $("#quote-time").textContent = easternInspectionTime.format(dateFromEpoch(inspection.bar.ts));
+  $(".quote-block").dataset.mode = inspection.mode;
+  renderShapeForest(inspection.shape);
+}
+
+const chart = new PriceChart(
+  $("#price-chart"),
+  $("#chart-tooltip"),
+  renderViewport,
+  renderInspection,
+);
 
 function renderDateStrip(payload) {
   const strip = $("#date-strip");
@@ -901,13 +1022,11 @@ async function loadOverview({ quiet = false } = {}) {
     await loadBars({ quiet });
   } catch (error) {
     showToast(error.message);
-    if (!quiet) $("#updated-at").textContent = "Connection failed";
   }
 }
 
 function renderOverview() {
   const overview = state.overview;
-  $("#updated-at").textContent = `Updated ${localUpdated.format(dateFromEpoch(overview.generated_at))}`;
   $("#market-status").setAttribute("aria-label", overview.market.label);
   $("#market-status").title = overview.market.label;
   $("#market-dot").classList.toggle("live", overview.market.state === "live");
@@ -939,6 +1058,10 @@ function renderTickers(quotes) {
 }
 
 function renderQuote() {
+  if (chart.payload?.ticker === state.ticker && chart.totalBars()) {
+    chart.notifyInspection();
+    return;
+  }
   const quote = state.overview?.quotes.find((item) => item.ticker === state.ticker);
   $("#quote-price").textContent = quote?.available ? `$${formatPrice(quote.price)}` : "—";
   const change = $("#quote-change");
@@ -946,6 +1069,11 @@ function renderQuote() {
     ? `${formatSigned(quote.change)}  ${formatSigned(quote.change_pct, "%")}`
     : "No bars";
   change.classList.toggle("down", Number(quote?.change) < 0);
+  $("#quote-time").textContent = quote?.available
+    ? easternInspectionTime.format(dateFromEpoch(quote.ts))
+    : "Waiting for bars";
+  $(".quote-block").dataset.mode = "latest";
+  renderShapeForest(null);
 }
 
 async function selectTicker(ticker) {
