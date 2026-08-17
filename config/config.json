@@ -11,6 +11,7 @@
     "poll_seconds": 60
   },
   "bars": {
+    "api_port": 8789,
     "backfill_days": 120,
     "sweep_days": 30,
     "idle_seconds": 300,

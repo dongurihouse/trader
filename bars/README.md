@@ -18,7 +18,9 @@ refresh token with owner-only permissions.
   sweep repairs gaps without a separate reconciliation path.
 - Store every Robinhood bar and record its `interpolated` flag.
 - Upsert by `(ticker, ts)`, so every repeated fetch is safe.
-- Append heartbeats, run summaries, and problems to the shared `logs` table.
+- Serve process health at `http://127.0.0.1:8789/health` for Dash.
+- Append run summaries and problems to the shared `logs` table. Do not write
+  heartbeat rows.
 - Keep no filesystem log; `make logs` reads the shared table.
 - Let `launchd` restart the process after login or a crash.
 
@@ -30,7 +32,8 @@ timestamps. The shared schema is in `../config/schema.sql`.
 Edit `../config/config.json`. It contains the ticker list, early-close dates,
 live polling window, 120-day initial backfill, 30-day sweep, and provider
 settings. The default live window is 04:00 Eastern through five minutes after
-the regular or configured early close.
+the regular or configured early close. `bars.api_port` sets the loopback health
+API port.
 
 ## Operate
 

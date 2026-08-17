@@ -223,7 +223,8 @@ number.
 
 Shows the state as it happens. It reads the whole database read-only,
 renders vertical-first so a phone screen works, writes nothing, and triggers
-nothing. No service exposes an API; every view is served by the tables.
+nothing. Data views come from the tables. Service liveness comes from local,
+read-only health APIs.
 
 | view                                       | source                                  |
 | ------------------------------------------ | --------------------------------------- |
@@ -232,17 +233,17 @@ nothing. No service exposes an API; every view is served by the tables.
 | click-through detail of a signal or algo   | outputs (values) + configs (parameters) |
 | algo performance across parameter sets     | outputs across versions, priced by bars |
 | visual-aid signals, e.g. a shape forecast  | outputs, like any signal                |
-| service status, history, problems          | logs                                    |
+| service status                             | local health APIs                       |
+| service history and problems               | logs                                    |
 
 Ad-hoc views may call the core directly; the call writes nothing.
 
-## Service status (logs)
+## Service status and logs
 
-Every service appends to the logs table: a heartbeat each cycle, a summary
-row per run (bars fetched, rows written, and interpolated rows), and a row per
-problem. The dashboard derives everything from it: status is the freshest
-heartbeat per service, history is the run summaries, and problems are the warn
-and error rows. This is the one shared-writer table; it is safe because it is
+Bars exposes `GET /health` on a loopback-only port. Dash calls it to check
+process liveness; the call writes nothing. Bars appends only run summaries and
+problems to the logs table, not periodic heartbeats. The dashboard reads logs
+for history, warnings, and errors. The table remains safe because it is
 append-only and each service writes only rows tagged with its own name.
 
 ## Database schema
@@ -358,6 +359,7 @@ flowchart TB
     LOOP --> CFG
     BARS & EVENTS & LOOP --> LG
     DB -. read only .-> DASH[dashboard<br/>read-only webserver]
+    BARS -. GET /health .-> DASH
 ```
 
 ## Decisions (2026-08-17)

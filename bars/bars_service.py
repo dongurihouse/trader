@@ -17,7 +17,7 @@ import time as system_time
 import webbrowser
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, urlparse
@@ -65,6 +65,7 @@ class Settings:
     early_close_days: frozenset
     after_close_minutes: int
     poll_seconds: int
+    api_port: int
     backfill_days: int
     sweep_days: int
     idle_seconds: int
@@ -177,6 +178,7 @@ def load_settings(path: Path) -> Settings:
         poll_seconds=_positive_int(
             live.get("poll_seconds", 60), "live_polling.poll_seconds", 30
         ),
+        api_port=_positive_int(bars.get("api_port", 8789), "bars.api_port", 1024),
         backfill_days=_positive_int(
             bars.get("backfill_days", 120), "bars.backfill_days"
         ),
@@ -974,6 +976,17 @@ class Service:
         self.collector = collector
         self.settings = collector.settings
         self.stop_event = threading.Event()
+        self.started_at = _epoch(datetime.now(UTC))
+
+    def health(self) -> dict:
+        return {
+            "ok": True,
+            "service": "bars",
+            "status": "running",
+            "ts": _epoch(datetime.now(UTC)),
+            "started_at": self.started_at,
+            "pid": os.getpid(),
+        }
 
     def stop(self, signum=None, frame=None) -> None:
         logging.info("stopping service")
@@ -990,7 +1003,6 @@ class Service:
     def _cycle(self) -> int:
         now = datetime.now(EASTERN)
         day = now.date()
-        self.collector.store.append_log("info", "heartbeat")
         if day.weekday() >= 5:
             return self.settings.idle_seconds
 
@@ -1007,27 +1019,63 @@ class Service:
     def run(self) -> None:
         signal.signal(signal.SIGTERM, self.stop)
         signal.signal(signal.SIGINT, self.stop)
-        logging.info("service started with tickers=%s", ",".join(self.settings.tickers))
-        self.collector.store.append_log("info", "service started")
-        delay = self.settings.retry_seconds
-        while not self.stop_event.is_set():
-            try:
-                wait_seconds = self._cycle()
-                delay = self.settings.retry_seconds
-                self._wait(wait_seconds)
-            except Exception as exc:
-                message = "cycle failed: %s" % exc
-                logging.exception("%s; retrying in %d seconds", message, delay)
-                try:
-                    self.collector.store.append_log("error", message)
-                except sqlite3.Error:
-                    logging.exception("could not write failure to logs table")
-                self._wait(delay)
-                delay = min(delay * 2, self.settings.retry_max_seconds)
-        self.collector.store.append_log("info", "service stopped")
-        logging.info(
-            "service stopped",
+        health_server = ThreadingHTTPServer(
+            ("127.0.0.1", self.settings.api_port), _HealthHandler
         )
+        health_server.service = self
+        health_thread = threading.Thread(
+            target=health_server.serve_forever,
+            name="bars-health-api",
+            daemon=True,
+        )
+        health_thread.start()
+        try:
+            logging.info(
+                "service started with tickers=%s api=127.0.0.1:%d",
+                ",".join(self.settings.tickers),
+                self.settings.api_port,
+            )
+            self.collector.store.append_log("info", "service started")
+            delay = self.settings.retry_seconds
+            while not self.stop_event.is_set():
+                try:
+                    wait_seconds = self._cycle()
+                    delay = self.settings.retry_seconds
+                    self._wait(wait_seconds)
+                except Exception as exc:
+                    message = "cycle failed: %s" % exc
+                    logging.exception("%s; retrying in %d seconds", message, delay)
+                    try:
+                        self.collector.store.append_log("error", message)
+                    except sqlite3.Error:
+                        logging.exception("could not write failure to logs table")
+                    self._wait(delay)
+                    delay = min(delay * 2, self.settings.retry_max_seconds)
+            self.collector.store.append_log("info", "service stopped")
+            logging.info("service stopped")
+        finally:
+            health_server.shutdown()
+            health_server.server_close()
+            health_thread.join(timeout=2)
+
+
+class _HealthHandler(BaseHTTPRequestHandler):
+    server_version = "BarsHealth/1.0"
+
+    def do_GET(self) -> None:  # noqa: N802
+        if urlparse(self.path).path != "/health":
+            self.send_error(404)
+            return
+        payload = self.server.service.health()
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args) -> None:
+        return
 
 
 def _configure_logging(verbose: bool) -> None:

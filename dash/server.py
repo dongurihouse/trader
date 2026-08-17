@@ -16,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import parse_qs, quote, urlparse
+from urllib.request import urlopen
 from zoneinfo import ZoneInfo
 
 
@@ -402,7 +403,11 @@ class DashboardData:
     def health(self) -> dict[str, Any]:
         with self.connection() as connection:
             connection.execute("SELECT 1 FROM bars LIMIT 1").fetchone()
-        return {"ok": True, "database": "read-only"}
+        return {
+            "ok": True,
+            "database": "read-only",
+            "services": {"bars": self._bars_health(self.config())},
+        }
 
     def _quote(self, connection: sqlite3.Connection, ticker: str) -> dict[str, Any]:
         row = connection.execute(
@@ -458,23 +463,17 @@ class DashboardData:
                            PARTITION BY service ORDER BY ts DESC
                        ) AS position
                 FROM logs
+                WHERE service != 'bars'
             )
             WHERE position = 1
             ORDER BY service
             """
         ).fetchall()
         now = int(datetime.now(tz=UTC).timestamp())
-        market_live = self._market_state(config)["state"] == "live"
         services = []
         for row in rows:
             age = max(0, now - int(row["ts"]))
-            if row["service"] == "bars":
-                cadence = (
-                    config.get("live_polling", {}).get("poll_seconds", 60)
-                    if market_live
-                    else config.get("bars", {}).get("idle_seconds", 300)
-                )
-            elif row["service"] == "algo":
+            if row["service"] == "algo":
                 cadence = config.get("algo", {}).get("poll_seconds", 30)
             elif row["service"] == "events":
                 cadence = 86_400
@@ -497,7 +496,41 @@ class DashboardData:
                     "state": state,
                 }
             )
+        services.append(self._bars_health(config))
+        services.sort(key=lambda service: service["service"])
         return services
+
+    @staticmethod
+    def _bars_health(config: dict[str, Any]) -> dict[str, Any]:
+        now = int(datetime.now(tz=UTC).timestamp())
+        try:
+            port = int(config.get("bars", {}).get("api_port", 8789))
+            with urlopen("http://127.0.0.1:%d/health" % port, timeout=0.5) as response:
+                payload = json.loads(response.read())
+            if not isinstance(payload, dict):
+                raise ValueError("invalid Bars health response")
+            if payload.get("ok") is not True or payload.get("service") != "bars":
+                raise ValueError("invalid Bars health response")
+            timestamp = int(payload.get("ts", now))
+            return {
+                "service": "bars",
+                "ts": timestamp,
+                "level": "info",
+                "message": "health API: %s" % payload.get("status", "running"),
+                "age_seconds": max(0, now - timestamp),
+                "state": "active",
+                "started_at": payload.get("started_at"),
+                "pid": payload.get("pid"),
+            }
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            return {
+                "service": "bars",
+                "ts": now,
+                "level": "error",
+                "message": "health API unavailable",
+                "age_seconds": 0,
+                "state": "stale",
+            }
 
     def _logs(self, connection: sqlite3.Connection, where: str, limit: int) -> list[dict[str, Any]]:
         query = f"SELECT ts, service, level, message FROM logs {where} ORDER BY ts DESC, rowid DESC LIMIT ?"
