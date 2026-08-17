@@ -18,6 +18,7 @@ refresh token with owner-only permissions.
 - Drop rows whose open or close lies outside the low-to-high range.
 - Upsert by `(ticker, ts)`, so every repeated fetch is safe.
 - Append heartbeats, run summaries, and problems to the shared `logs` table.
+- Keep no filesystem log; `make logs` reads the shared table.
 - Let `launchd` restart the process after login or a crash.
 
 The collector supports one data contract: minute bars with UTC epoch-second
@@ -37,7 +38,7 @@ Run these commands from the repository root:
 make auth                    # one-time Robinhood browser approval
 make install                 # install and start the LaunchAgent
 make status                  # process state plus stored coverage
-make logs                    # follow collector logs
+make logs                    # show the latest database logs
 make restart                 # reload after a config edit
 make once                    # run one live poll now
 make sweep                   # run the trailing 30-day sweep now

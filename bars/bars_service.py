@@ -900,18 +900,7 @@ class Collector:
         return stats
 
     def _record(self, prefix: str, stats: Dict[str, int]) -> None:
-        message = self._summary(prefix, stats)
-        self.store.append_log("info", message)
-        logging.info(message)
-        rejected = stats["interpolated"] + stats["unordered"] + stats["invalid"]
-        if rejected:
-            warning = "%s rejected=%d" % (prefix, rejected)
-            self.store.append_log("warn", warning)
-            logging.warning(warning)
-
-    @staticmethod
-    def _summary(prefix: str, stats: Dict[str, int]) -> str:
-        return (
+        message = (
             "%s received=%d written=%d rejected_interpolated=%d "
             "rejected_unordered=%d rejected_invalid=%d"
             % (
@@ -923,6 +912,13 @@ class Collector:
                 stats["invalid"],
             )
         )
+        self.store.append_log("info", message)
+        logging.info(message)
+        rejected = stats["interpolated"] + stats["unordered"] + stats["invalid"]
+        if rejected:
+            warning = "%s rejected=%d" % (prefix, rejected)
+            self.store.append_log("warn", warning)
+            logging.warning(warning)
 
     def status_text(self) -> str:
         rows = self.store.summary(self.settings.tickers)

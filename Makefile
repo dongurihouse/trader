@@ -32,7 +32,8 @@ status:
 	@$(PYTHON) bars/bars_service.py status
 
 logs:
-	@tail -f data/service.log
+	@sqlite3 -header -column data/trader.sqlite3 \
+		"SELECT datetime(ts, 'unixepoch') AS utc, service, level, message FROM logs ORDER BY rowid DESC LIMIT 50"
 
 once:
 	@$(PYTHON) bars/bars_service.py once
