@@ -170,6 +170,37 @@ main {
   padding-block: 54px 80px;
 }
 
+.chart-only-main {
+  display: flex;
+  min-height: calc(100dvh - 76px);
+  flex-direction: column;
+  padding-block: 18px 24px;
+}
+
+.chart-only-main .chart-card {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.chart-only-main .chart-stage {
+  min-height: 430px;
+  flex: 1;
+  height: auto;
+}
+
+.header-market {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+}
+
+.header-market #market-time {
+  color: var(--subtle);
+}
+
 .market-heading {
   display: flex;
   align-items: end;
@@ -377,6 +408,15 @@ h1 em {
   font-family: var(--mono);
   font-size: 1.05rem;
   letter-spacing: 0.06em;
+}
+
+.symbol-row h1 {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  line-height: 1;
 }
 
 .exchange-label {
@@ -1237,6 +1277,20 @@ pre {
 
   main {
     padding-block: 35px 58px;
+  }
+
+  .chart-only-main {
+    min-height: calc(100dvh - 64px);
+    padding-block: 11px;
+  }
+
+  .chart-only-main .chart-stage {
+    min-height: 340px;
+  }
+
+  .header-market #market-time,
+  .header-market #market-label {
+    display: none;
   }
 
   .market-heading {

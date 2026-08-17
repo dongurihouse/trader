@@ -4,46 +4,34 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#0b1017" />
-    <meta
-      name="description"
-      content="A read-only view of the trader system, market data, algorithms, and service health."
-    />
-    <title>Trader — System dashboard</title>
+    <meta name="description" content="A read-only minute-bar chart for the trader system." />
+    <title>Trader — Market chart</title>
     <link rel="stylesheet" href="/styles.css" />
     <script src="/app.js" defer></script>
   </head>
   <body>
-    <a class="skip-link" href="#main">Skip to dashboard</a>
+    <a class="skip-link" href="#main">Skip to chart</a>
 
     <header class="topbar">
-      <a class="brand" href="/" aria-label="Trader dashboard home">
+      <a class="brand" href="/" aria-label="Trader chart home">
         <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
         <span>TRADER</span>
       </a>
       <div class="topbar-meta">
+        <span class="header-market">
+          <span class="status-dot" id="market-dot"></span>
+          <span id="market-label">Checking market</span>
+          <span id="market-time"></span>
+        </span>
         <span class="readonly-pill"><span aria-hidden="true">◇</span> Read only</span>
         <span class="updated" id="updated-at">Connecting…</span>
-        <button class="icon-button" id="refresh-button" type="button" aria-label="Refresh dashboard">
+        <button class="icon-button" id="refresh-button" type="button" aria-label="Refresh chart">
           <span aria-hidden="true">↻</span>
         </button>
       </div>
     </header>
 
-    <main id="main">
-      <section class="market-heading" aria-labelledby="market-title">
-        <div>
-          <p class="eyebrow">Market operations</p>
-          <h1 id="market-title">The whole system,<br /><em>one clear view.</em></h1>
-        </div>
-        <div class="market-clock">
-          <span class="status-dot" id="market-dot"></span>
-          <span>
-            <strong id="market-label">Checking market window</strong>
-            <small id="market-time">Eastern time</small>
-          </span>
-        </div>
-      </section>
-
+    <main id="main" class="chart-only-main">
       <section class="ticker-rail" id="ticker-rail" aria-label="Tracked tickers">
         <div class="ticker-skeleton"></div>
         <div class="ticker-skeleton"></div>
@@ -54,7 +42,7 @@
         <div class="chart-header">
           <div class="quote-block">
             <div class="symbol-row">
-              <h2 id="chart-title">—</h2>
+              <h1 id="chart-title">—</h1>
               <span class="exchange-label">US EQUITY</span>
             </div>
             <div class="quote-row">
@@ -70,7 +58,7 @@
           </div>
         </div>
 
-        <div class="chart-summary" id="chart-summary" aria-live="polite">
+        <div class="chart-summary" aria-live="polite">
           <span><small>OPEN</small><b id="stat-open">—</b></span>
           <span><small>HIGH</small><b id="stat-high">—</b></span>
           <span><small>LOW</small><b id="stat-low">—</b></span>
@@ -87,166 +75,11 @@
           </div>
           <div class="chart-empty" id="chart-empty" hidden>
             <strong>No bars yet</strong>
-            <span>This view will fill when the bars service stores data.</span>
+            <span>This chart will fill when the bars service stores data.</span>
           </div>
         </div>
-
-        <div class="chart-legend-row">
-          <div class="chart-legend">
-            <span><i class="legend-line"></i> Price</span>
-            <span><i class="legend-entry"></i> Entry</span>
-            <span><i class="legend-exit"></i> Exit all</span>
-            <span><i class="legend-event"></i> Event</span>
-          </div>
-          <label class="algo-filter">
-            <span>Overlays</span>
-            <select id="algo-filter" aria-label="Filter trade overlays by algorithm">
-              <option value="ALL">All algorithms</option>
-            </select>
-          </label>
-        </div>
-      </section>
-
-      <section class="summary-grid" aria-label="System summary">
-        <article class="metric-card surface">
-          <span class="metric-number" id="bar-count">—</span>
-          <div><strong>Minute bars</strong><small id="bar-caption">across tracked tickers</small></div>
-        </article>
-        <article class="metric-card surface">
-          <span class="metric-number" id="output-count">—</span>
-          <div><strong>Computed outputs</strong><small id="output-caption">waiting for algo service</small></div>
-        </article>
-        <article class="metric-card surface">
-          <span class="metric-number" id="trade-count">—</span>
-          <div><strong>Trade actions</strong><small>entries and exit-all points</small></div>
-        </article>
-        <article class="metric-card surface accent-card">
-          <span class="metric-number" id="config-version">—</span>
-          <div><strong>Config version</strong><small id="config-caption">source of truth</small></div>
-        </article>
-      </section>
-
-      <section class="workspace-grid">
-        <article class="surface panel nodes-panel" aria-labelledby="nodes-title">
-          <header class="panel-header">
-            <div>
-              <p class="eyebrow">Decision graph</p>
-              <h2 id="nodes-title">Signals &amp; algorithms</h2>
-            </div>
-            <span class="count-badge" id="node-count">0 nodes</span>
-          </header>
-          <div id="node-list" class="node-list">
-            <div class="empty-state">
-              <span class="empty-symbol">⌁</span>
-              <strong>No signals or algorithms configured</strong>
-              <p>Add them to config and bump its version. They will appear here as outputs land.</p>
-            </div>
-          </div>
-        </article>
-
-        <article class="surface panel services-panel" aria-labelledby="services-title">
-          <header class="panel-header">
-            <div>
-              <p class="eyebrow">Process pulse</p>
-              <h2 id="services-title">Service health</h2>
-            </div>
-            <span class="count-badge" id="service-count">0 online</span>
-          </header>
-          <div id="service-list" class="service-list">
-            <div class="row-skeleton"></div>
-            <div class="row-skeleton"></div>
-          </div>
-        </article>
-      </section>
-
-      <section class="surface panel performance-panel" aria-labelledby="performance-title">
-        <header class="panel-header">
-          <div>
-            <p class="eyebrow">Parameter sets</p>
-            <h2 id="performance-title">Algo performance</h2>
-          </div>
-          <span class="section-context" id="performance-context">—</span>
-        </header>
-        <div class="table-wrap" id="performance-table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Algorithm</th>
-                <th>Version</th>
-                <th>Entries</th>
-                <th>Closed</th>
-                <th>Open</th>
-                <th>Win rate</th>
-                <th>Total return</th>
-              </tr>
-            </thead>
-            <tbody id="performance-body"></tbody>
-          </table>
-          <div class="empty-state compact" id="performance-empty">
-            <span class="empty-symbol">↗</span>
-            <strong>No performance runs yet</strong>
-            <p>Version comparisons will appear after algo outputs are stored.</p>
-          </div>
-        </div>
-      </section>
-
-      <section class="activity-grid">
-        <article class="surface panel" aria-labelledby="problems-title">
-          <header class="panel-header">
-            <div>
-              <p class="eyebrow">Needs attention</p>
-              <h2 id="problems-title">Problems</h2>
-            </div>
-            <span class="count-badge alert" id="problem-count">0</span>
-          </header>
-          <div class="timeline" id="problem-list"></div>
-        </article>
-
-        <article class="surface panel" aria-labelledby="history-title">
-          <header class="panel-header">
-            <div>
-              <p class="eyebrow">Recent work</p>
-              <h2 id="history-title">Run history</h2>
-            </div>
-          </header>
-          <div class="timeline" id="history-list"></div>
-        </article>
       </section>
     </main>
-
-    <footer>
-      <span>TRADER / SYSTEM VIEW</span>
-      <span>SQLite <i>→</i> browser · no writes · no triggers</span>
-    </footer>
-
-    <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
-    <aside class="detail-drawer" id="detail-drawer" aria-labelledby="detail-title" aria-hidden="true">
-      <header class="drawer-header">
-        <div>
-          <p class="eyebrow" id="detail-type">Output detail</p>
-          <h2 id="detail-title">—</h2>
-        </div>
-        <button class="icon-button" id="drawer-close" type="button" aria-label="Close detail">×</button>
-      </header>
-      <div class="drawer-body">
-        <div class="detail-meta">
-          <span><small>TICKER</small><strong id="detail-ticker">—</strong></span>
-          <span><small>VERSION</small><strong id="detail-version">—</strong></span>
-          <span><small>VALUES</small><strong id="detail-count">—</strong></span>
-        </div>
-        <section>
-          <h3>Parameters &amp; inputs</h3>
-          <pre id="detail-definition">{}</pre>
-        </section>
-        <section>
-          <h3>Recent values</h3>
-          <div class="detail-visual" id="detail-visual" hidden>
-            <canvas id="detail-chart" role="img" aria-label="Recent numeric output values"></canvas>
-          </div>
-          <div id="detail-values" class="value-list"></div>
-        </section>
-      </div>
-    </aside>
 
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
   </body>
