@@ -20,13 +20,6 @@ const easternDateTime = new Intl.DateTimeFormat("en-US", {
   minute: "2-digit",
 });
 
-const easternTime = new Intl.DateTimeFormat("en-US", {
-  timeZone: "America/New_York",
-  hour: "numeric",
-  minute: "2-digit",
-  timeZoneName: "short",
-});
-
 const easternClock = new Intl.DateTimeFormat("en-US", {
   timeZone: "America/New_York",
   hour: "numeric",
@@ -916,7 +909,6 @@ function renderOverview() {
   const overview = state.overview;
   $("#updated-at").textContent = `Updated ${localUpdated.format(dateFromEpoch(overview.generated_at))}`;
   $("#market-label").textContent = overview.market.label;
-  $("#market-time").textContent = easternTime.format(dateFromEpoch(overview.market.eastern_time));
   $("#market-dot").classList.toggle("live", overview.market.state === "live");
   renderAlgoOverlay(state.bars);
   renderTickers(overview.quotes);

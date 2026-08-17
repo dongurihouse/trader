@@ -662,10 +662,6 @@ main {
   color: var(--text);
 }
 
-.header-market #market-time {
-  color: var(--subtle);
-}
-
 .market-heading {
   display: flex;
   align-items: end;
@@ -910,18 +906,12 @@ h1 em {
   gap: 8px;
   overflow-x: auto;
   overscroll-behavior-x: contain;
-  scrollbar-color: var(--line-strong) transparent;
-  scrollbar-width: thin;
+  scrollbar-width: none;
   scroll-snap-type: x proximity;
 }
 
 .date-strip::-webkit-scrollbar {
-  height: 4px;
-}
-
-.date-strip::-webkit-scrollbar-thumb {
-  background: var(--line-strong);
-  border-radius: 99px;
+  display: none;
 }
 
 .date-button {
@@ -1982,7 +1972,6 @@ pre {
     height: auto;
   }
 
-  .header-market #market-time,
   .header-market #market-label {
     display: none;
   }
