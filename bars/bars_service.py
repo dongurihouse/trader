@@ -814,6 +814,18 @@ class Collector:
         for key in total:
             total[key] += part[key]
 
+    def _session_window(self, day: date) -> Tuple[datetime, datetime]:
+        close = (
+            self.settings.early_close
+            if day in self.settings.early_close_days
+            else self.settings.regular_close
+        )
+        start = datetime.combine(day, self.settings.live_start, tzinfo=EASTERN)
+        end = datetime.combine(day, close, tzinfo=EASTERN) + timedelta(
+            minutes=self.settings.after_close_minutes
+        )
+        return start.astimezone(UTC), end.astimezone(UTC)
+
     def fetch_range(
         self,
         symbols: Sequence[str],
@@ -822,11 +834,21 @@ class Collector:
         allow_missing: bool = False,
     ) -> Dict[str, int]:
         total = self._empty_stats()
-        cursor = start.astimezone(UTC)
+        start = start.astimezone(UTC)
         end = end.astimezone(UTC)
-        while cursor <= end:
-            chunk_end = min(cursor + self.provider.MAX_RANGE, end)
-            start_iso = _iso_utc(cursor)
+        day = start.astimezone(EASTERN).date()
+        final_day = end.astimezone(EASTERN).date()
+        while day <= final_day:
+            if day.weekday() >= 5:
+                day += timedelta(days=1)
+                continue
+            session_start, session_end = self._session_window(day)
+            chunk_start = max(start, session_start)
+            chunk_end = min(end, session_end)
+            if chunk_start > chunk_end:
+                day += timedelta(days=1)
+                continue
+            start_iso = _iso_utc(chunk_start)
             end_iso = _iso_utc(chunk_end)
             logging.info(
                 "fetching %s from %s through %s",
@@ -838,7 +860,7 @@ class Collector:
                 symbols, start_iso, end_iso, allow_missing=allow_missing
             )
             self._add_stats(total, self.store.store_payload(payload))
-            cursor = chunk_end + timedelta(seconds=1)
+            day += timedelta(days=1)
         return total
 
     def poll(self, now: Optional[datetime] = None) -> Dict[str, int]:
