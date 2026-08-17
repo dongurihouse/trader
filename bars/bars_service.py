@@ -1271,33 +1271,49 @@ class Collector:
                             datetime.fromtimestamp(latest + 60, UTC),
                         )
                     while cursor < end:
-                        chunk_days = (
-                            1
-                            if spec.name == "pivot_points"
-                            else TECHNICAL_CHUNK_DAYS
-                        )
-                        chunk_end = min(
-                            end,
-                            cursor + timedelta(days=chunk_days),
-                        )
+                        chunk_start = cursor
+                        if spec.name == "pivot_points":
+                            day = cursor.astimezone(EASTERN).date()
+                            if day.weekday() >= 5:
+                                cursor = datetime.combine(
+                                    day + timedelta(days=1),
+                                    self.settings.live_start,
+                                    tzinfo=EASTERN,
+                                ).astimezone(UTC)
+                                continue
+                            session_start, session_end = self._session_window(day)
+                            chunk_start = max(cursor, session_start)
+                            chunk_end = min(end, session_end)
+                            if chunk_start >= chunk_end:
+                                cursor = datetime.combine(
+                                    day + timedelta(days=1),
+                                    self.settings.live_start,
+                                    tzinfo=EASTERN,
+                                ).astimezone(UTC)
+                                continue
+                        else:
+                            chunk_end = min(
+                                end,
+                                cursor + timedelta(days=TECHNICAL_CHUNK_DAYS),
+                            )
                         logging.info(
                             "fetching %s %s from %s through %s",
                             ticker,
                             spec.name,
-                            _iso_utc(cursor),
+                            _iso_utc(chunk_start),
                             _iso_utc(chunk_end),
                         )
                         payload = self.provider.fetch_technical(
                             ticker,
                             spec,
-                            _iso_utc(cursor),
+                            _iso_utc(chunk_start),
                             _iso_utc(chunk_end),
                         )
                         stats = self.store.store_metadata(
                             payload,
                             ticker,
                             spec,
-                            cursor,
+                            chunk_start,
                             chunk_end,
                         )
                         total["requests"] += 1
