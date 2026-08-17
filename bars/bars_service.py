@@ -145,12 +145,12 @@ def load_settings(path: Path) -> Settings:
     except (TypeError, ValueError) as exc:
         raise ConfigError("early_closes must contain YYYY-MM-DD strings") from exc
 
-    database_value = raw.get("database", "data/trader.sqlite3")
+    database_value = raw.get("database", "../../data/trader.sqlite3")
     database = Path(database_value).expanduser()
     if not database.is_absolute():
         database = (path.parent / database).resolve()
     oauth_store_value = provider.get(
-        "oauth_store", "data/robinhood_oauth.json"
+        "oauth_store", "../../data/robinhood_oauth.json"
     )
     oauth_store = Path(oauth_store_value).expanduser()
     if not oauth_store.is_absolute():

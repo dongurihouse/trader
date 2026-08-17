@@ -2,10 +2,10 @@
 
 `bars` is the one writer for the shared database's `bars` rows. It fetches
 minute OHLCV data through Robinhood's official Trading MCP and upserts it into
-`data/trader.sqlite3`.
+`../data/trader.sqlite3`.
 
 The service reads `config/config.json`. It does not store a Robinhood
-password. Its ignored `data/robinhood_oauth.json` file contains the OAuth
+password. Its ignored `../data/robinhood_oauth.json` file contains the OAuth
 refresh token with owner-only permissions.
 
 ## Behavior

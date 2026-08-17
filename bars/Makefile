@@ -13,7 +13,7 @@ auth: sync
 	@$(PYTHON) bars_service.py auth
 
 install: sync
-	@mkdir -p data ../log "$(HOME)/Library/LaunchAgents"
+	@mkdir -p ../data ../log "$(HOME)/Library/LaunchAgents"
 	@cp launchd/$(LABEL).plist "$(PLIST)"
 	@launchctl bootout gui/$(UID)/$(LABEL) >/dev/null 2>&1 || true
 	@launchctl bootstrap gui/$(UID) "$(PLIST)"
