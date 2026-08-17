@@ -24,6 +24,12 @@ const easternTime = new Intl.DateTimeFormat("en-US", {
   timeZoneName: "short",
 });
 
+const easternClock = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  hour: "numeric",
+  minute: "2-digit",
+});
+
 const localUpdated = new Intl.DateTimeFormat("en-US", {
   hour: "numeric",
   minute: "2-digit",
@@ -79,26 +85,55 @@ function showToast(message) {
 }
 
 class PriceChart {
-  constructor(canvas, tooltip) {
+  constructor(canvas, tooltip, onViewChange) {
     this.canvas = canvas;
     this.tooltip = tooltip;
+    this.onViewChange = onViewChange;
     this.context = canvas.getContext("2d");
     this.style = "line";
     this.payload = null;
     this.hoverIndex = null;
     this.bounds = null;
+    this.viewStart = 0;
+    this.viewEnd = -1;
+    this.drag = null;
+    this.minimumViewPoints = 10;
     this.resizeObserver = new ResizeObserver(() => this.draw());
     this.resizeObserver.observe(canvas.parentElement);
-    canvas.addEventListener("pointermove", (event) => this.onPointer(event));
-    canvas.addEventListener("pointerdown", (event) => this.onPointer(event));
-    canvas.addEventListener("pointerleave", () => this.clearPointer());
+    canvas.addEventListener("pointermove", (event) => this.onPointerMove(event));
+    canvas.addEventListener("pointerdown", (event) => this.onPointerDown(event));
+    canvas.addEventListener("pointerup", (event) => this.onPointerUp(event));
+    canvas.addEventListener("pointercancel", (event) => this.onPointerUp(event));
+    canvas.addEventListener("pointerleave", () => {
+      if (!this.drag) this.clearPointer();
+    });
+    canvas.addEventListener("wheel", (event) => this.onWheel(event), { passive: false });
   }
 
   setData(payload) {
+    const previousPayload = this.payload;
+    const previousBars = previousPayload?.bars || [];
+    const previousViewLength = this.viewLength();
+    const sameSeries = previousPayload?.ticker === payload?.ticker && previousPayload?.range === payload?.range;
+    const wasZoomed = previousViewLength > 0 && previousViewLength < previousBars.length;
+    const wasAtLatest = this.viewEnd >= previousBars.length - 1;
+    const previousStartTime = previousBars[this.viewStart]?.ts;
     this.payload = payload;
     this.hoverIndex = null;
     this.tooltip.hidden = true;
-    this.updateLabel();
+    if (sameSeries && wasZoomed && payload.bars.length) {
+      let start = 0;
+      if (wasAtLatest) {
+        start = payload.bars.length - previousViewLength;
+      } else {
+        const matchingIndex = payload.bars.findIndex((bar) => Number(bar.ts) >= Number(previousStartTime));
+        start = matchingIndex < 0 ? payload.bars.length - previousViewLength : matchingIndex;
+      }
+      this.setView(start, start + previousViewLength - 1, { notify: false, redraw: false });
+    } else {
+      this.resetView({ notify: false, redraw: false });
+    }
+    this.notifyViewChange();
     this.draw();
   }
 
@@ -111,12 +146,77 @@ class PriceChart {
 
   updateLabel() {
     const label = this.style === "candles" ? "candlestick" : "line";
+    const visible = this.visibleBars();
+    const first = visible[0];
+    const last = visible.at(-1);
     this.canvas.setAttribute(
       "aria-label",
-      this.payload?.bars?.length
-        ? `${this.payload.ticker} ${label} chart, ${this.payload.source_count.toLocaleString()} minute bars in the ${this.payload.range} range`
+      visible.length
+        ? `${this.payload.ticker} ${label} chart, ${visible.length.toLocaleString()} visible points from ${easternDateTime.format(dateFromEpoch(first.ts))} to ${easternDateTime.format(dateFromEpoch(last.ts))}`
         : `${this.payload?.ticker || "Ticker"} ${label} chart with no available bars`,
     );
+  }
+
+  totalBars() {
+    return this.payload?.bars?.length || 0;
+  }
+
+  viewLength() {
+    return this.viewEnd >= this.viewStart ? this.viewEnd - this.viewStart + 1 : 0;
+  }
+
+  visibleBars() {
+    return this.payload?.bars?.slice(this.viewStart, this.viewEnd + 1) || [];
+  }
+
+  setView(start, end, { notify = true, redraw = true } = {}) {
+    const total = this.totalBars();
+    if (!total) {
+      this.viewStart = 0;
+      this.viewEnd = -1;
+    } else {
+      const requestedLength = Math.max(1, Math.round(end - start + 1));
+      const length = Math.min(total, requestedLength);
+      const maximumStart = total - length;
+      this.viewStart = Math.max(0, Math.min(maximumStart, Math.round(start)));
+      this.viewEnd = this.viewStart + length - 1;
+    }
+    this.hoverIndex = null;
+    this.tooltip.hidden = true;
+    if (notify) this.notifyViewChange();
+    if (redraw) this.draw();
+  }
+
+  resetView({ notify = true, redraw = true } = {}) {
+    this.setView(0, this.totalBars() - 1, { notify, redraw });
+  }
+
+  zoom(factor, anchor = 0.5) {
+    const total = this.totalBars();
+    const currentLength = this.viewLength();
+    if (!total || !currentLength) return;
+    const minimum = Math.min(this.minimumViewPoints, total);
+    const nextLength = Math.max(minimum, Math.min(total, Math.round(currentLength * factor)));
+    if (nextLength === currentLength) return;
+    const safeAnchor = Math.max(0, Math.min(1, anchor));
+    const anchorIndex = this.viewStart + (currentLength - 1) * safeAnchor;
+    const nextStart = Math.round(anchorIndex - (nextLength - 1) * safeAnchor);
+    this.setView(nextStart, nextStart + nextLength - 1);
+  }
+
+  panTo(start) {
+    const length = this.viewLength();
+    this.setView(start, start + length - 1);
+  }
+
+  notifyViewChange() {
+    this.updateLabel();
+    this.onViewChange?.({
+      visible: this.viewLength(),
+      total: this.totalBars(),
+      canZoomIn: this.viewLength() > Math.min(this.minimumViewPoints, this.totalBars()),
+      canZoomOut: this.viewLength() < this.totalBars(),
+    });
   }
 
   size() {
@@ -136,7 +236,7 @@ class PriceChart {
     const { width, height } = this.size();
     const ctx = this.context;
     ctx.clearRect(0, 0, width, height);
-    const bars = this.payload?.bars || [];
+    const bars = this.visibleBars();
     if (!bars.length) return;
 
     const margin = { top: 14, right: width < 500 ? 49 : 62, bottom: 32, left: 4 };
@@ -184,21 +284,32 @@ class PriceChart {
     });
     const labelEvery = Math.max(1, Math.ceil(sessionStarts.length / Math.max(3, width / 110)));
     sessionStarts.forEach((item, index) => {
-      if (item.index === 0) return;
       const lineX = x(item.index);
-      ctx.beginPath();
-      ctx.strokeStyle = "rgba(227, 235, 240, 0.07)";
-      ctx.setLineDash([3, 5]);
-      ctx.moveTo(lineX, margin.top);
-      ctx.lineTo(lineX, height - margin.bottom);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      if (index % labelEvery === 0) {
+      if (item.index > 0) {
+        ctx.beginPath();
+        ctx.strokeStyle = "rgba(227, 235, 240, 0.07)";
+        ctx.setLineDash([3, 5]);
+        ctx.moveTo(lineX, margin.top);
+        ctx.lineTo(lineX, height - margin.bottom);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      if (sessionStarts.length > 1 && index % labelEvery === 0) {
         ctx.textAlign = "left";
         ctx.fillStyle = "#5f6c77";
-        ctx.fillText(item.label, Math.min(lineX + 4, width - margin.right - 30), height - 10);
+        ctx.fillText(item.label, Math.min(lineX + (item.index > 0 ? 4 : 0), width - margin.right - 30), height - 10);
       }
     });
+
+    if (sessionStarts.length <= 1 && bars.length > 1) {
+      const tickCount = Math.max(2, Math.min(5, Math.floor(plotWidth / 90)));
+      for (let tick = 0; tick < tickCount; tick += 1) {
+        const index = Math.round((bars.length - 1) * (tick / (tickCount - 1)));
+        ctx.textAlign = tick === 0 ? "left" : tick === tickCount - 1 ? "right" : "center";
+        ctx.fillStyle = "#5f6c77";
+        ctx.fillText(easternClock.format(dateFromEpoch(bars[index].ts)), x(index), height - 10);
+      }
+    }
 
     const maximumVolume = Math.max(...bars.map((bar) => Number(bar.volume)), 1);
     bars.forEach((bar, index) => {
@@ -285,13 +396,14 @@ class PriceChart {
   }
 
   onPointer(event) {
-    if (!this.payload?.bars?.length || !this.bounds) return;
+    const bars = this.visibleBars();
+    if (!bars.length || !this.bounds) return;
     const rectangle = this.canvas.getBoundingClientRect();
     const localX = event.clientX - rectangle.left;
     const ratio = (localX - this.bounds.margin.left) / this.bounds.plotWidth;
-    this.hoverIndex = Math.round(ratio * (this.payload.bars.length - 1));
-    this.hoverIndex = Math.max(0, Math.min(this.payload.bars.length - 1, this.hoverIndex));
-    const bar = this.payload.bars[this.hoverIndex];
+    this.hoverIndex = Math.round(ratio * (bars.length - 1));
+    this.hoverIndex = Math.max(0, Math.min(bars.length - 1, this.hoverIndex));
+    const bar = bars[this.hoverIndex];
     this.tooltip.replaceChildren(
       createElement("strong", "", easternDateTime.format(dateFromEpoch(bar.ts))),
       createElement("span", "", `O ${formatPrice(bar.open)} · H ${formatPrice(bar.high)}`),
@@ -307,6 +419,54 @@ class PriceChart {
     this.draw();
   }
 
+  onPointerDown(event) {
+    if (event.button !== 0 || !this.totalBars() || !this.bounds) return;
+    if (this.viewLength() === this.totalBars()) {
+      this.onPointer(event);
+      return;
+    }
+    this.drag = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startView: this.viewStart,
+      moved: false,
+    };
+    this.canvas.setPointerCapture?.(event.pointerId);
+    this.canvas.classList.add("is-dragging");
+    this.onPointer(event);
+  }
+
+  onPointerMove(event) {
+    if (!this.drag || this.drag.pointerId !== event.pointerId) {
+      this.onPointer(event);
+      return;
+    }
+    const distance = event.clientX - this.drag.startX;
+    if (Math.abs(distance) < 3 && !this.drag.moved) return;
+    this.drag.moved = true;
+    const barsMoved = Math.round((-distance / this.bounds.plotWidth) * this.viewLength());
+    this.panTo(this.drag.startView + barsMoved);
+    event.preventDefault();
+  }
+
+  onPointerUp(event) {
+    if (!this.drag || this.drag.pointerId !== event.pointerId) return;
+    const moved = this.drag.moved;
+    this.drag = null;
+    this.canvas.classList.remove("is-dragging");
+    if (this.canvas.hasPointerCapture?.(event.pointerId)) this.canvas.releasePointerCapture(event.pointerId);
+    if (!moved && event.type !== "pointercancel") this.onPointer(event);
+  }
+
+  onWheel(event) {
+    if (!this.totalBars() || !this.bounds) return;
+    event.preventDefault();
+    const rectangle = this.canvas.getBoundingClientRect();
+    const localX = event.clientX - rectangle.left;
+    const anchor = (localX - this.bounds.margin.left) / this.bounds.plotWidth;
+    this.zoom(Math.exp(event.deltaY * 0.0025), anchor);
+  }
+
   clearPointer() {
     this.hoverIndex = null;
     this.tooltip.hidden = true;
@@ -314,7 +474,24 @@ class PriceChart {
   }
 }
 
-const chart = new PriceChart($("#price-chart"), $("#chart-tooltip"));
+function renderViewport({ visible, total, canZoomIn, canZoomOut }) {
+  const payload = state.bars;
+  const isFullView = visible === total;
+  if (payload?.source_count === payload?.bars?.length) {
+    $("#stat-density").textContent = isFullView
+      ? `${integerFormat.format(total)} × 1 min`
+      : `${integerFormat.format(visible)} of ${integerFormat.format(total)} min`;
+  } else {
+    $("#stat-density").textContent = isFullView
+      ? `${integerFormat.format(payload?.source_count || 0)} min → ${integerFormat.format(total)} points`
+      : `${integerFormat.format(visible)} of ${integerFormat.format(total)} points`;
+  }
+  $("#zoom-in").disabled = !canZoomIn;
+  $("#zoom-out").disabled = !canZoomOut;
+  $("#zoom-reset").disabled = !canZoomOut;
+}
+
+const chart = new PriceChart($("#price-chart"), $("#chart-tooltip"), renderViewport);
 
 async function loadOverview({ quiet = false } = {}) {
   const refresh = $("#refresh-button");
@@ -402,9 +579,6 @@ async function loadBars({ quiet = false } = {}) {
     state.bars = payload;
     chart.setData(payload);
     $("#chart-empty").hidden = payload.bars.length > 0;
-    $("#stat-density").textContent = payload.source_count === payload.bars.length
-      ? `${integerFormat.format(payload.source_count)} × 1 min`
-      : `${integerFormat.format(payload.source_count)} min → ${integerFormat.format(payload.bars.length)} points`;
   } catch (error) {
     if (request === state.chartRequest) showToast(error.message);
   } finally {
@@ -433,6 +607,10 @@ $("#style-control").addEventListener("click", (event) => {
   });
   chart.setStyle(state.style);
 });
+
+$("#zoom-in").addEventListener("click", () => chart.zoom(0.5));
+$("#zoom-out").addEventListener("click", () => chart.zoom(2));
+$("#zoom-reset").addEventListener("click", () => chart.resetView());
 
 $("#refresh-button").addEventListener("click", () => loadOverview());
 
