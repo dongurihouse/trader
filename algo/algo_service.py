@@ -32,6 +32,8 @@ UTC = timezone.utc
 EASTERN = ZoneInfo("America/New_York")
 SYMBOL = re.compile(r"^[A-Z][A-Z0-9.-]{0,14}$")
 BAR_FIELDS = {"open", "high", "low", "close", "volume"}
+CYCLE_PAIR_LIMIT = 2_000
+CYCLE_PROGRESS_INTERVAL = 1_000
 METADATA_DEFAULTS = {
     "ema": {"period": 9},
     "sma": {"period": 9},
@@ -54,6 +56,9 @@ METADATA_DEFAULTS = {
 }
 _RVOL_BASELINES: dict[
     tuple[str, str, date, int, int], Optional[tuple[float, ...]]
+] = {}
+_OUTPUT_SESSION_SEEDS: dict[
+    tuple[str, str, str, str, int], tuple[tuple[int, float, int], ...]
 ] = {}
 
 
@@ -774,6 +779,43 @@ def _output_state(
     ts: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     _, session_open, _ = _session_window(settings, ts)
+    seed_key = (str(settings.database), settings.version, ticker, algo, session_open)
+    if seed_key not in _OUTPUT_SESSION_SEEDS:
+        last_close = connection.execute(
+            """
+            SELECT ts FROM outputs
+            WHERE ticker=? AND kind=? AND config=? AND ts<?
+              AND json_extract(output,'$[1]')=1
+            ORDER BY ts DESC LIMIT 1
+            """,
+            (ticker, algo, settings.version, session_open),
+        ).fetchone()
+        rows = connection.execute(
+            """
+            SELECT o.ts, o.output, b.close
+            FROM outputs o
+            JOIN bars b ON b.ticker=o.ticker AND b.ts=o.ts
+            WHERE o.ticker=? AND o.kind=? AND o.config=?
+              AND o.ts>? AND o.ts<?
+              AND json_extract(o.output,'$[0]')=1
+            ORDER BY o.ts
+            """,
+            (
+                ticker,
+                algo,
+                settings.version,
+                int(last_close["ts"]) if last_close else -1,
+                session_open,
+            ),
+        ).fetchall()
+        _OUTPUT_SESSION_SEEDS[seed_key] = tuple(
+            (
+                int(row["ts"]),
+                float(row["close"]),
+                _algo_output(json.loads(row["output"]))[2],
+            )
+            for row in rows
+        )
     rows = connection.execute(
         """
         SELECT o.ts, o.output, b.close
@@ -781,13 +823,16 @@ def _output_state(
         JOIN bars b ON b.ticker=o.ticker AND b.ts=o.ts
         WHERE o.ticker=? AND o.kind=? AND o.config=?
           AND o.ts>=? AND o.ts<?
-          AND (substr(o.output,1,6)='[true,' OR substr(o.output,1,12)='[false,true,')
+          AND (json_extract(o.output,'$[0]')=1 OR json_extract(o.output,'$[1]')=1)
         ORDER BY o.ts
         """,
         (ticker, algo, settings.version, session_open, ts),
     ).fetchall()
     prior: list[dict[str, Any]] = []
-    open_entries: list[dict[str, Any]] = []
+    open_entries = [
+        {"ts": entry_ts, "price": price, "direction": direction}
+        for entry_ts, price, direction in _OUTPUT_SESSION_SEEDS[seed_key]
+    ]
     for row in rows:
         output = json.loads(row["output"])
         is_entry, is_close, direction = _algo_output(output)
@@ -939,32 +984,48 @@ def _log(
     )
 
 
-def _pending(connection: sqlite3.Connection, settings: Settings) -> list[tuple[str, int]]:
+def _pending(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    limit: int = CYCLE_PAIR_LIMIT,
+    stop_event: Optional[threading.Event] = None,
+) -> list[tuple[str, int]]:
     kinds = settings.output_kinds()
-    if not kinds:
+    if not kinds or limit < 1:
         return []
-    tickers = ",".join("?" for _ in settings.tickers)
-    names = ",".join("?" for _ in kinds)
-    query = """
-        WITH latest AS (
-            SELECT ticker, MAX(ts) AS ts FROM bars
-            WHERE ticker IN (%s) GROUP BY ticker
-        )
-        SELECT b.ticker, b.ts FROM bars b JOIN latest l ON l.ticker=b.ticker
-        WHERE b.ts>=l.ts-? AND (
-            SELECT COUNT(*) FROM outputs o
-            WHERE o.ticker=b.ticker AND o.ts=b.ts AND o.config=?
-              AND o.kind IN (%s)
-        )<? ORDER BY b.ticker,b.ts
-    """ % (tickers, names)
-    arguments = (
-        *settings.tickers,
-        settings.evaluation_days * 86_400,
-        settings.version,
-        *kinds,
-        len(kinds),
-    )
-    return [(row["ticker"], int(row["ts"])) for row in connection.execute(query, arguments)]
+    marker = kinds[-1]
+    pending: list[tuple[str, int]] = []
+    for ticker in sorted(settings.tickers):
+        if stop_event is not None and stop_event.is_set():
+            break
+        latest = connection.execute(
+            "SELECT MAX(ts) FROM bars WHERE ticker=?", (ticker,)
+        ).fetchone()[0]
+        if latest is None:
+            continue
+        remaining = limit - len(pending)
+        rows = connection.execute(
+            """
+            SELECT b.ts FROM bars b
+            WHERE b.ticker=? AND b.ts>=? AND NOT EXISTS (
+                SELECT 1 FROM outputs o
+                WHERE o.ticker=b.ticker AND o.ts=b.ts
+                  AND o.kind=? AND o.config=?
+            )
+            ORDER BY b.ts LIMIT ?
+            """,
+            (
+                ticker,
+                int(latest) - settings.evaluation_days * 86_400,
+                marker,
+                settings.version,
+                remaining,
+            ),
+        ).fetchall()
+        pending.extend((ticker, int(row["ts"])) for row in rows)
+        if len(pending) == limit:
+            break
+    return pending
 
 
 def _write_result(
@@ -1023,8 +1084,11 @@ def _write_result(
     return stats
 
 
-def cycle(config_path: Path) -> tuple[dict[str, int], Settings]:
+def cycle(
+    config_path: Path, stop_event: Optional[threading.Event] = None
+) -> tuple[dict[str, int], Settings]:
     _RVOL_BASELINES.clear()
+    _OUTPUT_SESSION_SEEDS.clear()
     clear_shape_cache()
     config_path = config_path.resolve()
     current = load_settings(config_path)
@@ -1055,11 +1119,26 @@ def cycle(config_path: Path) -> tuple[dict[str, int], Settings]:
         connection.commit()
 
         stats = {"pairs": 0, "outputs": 0, "entries": 0, "exits": 0}
-        for ticker, ts in _pending(connection, settings):
+        for ticker, ts in _pending(connection, settings, stop_event=stop_event):
+            if stop_event is not None and stop_event.is_set():
+                break
             part = _write_result(connection, settings, run_core(connection, settings, ticker, ts))
             for key in stats:
                 stats[key] += part[key]
-        message = "cycle complete pairs=%d outputs=%d entries=%d exits=%d" % (
+            if stats["pairs"] % CYCLE_PROGRESS_INTERVAL == 0:
+                progress = "cycle progress pairs=%d outputs=%d entries=%d exits=%d" % (
+                    stats["pairs"], stats["outputs"], stats["entries"], stats["exits"]
+                )
+                _log(connection, "info", progress)
+                connection.commit()
+                logging.info(progress)
+        label = (
+            "cycle stopped"
+            if stop_event is not None and stop_event.is_set()
+            else "cycle batch complete"
+        )
+        message = "%s pairs=%d outputs=%d entries=%d exits=%d" % (
+            label,
             stats["pairs"], stats["outputs"], stats["entries"], stats["exits"]
         )
         if stats["pairs"]:
@@ -1157,9 +1236,14 @@ class Service:
             _best_effort_log(self.config_path, "info", "service started")
             while not self.stop_event.is_set():
                 try:
-                    _, settings = cycle(self.config_path)
-                    delay = settings.poll_seconds
+                    stats, settings = cycle(self.config_path, self.stop_event)
+                    delay = (
+                        0
+                        if stats["pairs"] == CYCLE_PAIR_LIMIT
+                        else settings.poll_seconds
+                    )
                 except Exception as exc:
+                    delay = 30
                     logging.exception("cycle failed")
                     _best_effort_log(self.config_path, "error", "cycle failed: %s" % exc)
                 self.stop_event.wait(delay)

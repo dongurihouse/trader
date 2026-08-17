@@ -4,11 +4,12 @@
 `trades` rows. It reads minute bars, evaluates every enabled signal and algo,
 and stores deterministic JSON output under the config version.
 
-The service has no market clock. Every cycle finds configured ticker/bar pairs
-inside the evaluation window that do not yet have every enabled output under
-the current version. It processes each ticker oldest first. A config change with
-a new version therefore fills the same bounded window without a separate
-backtest path.
+The service has no market clock. Every cycle takes at most 2,000 configured
+ticker/bar pairs inside the evaluation window that do not have outputs under
+the current version. It processes each ticker oldest first. All outputs for a
+pair are committed together, so one configured output is the completion marker.
+A config change with a new version therefore fills the same bounded window
+without a separate backtest path.
 
 Every entry or exit produced by an algo with `"trades": true` writes a trade,
 whether the evaluated bar is historical or new. Other algos write outputs only.
@@ -17,8 +18,9 @@ The default config enables the two-sided `orb5` opening-range breakout and the
 read-only `shape` path forecast.
 
 The service exposes read-only process health at
-`http://127.0.0.1:8791/health` for Dash. It stores completed work summaries,
-warnings, and errors in `logs`. It does not write heartbeat or idle-cycle rows.
+`http://127.0.0.1:8791/health` for Dash. A non-empty cycle logs progress every
+1,000 pairs and a batch summary. It also stores warnings and errors in `logs`.
+It does not write heartbeat or idle-cycle rows.
 
 ## Config
 
