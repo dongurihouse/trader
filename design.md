@@ -92,8 +92,8 @@ bar timestamps supply `t`. One call carries all work:
 
 ### The core
 
-- No clock, no side effects. Data input: the bars and events tables,
-  read-only.
+- No clock, no side effects. Data input: the bars, events, and trades
+  tables, read-only.
 - Two layers with a strict rule: a signal (vwap, sma, and so on) queries
   bars, the events table, and other signals; an algo queries signal
   outputs, the outputs of other algos, and its own prior outputs.
@@ -111,18 +111,14 @@ bar timestamps supply `t`. One call carries all work:
 
 ### The algo output contract
 
-- An algo's output at `t` is one pair of booleans: `(is_entry,
-  is_close_all)`. `is_entry` opens one unit at `t`. `is_close_all` closes
-  every open unit of the algo at `t`. When both are true, the close wins
-  and no entry occurs.
-- The flags are independent, so an algo can produce only entries or only
-  exits. An exit-only algo, such as a trail stop, never sets `is_entry`.
-- An algo can take an exit from another algo: its `is_close_all` reads the
-  other algo's pair. An exit-only algo anchors on the entries it reads; a
-  trail stop reads the entry algo's `is_entry` stream to know where a
-  position starts.
-- An exit-only algo holds no units of its own, so it never trades; it acts
-  through the algo that reads it.
+- Input: besides its signals, an algo receives its open entries at `t`
+  from the trades table; entry prices come from bars.
+- Output at `t` is one pair of booleans: `(is_entry, is_close_all)`. The
+  algo decides among three moves from its open entries: `is_entry` opens
+  one more unit, `is_close_all` closes every open unit, and both false is
+  quiet. Both true does not occur.
+- An exit device such as a trail stop lives inside the algo: the open
+  entries give the anchor, and the bars since the anchor give the level.
 - Position state lives in the database only: open units are the entries
   since the last `exit_all` in the trades table, regardless of version.
   The loop keeps no position in memory. Work under one ticker runs oldest
