@@ -11,13 +11,17 @@ refresh token with owner-only permissions.
 ## Behavior
 
 - Backfill the configured 120-day window once for each ticker. A ticker added
-  later gets the same backfill before its next poll or sweep.
+  later gets the same backfill before its next poll or sweep. Failed work
+  resumes after its last committed provider session.
 - During the configured live window, poll once per minute from each ticker's
-  last stored bar. A restart or short outage catches up automatically.
+  last stored bar. Each poll catches up by at most seven calendar days, so a
+  long outage cannot turn one poll into unbounded work.
 - After the close, fetch the trailing 30 days for every ticker. This nightly
   sweep repairs gaps without a separate reconciliation path.
 - Store every Robinhood bar and record its `interpolated` flag.
+- Require a result block for every requested ticker before advancing work.
 - Upsert by `(ticker, ts)`, so every repeated fetch is safe.
+- Keep backfill and scheduled-sweep progress in `bar_jobs`, not log text.
 - Serve process health at `http://127.0.0.1:8789/health` for Dash.
 - Append run summaries and problems to the shared `logs` table. Do not write
   heartbeat rows.
@@ -33,7 +37,7 @@ Edit `../config/config.json`. It contains the ticker list, early-close dates,
 live polling window, 120-day initial backfill, 30-day sweep, and provider
 settings. The default live window is 04:00 Eastern through five minutes after
 the regular or configured early close. `bars.api_port` sets the loopback health
-API port.
+API port. `bars.poll_catchup_days` bounds one live catch-up cycle.
 
 ## Operate
 

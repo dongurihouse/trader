@@ -14,6 +14,7 @@
     "api_port": 8789,
     "backfill_days": 120,
     "sweep_days": 30,
+    "poll_catchup_days": 7,
     "idle_seconds": 300,
     "retry_seconds": 30,
     "retry_max_seconds": 900,

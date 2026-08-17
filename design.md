@@ -12,6 +12,7 @@ through calls between services.
 | table   | writing service       | readers         |
 | ------- | --------------------- | --------------- |
 | bars    | bars                  | algo, dashboard |
+| bar_jobs | bars                 | bars            |
 | events  | events                | algo, dashboard |
 | trades  | algo                  | dashboard       |
 | outputs | algo                  | dashboard       |
@@ -39,7 +40,8 @@ when.
 Initial backfill:
 
 - Fetch 120 days of minute bars once for each ticker.
-- Record completion in `logs`. A failed backfill retries, while a completed
+- Record the fixed window, per-session progress, and completion in `bar_jobs`.
+  A failed backfill resumes after its last committed session, while a completed
   ticker does not repeat the initial fetch.
 - A ticker added to config gets the same backfill before its next poll or
   sweep.
@@ -50,7 +52,10 @@ Live poll:
   config.
 - Polls once per minute and writes minute bars.
 - Every poll starts from the last stored bar, so an outage catches up by
-  itself. No reconcile step exists.
+  itself. Each poll fetches at most seven calendar days, so a long outage
+  catches up in bounded steps. No reconcile step exists.
+- A response must contain every requested ticker. An omitted ticker fails the
+  cycle and retries; it is never treated as successful progress.
 
 Nightly sweep:
 
@@ -265,6 +270,23 @@ CREATE TABLE bars (
     CHECK (interpolated IN (0, 1))
 );
 
+CREATE TABLE bar_jobs (
+    kind         TEXT    NOT NULL,  -- backfill or sweep
+    scope        TEXT    NOT NULL,  -- ticker, or all for a sweep
+    target       TEXT    NOT NULL,  -- day count, or scheduled sweep date
+    window_start INTEGER NOT NULL,
+    window_end   INTEGER NOT NULL,
+    progress_ts  INTEGER,           -- last committed provider session
+    started_at   INTEGER NOT NULL,
+    completed_at INTEGER,
+    PRIMARY KEY (kind, scope, target),
+    CHECK (kind IN ('backfill', 'sweep')),
+    CHECK (window_start <= window_end),
+    CHECK (progress_ts IS NULL OR
+           (window_start <= progress_ts AND progress_ts <= window_end)),
+    CHECK (completed_at IS NULL OR progress_ts IS NOT NULL)
+);
+
 CREATE TABLE events (
     ticker       TEXT    NOT NULL,
     event        TEXT    NOT NULL,  -- kind, e.g. 'earnings'
@@ -319,6 +341,8 @@ Notes:
 - WAL: readers never block the writer. Each process has its own connection
   and busy timeout. All timestamps are epoch seconds, UTC.
 - Bar writes are idempotent upserts; a repeated fetch is harmless.
+- `bar_jobs` holds resumable work state. Logs describe runs and problems but
+  never control work.
 - `bars.interpolated` preserves Robinhood's gap-fill flag; no returned bar is
   discarded at ingest.
 - `trades` binds every row to one algo; nothing consolidates across algos.
@@ -337,10 +361,12 @@ flowchart TB
     EVENTS[events service<br/>daily — deferred]
 
     BARS --> BT[(bars)]
+    BARS --> BJ[(bar_jobs)]
     EVENTS --> ET[(events)]
 
     subgraph DB [one database — one writing service per table]
         BT
+        BJ
         ET
         TR[(trades)]
         OUT[(outputs)]

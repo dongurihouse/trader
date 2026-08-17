@@ -14,6 +14,25 @@ CREATE TABLE IF NOT EXISTS bars (
     CHECK (interpolated IN (0, 1))
 );
 
+CREATE TABLE IF NOT EXISTS bar_jobs (
+    kind         TEXT    NOT NULL,
+    scope        TEXT    NOT NULL,
+    target       TEXT    NOT NULL,
+    window_start INTEGER NOT NULL,
+    window_end   INTEGER NOT NULL,
+    progress_ts  INTEGER,
+    started_at   INTEGER NOT NULL,
+    completed_at INTEGER,
+    PRIMARY KEY (kind, scope, target),
+    CHECK (kind IN ('backfill', 'sweep')),
+    CHECK (window_start <= window_end),
+    CHECK (
+        progress_ts IS NULL OR
+        (window_start <= progress_ts AND progress_ts <= window_end)
+    ),
+    CHECK (completed_at IS NULL OR progress_ts IS NOT NULL)
+);
+
 CREATE TABLE IF NOT EXISTS events (
     ticker       TEXT    NOT NULL,
     event        TEXT    NOT NULL,
