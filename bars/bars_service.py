@@ -834,12 +834,18 @@ class Collector:
         self._record("poll complete", total)
         return total
 
-    def sweep(self, now: Optional[datetime] = None) -> Dict[str, int]:
+    def sweep(
+        self,
+        now: Optional[datetime] = None,
+        scheduled_day: Optional[date] = None,
+    ) -> Dict[str, int]:
         current = (now or datetime.now(UTC)).astimezone(UTC)
         start = current - timedelta(days=self.settings.sweep_days)
         stats = self.fetch_range(self.settings.tickers, start, current)
-        local_day = current.astimezone(EASTERN).date().isoformat()
-        self._record("sweep complete day=%s" % local_day, stats)
+        prefix = "sweep complete"
+        if scheduled_day is not None:
+            prefix += " day=%s" % scheduled_day.isoformat()
+        self._record(prefix, stats)
         return stats
 
     def _record(self, prefix: str, stats: Dict[str, int]) -> None:
@@ -918,7 +924,7 @@ class Service:
             self.collector.poll(now)
             return self.settings.poll_seconds
         if now >= final_at and not self.collector.store.sweep_complete(day):
-            self.collector.sweep(now)
+            self.collector.sweep(now, scheduled_day=day)
         return self.settings.idle_seconds
 
     def run(self) -> None:
