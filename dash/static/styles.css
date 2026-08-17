@@ -836,6 +836,117 @@ h1 em {
   margin-left: auto;
 }
 
+.quality-notice {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 54px;
+  margin-top: 14px;
+  padding: 9px 11px;
+  background: rgba(244, 197, 106, 0.075);
+  border: 1px solid rgba(244, 197, 106, 0.24);
+  border-radius: 11px;
+}
+
+.quality-marker {
+  display: grid;
+  flex: 0 0 25px;
+  width: 25px;
+  height: 25px;
+  place-items: center;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  font-weight: 850;
+  background: var(--amber);
+  border-radius: 7px;
+}
+
+.quality-copy {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 3px;
+  min-width: 250px;
+}
+
+.quality-copy strong,
+.quality-copy span,
+.quality-window,
+.quality-more {
+  font-family: var(--mono);
+}
+
+.quality-copy strong {
+  color: var(--amber);
+  font-size: 0.64rem;
+  font-weight: 760;
+}
+
+.quality-copy span {
+  color: var(--muted);
+  font-size: 0.58rem;
+}
+
+.quality-windows {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-left: auto;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.quality-window {
+  flex: 0 0 auto;
+  padding: 6px 8px;
+  color: var(--amber);
+  font-size: 0.57rem;
+  white-space: nowrap;
+  background: rgba(244, 197, 106, 0.08);
+  border: 1px solid rgba(244, 197, 106, 0.2);
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.quality-window:hover,
+.quality-window:focus-visible {
+  color: var(--text);
+  border-color: rgba(244, 197, 106, 0.5);
+  outline: none;
+}
+
+.quality-more {
+  flex: 0 0 auto;
+  color: var(--subtle);
+  font-size: 0.56rem;
+  white-space: nowrap;
+}
+
+.quality-notice.is-clear {
+  background: rgba(112, 216, 220, 0.045);
+  border-color: rgba(112, 216, 220, 0.14);
+}
+
+.quality-notice.is-clear .quality-marker {
+  color: var(--cyan);
+  background: rgba(112, 216, 220, 0.13);
+}
+
+.quality-notice.is-clear .quality-marker::before {
+  content: "✓";
+}
+
+.quality-notice.is-clear .quality-marker {
+  font-size: 0;
+}
+
+.quality-notice.is-clear .quality-marker::before,
+.quality-notice.is-clear .quality-copy strong {
+  color: var(--cyan);
+  font-size: 0.68rem;
+}
+
 .chart-stage {
   position: relative;
   height: 400px;
@@ -877,6 +988,13 @@ h1 em {
 
 .chart-tooltip span {
   color: var(--muted);
+}
+
+.chart-tooltip .tooltip-quality {
+  margin-top: 5px;
+  padding-top: 5px;
+  color: var(--amber);
+  border-top: 1px solid rgba(244, 197, 106, 0.2);
 }
 
 .chart-loading,
@@ -1765,6 +1883,22 @@ pre {
 
   .chart-density {
     display: none !important;
+  }
+
+  .quality-notice {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .quality-copy {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .quality-windows {
+    flex: 0 0 100%;
+    width: 100%;
+    margin-left: 0;
   }
 
   .chart-stage {

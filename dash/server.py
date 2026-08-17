@@ -149,12 +149,13 @@ class DashboardData:
                     "trades": [],
                     "events": [],
                     "source_count": 0,
+                    "interpolated_count": 0,
                 }
 
             start = self._range_start(connection, ticker, int(latest), span)
             rows = connection.execute(
                 """
-                SELECT ts, open, high, low, close, volume, fetched_at
+                SELECT ts, open, high, low, close, volume, interpolated, fetched_at
                 FROM bars
                 WHERE ticker = ? AND ts >= ?
                 ORDER BY ts
@@ -197,6 +198,7 @@ class DashboardData:
             "start": int(rows[0]["ts"]) if rows else None,
             "end": int(rows[-1]["ts"]) if rows else None,
             "source_count": len(rows),
+            "interpolated_count": sum(int(row["interpolated"]) for row in rows),
             "bars": compacted,
             "trades": trades,
             "events": events,
@@ -613,6 +615,8 @@ class DashboardData:
                         "low": min(item["low"] for item in bucket),
                         "close": bucket[-1]["close"],
                         "volume": sum(item["volume"] for item in bucket),
+                        "interpolated": int(any(item["interpolated"] for item in bucket)),
+                        "interpolated_count": sum(int(item["interpolated"]) for item in bucket),
                         "fetched_at": max(item["fetched_at"] for item in bucket),
                         "samples": len(bucket),
                     }
