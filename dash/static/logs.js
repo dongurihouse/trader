@@ -56,14 +56,67 @@ async function loadLogs({ quiet = false } = {}) {
   if (state.service) parameters.set("service", state.service);
   if (state.level) parameters.set("level", state.level);
   try {
-    const payload = await api(`/api/logs?${parameters}`);
+    const [logsResult, healthResult] = await Promise.allSettled([
+      api(`/api/logs?${parameters}`),
+      api("/api/health"),
+    ]);
     if (request !== state.request) return;
-    renderLogs(payload);
+    if (healthResult.status === "fulfilled") renderHealth(healthResult.value);
+    else renderHealth(null);
+    if (logsResult.status === "rejected") throw logsResult.reason;
+    renderLogs(logsResult.value);
   } catch (error) {
     if (request === state.request) showToast(error.message);
   } finally {
     if (request === state.request) refresh.classList.remove("is-spinning");
   }
+}
+
+function formatUptime(startedAt) {
+  const seconds = Math.max(0, Math.floor(Date.now() / 1000 - Number(startedAt)));
+  if (seconds < 60) return `${seconds}s uptime`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m uptime`;
+  if (seconds < 86_400) {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    return `${hours}h ${minutes}m uptime`;
+  }
+  const days = Math.floor(seconds / 86_400);
+  const hours = Math.floor((seconds % 86_400) / 3600);
+  return `${days}d ${hours}h uptime`;
+}
+
+function renderHealth(payload) {
+  for (const service of ["bars", "algo"]) {
+    renderHealthIndicator(service, payload?.services?.[service] || null, Boolean(payload));
+  }
+}
+
+function renderHealthIndicator(service, health, responseAvailable) {
+  const indicator = $(`#health-${service}`);
+  const status = $(`#health-${service}-status`);
+  const detail = $(`#health-${service}-detail`);
+  let stateName = "offline";
+  let statusText = "Unavailable";
+  let detailText = responseAvailable ? "Health endpoint unavailable" : "Health check failed";
+
+  if (health?.state === "active" && health.level !== "error") {
+    stateName = "healthy";
+    statusText = "Healthy";
+    const details = [];
+    if (health.pid) details.push(`PID ${health.pid}`);
+    if (health.started_at) details.push(formatUptime(health.started_at));
+    detailText = details.join(" · ") || "Endpoint responding";
+  } else if (health && health.state !== "stale" && health.level !== "error") {
+    stateName = "degraded";
+    statusText = "Degraded";
+    detailText = health.message || "Endpoint response is stale";
+  }
+
+  indicator.className = `health-indicator is-${stateName}`;
+  indicator.setAttribute("aria-label", `${service} service: ${statusText}. ${detailText}`);
+  status.textContent = statusText;
+  detail.textContent = detailText;
 }
 
 function renderLogs(payload) {

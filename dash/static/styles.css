@@ -239,6 +239,102 @@ footer {
 .log-counts .warn strong { color: var(--amber); }
 .log-counts .error strong { color: var(--red); }
 
+.service-health-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.health-indicator {
+  display: grid;
+  grid-template-columns: 10px auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  min-height: 64px;
+  padding: 12px 15px;
+  background: rgba(16, 23, 33, 0.68);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+}
+
+.health-indicator-dot {
+  width: 9px;
+  height: 9px;
+  background: var(--subtle);
+  border-radius: 50%;
+  box-shadow: 0 0 0 4px rgba(95, 108, 119, 0.12);
+}
+
+.health-indicator-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.health-indicator-copy small,
+.health-indicator-copy strong,
+.health-indicator-detail {
+  font-family: var(--mono);
+}
+
+.health-indicator-copy small {
+  color: var(--subtle);
+  font-size: 0.54rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.health-indicator-copy strong {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.health-indicator-detail {
+  justify-self: end;
+  color: var(--subtle);
+  font-size: 0.59rem;
+  text-align: right;
+}
+
+.health-indicator.is-healthy {
+  border-color: rgba(216, 255, 114, 0.2);
+}
+
+.health-indicator.is-healthy .health-indicator-dot {
+  background: var(--acid);
+  box-shadow: 0 0 0 4px var(--acid-soft);
+}
+
+.health-indicator.is-healthy .health-indicator-copy strong {
+  color: var(--acid);
+}
+
+.health-indicator.is-degraded {
+  border-color: rgba(244, 197, 106, 0.24);
+}
+
+.health-indicator.is-degraded .health-indicator-dot {
+  background: var(--amber);
+  box-shadow: 0 0 0 4px rgba(244, 197, 106, 0.11);
+}
+
+.health-indicator.is-degraded .health-indicator-copy strong {
+  color: var(--amber);
+}
+
+.health-indicator.is-offline {
+  border-color: rgba(255, 123, 115, 0.24);
+}
+
+.health-indicator.is-offline .health-indicator-dot {
+  background: var(--red);
+  box-shadow: 0 0 0 4px rgba(255, 123, 115, 0.1);
+}
+
+.health-indicator.is-offline .health-indicator-copy strong {
+  color: var(--red);
+}
+
 .log-surface {
   min-height: 540px;
   overflow: hidden;
@@ -1631,6 +1727,10 @@ pre {
   .log-counts {
     min-width: 0;
     grid-template-columns: 1fr 1fr;
+  }
+
+  .service-health-grid {
+    grid-template-columns: 1fr;
   }
 
   .log-counts span:nth-child(2) {

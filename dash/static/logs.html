@@ -46,6 +46,25 @@
         </div>
       </section>
 
+      <section class="service-health-grid" aria-label="Live service health">
+        <article class="health-indicator is-checking" id="health-bars">
+          <span class="health-indicator-dot" aria-hidden="true"></span>
+          <div class="health-indicator-copy">
+            <small>Bars endpoint</small>
+            <strong id="health-bars-status">Checking</strong>
+          </div>
+          <span class="health-indicator-detail" id="health-bars-detail">Waiting for response</span>
+        </article>
+        <article class="health-indicator is-checking" id="health-algo">
+          <span class="health-indicator-dot" aria-hidden="true"></span>
+          <div class="health-indicator-copy">
+            <small>Algo endpoint</small>
+            <strong id="health-algo-status">Checking</strong>
+          </div>
+          <span class="health-indicator-detail" id="health-algo-detail">Waiting for response</span>
+        </article>
+      </section>
+
       <section class="log-surface surface" aria-label="Service log entries">
         <div class="log-toolbar">
           <label>

@@ -60,4 +60,5 @@ the loopback ports configured by `bars.api_port` and `algo.api_port`.
 
 Open <http://127.0.0.1:8790/logs> to see service logs in Dash. The view reads
 the shared SQLite `logs` table, refreshes every five seconds, and filters by
-service, level, and row count.
+service, level, and row count. It also shows live Bars and Algo health from the
+loopback service endpoints.
