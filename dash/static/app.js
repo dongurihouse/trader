@@ -795,9 +795,7 @@ class PriceChart {
   }
 }
 
-function renderViewport({ canZoomIn, canZoomOut, firstDate, lastDate }) {
-  $("#zoom-in").disabled = !canZoomIn;
-  $("#zoom-out").disabled = !canZoomOut;
+function renderViewport({ firstDate, lastDate }) {
   renderDateSelection(firstDate && firstDate === lastDate ? firstDate : null);
 }
 
@@ -1058,9 +1056,6 @@ document.addEventListener("keydown", (event) => {
   setTraderMenu(false);
   $("#trader-menu-button").focus();
 });
-
-$("#zoom-in").addEventListener("click", () => chart.zoom(0.5));
-$("#zoom-out").addEventListener("click", () => chart.zoom(2));
 
 loadOverview();
 setInterval(() => loadOverview({ quiet: true }), 30_000);

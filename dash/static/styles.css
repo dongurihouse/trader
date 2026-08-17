@@ -896,46 +896,6 @@ h1 em {
   color: var(--red);
 }
 
-.chart-controls {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.zoom-control {
-  display: flex;
-  gap: 3px;
-  padding: 3px;
-  background: var(--ink);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-}
-
-.zoom-control button {
-  min-width: 46px;
-  padding: 8px 10px;
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 0.66rem;
-  font-weight: 700;
-  background: transparent;
-  border: 0;
-  border-radius: 7px;
-  cursor: pointer;
-}
-
-.zoom-control button:hover {
-  color: var(--text);
-}
-
-.zoom-control button:disabled {
-  color: var(--subtle);
-  cursor: default;
-  opacity: 0.42;
-}
-
 .date-rail {
   min-width: 0;
   margin-bottom: 10px;
@@ -2054,15 +2014,6 @@ pre {
   .chart-header {
     display: flex;
     align-items: center;
-  }
-
-  .chart-controls {
-    align-items: center;
-    flex-direction: row;
-  }
-
-  .zoom-control {
-    width: auto;
   }
 
   .chart-stage {
