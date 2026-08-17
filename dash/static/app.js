@@ -899,8 +899,6 @@ function renderAlgoOverlay(payload = null) {
 }
 
 async function loadOverview({ quiet = false } = {}) {
-  const refresh = $("#refresh-button");
-  if (!quiet) refresh.classList.add("is-spinning");
   try {
     const overview = await api("/api/overview?compact=1");
     state.overview = overview;
@@ -913,8 +911,6 @@ async function loadOverview({ quiet = false } = {}) {
   } catch (error) {
     showToast(error.message);
     if (!quiet) $("#updated-at").textContent = "Connection failed";
-  } finally {
-    refresh.classList.remove("is-spinning");
   }
 }
 
@@ -1065,8 +1061,6 @@ document.addEventListener("keydown", (event) => {
 
 $("#zoom-in").addEventListener("click", () => chart.zoom(0.5));
 $("#zoom-out").addEventListener("click", () => chart.zoom(2));
-
-$("#refresh-button").addEventListener("click", () => loadOverview());
 
 loadOverview();
 setInterval(() => loadOverview({ quiet: true }), 30_000);

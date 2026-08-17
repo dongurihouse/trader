@@ -48,10 +48,8 @@ async function api(path) {
   return payload;
 }
 
-async function loadLogs({ quiet = false } = {}) {
+async function loadLogs() {
   const request = ++state.request;
-  const refresh = $("#logs-refresh");
-  if (!quiet) refresh.classList.add("is-spinning");
   const parameters = new URLSearchParams({ limit: state.limit });
   if (state.service) parameters.set("service", state.service);
   if (state.level) parameters.set("level", state.level);
@@ -67,8 +65,6 @@ async function loadLogs({ quiet = false } = {}) {
     renderLogs(logsResult.value);
   } catch (error) {
     if (request === state.request) showToast(error.message);
-  } finally {
-    if (request === state.request) refresh.classList.remove("is-spinning");
   }
 }
 
@@ -189,7 +185,5 @@ $("#limit-filter").addEventListener("change", (event) => {
   loadLogs();
 });
 
-$("#logs-refresh").addEventListener("click", () => loadLogs());
-
 loadLogs();
-setInterval(() => loadLogs({ quiet: true }), 5000);
+setInterval(loadLogs, 5000);

@@ -598,17 +598,6 @@ button.brand {
   text-align: center;
 }
 
-.readonly-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 7px 10px;
-  color: var(--cyan);
-  background: rgba(112, 216, 220, 0.08);
-  border: 1px solid rgba(112, 216, 220, 0.16);
-  border-radius: 99px;
-}
-
 .icon-button {
   display: inline-grid;
   width: 36px;
@@ -1880,10 +1869,6 @@ pre {
 }
 
 @media (max-width: 900px) {
-  .logs-page .readonly-pill {
-    display: none;
-  }
-
   .log-counts {
     width: 100%;
   }
@@ -1903,18 +1888,18 @@ pre {
 }
 
 @media (max-width: 680px) {
-  .topbar,
   main,
   footer {
     width: min(100% - 22px, 1460px);
   }
 
   .topbar {
+    width: 100%;
     height: 64px;
+    padding-inline: 11px;
   }
 
-  .updated,
-  .readonly-pill span {
+  .updated {
     display: none;
   }
 
@@ -1922,8 +1907,7 @@ pre {
     gap: 9px;
   }
 
-  .live-refresh,
-  .logs-page .readonly-pill {
+  .live-refresh {
     display: none;
   }
 
@@ -2022,12 +2006,20 @@ pre {
   }
 
   .chart-only-main {
-    min-height: calc(100dvh - 64px);
+    height: calc(100dvh - 64px);
+    min-height: 0;
+    overflow: hidden;
     padding-block: 11px;
   }
 
+  .chart-only-main .chart-card {
+    min-height: 0;
+  }
+
   .chart-only-main .chart-stage {
-    min-height: 340px;
+    min-height: 0;
+    flex: 1 1 0;
+    height: auto;
   }
 
   .header-market #market-time,
