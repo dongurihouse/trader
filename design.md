@@ -19,9 +19,9 @@ through calls between services.
 | logs    | every process, own rows only | dashboard |
 
 One shared config file holds the ticker list, the signal and algo
-definitions, the early-close days, and the live-polling window. Inputs: bars
-and events take the ticker list; algo takes the ticker list plus the signal
-and algo definitions.
+definitions, the early-close days, the live-polling window, and the
+evaluation window (a day count). Inputs: bars and events take the ticker
+list; algo takes the ticker list plus the signal and algo definitions.
 
 There is no calendar table. The early close is the only session fact that
 cannot be inferred, and it lives in config. Time of day comes from the
@@ -33,7 +33,8 @@ walk.
 Collects minute bars from Robinhood and owns their quality. One process
 does both jobs: a live poll each minute and a nightly sweep. Writes are
 idempotent upserts keyed by ticker and timestamp, so a repeated fetch is
-harmless.
+harmless. Every write stamps `fetched_at`, so a reader can see what
+changed and when.
 
 Live poll:
 
@@ -55,6 +56,10 @@ Nightly sweep:
   write the rest.
 
 ## 2. events (service)
+
+Deferred: this service is not part of the current build. The section below
+is the contract for when it is; nothing reads events until the sentiment
+signal exists.
 
 - Collects events, maps each one to a ticker, and defines the date range
   where the event has impact.
@@ -81,7 +86,7 @@ separate task.
 
 One service runs the algos and contains the algo logic: a stateless core
 plus a loop. Input: the ticker list and the signal and algo definitions; the
-clock supplies the timestamp. One call carries all work:
+bar timestamps supply `t`. One call carries all work:
 `core(ticker, t, algos=None)` returns the signal values at `t` and the entry
 and exit points per algo.
 
@@ -91,7 +96,11 @@ and exit points per algo.
   events tables, read-only.
 - Two layers with a strict rule: a signal (vwap, sma, and so on) queries
   bars, the events table, and other signals; an algo queries signal outputs
-  only.
+  and the outputs of other algos.
+- Algos are independent. Nothing combines them; to combine behavior,
+  compose an algo from other algos. Every entry and exit belongs to
+  exactly one algo. An algo that another algo reads evaluates like a
+  signal; whether it also trades is its own config flag.
 - A signal's output is opaque: a number for sma, a pair, anything. The algo
   that reads a signal interprets the output itself.
 - Everything reads only values at or before `t` — the whole no-lookahead
@@ -117,23 +126,24 @@ Add a signal, add an algo, or change a parameter: edit the config file.
 That is the whole procedure. The algo service reacts on its own:
 
 1. It sees the new file hash and stores the file in configs.
-2. It backfills outputs for every enabled node over all stored bars, under
-   the new version. The backfill is a bulk run of the loop, and the rows
-   are keyed, so the run is idempotent and resumable.
+2. The work rule (see the loop) now matches every pair in the evaluation
+   window, because no output rows exist under the new version, and fills
+   them. The rows are keyed, so the run is idempotent and resumable.
 3. The dashboard shows the new version next to the old ones as the rows
    land.
 
-Easy: one file edit, no deploy. Fast: the recompute is a pure function
-over a small table. Visible: history for the new version appears without a
-live tick. A new function is the one case that also needs a code change.
+Easy: one file edit, no deploy. Fast: the work is bounded by the
+evaluation window, never by the full history. Visible: history for the
+new version appears without a live bar. A new function is the one case
+that also needs a code change.
 
 ### The output cache
 
 Every evaluation is stored in outputs: one row per signal and one per algo,
-keyed by ticker, timestamp, name, and the config version. A rerun under the
-same version updates the row in place; a changed config writes rows under a
-new version, and the old rows stay for reference. The dashboard reads the
-cache and never writes it.
+keyed by ticker, timestamp, name, and the config version, stamped with
+computed_at. A rerun under the same version updates the row in place; a
+changed config writes rows under a new version, and the old rows stay for
+reference. The dashboard reads the cache and never writes it.
 
 Every enabled signal is evaluated and stored each tick, whether or not an
 algo reads it. A visual-aid signal, such as a shape forecast, is stored the
@@ -142,18 +152,26 @@ number.
 
 ### The loop
 
-- Owns the trading clock. Each minute: call the core, act on the points.
-- Consolidates the per-algo points into one decision per ticker and minute,
-  and writes it as a trade row: ticker, exact timestamp, entry or exit.
-- A trade has no size: every entry and every exit is one unit. Two open
-  entries are two units. Performance is the percent result per unit,
-  priced from bars, and the account result is the sum over units.
-- Writes an exit only while recorded exits are below entries. This is
+- No private clock. The loop polls the database and the config file every
+  30 seconds and reacts to what changed.
+- The work list is every (ticker, timestamp) pair inside the evaluation
+  window where outputs has no row under the current version, or where the
+  bar's fetched_at is newer than the output row's computed_at. This one
+  rule covers a live bar, a bar the sweep repaired, and a config change;
+  the loop does not tell the cases apart.
+- Work updates outputs; a rerun is a safe upsert because the rows are
+  keyed and the core is deterministic. Only the newest bar of a ticker
+  also trades: the loop writes trade rows for its points, and older work
+  never writes a trade.
+- A trade row is ticker, algo, exact timestamp, action. An entry opens one
+  unit. An exit closes one unit or all of the algo's open units; the
+  algo's point says which. An exit for one unit closes the oldest open
+  entry.
+- An algo exits only while it has open units for the ticker. This is
   enforced in code; a CHECK cannot span rows.
-- There is no separate backtest. The loop applies the core to timestamps,
-  in bulk over a past range or in real time each minute. A bulk run writes
-  outputs and no trades; the rows are keyed and the core is deterministic,
-  so a rerun is a safe upsert.
+- A trade has no size: the unit is the size. Performance is the percent
+  result per unit, priced from bars, and the account result is the sum
+  over units.
 
 ## 4. dashboard (webserver)
 
@@ -164,7 +182,7 @@ nothing. No service exposes an API; every view is served by the tables.
 | view                                       | source                                  |
 | ------------------------------------------ | --------------------------------------- |
 | minute-bar chart over all days             | bars                                    |
-| entry and exit overlays on the bars        | trades; outputs for the per-algo points |
+| entry and exit overlays on the bars        | trades, per algo                        |
 | click-through detail of a signal or algo   | outputs (values) + configs (parameters) |
 | algo performance across parameter sets     | outputs across versions, priced by bars |
 | visual-aid signals, e.g. a shape forecast  | outputs, like any signal                |
@@ -187,13 +205,14 @@ append-only and each process writes only rows tagged with its own name.
 PRAGMA journal_mode = WAL;
 
 CREATE TABLE bars (
-    ticker  TEXT    NOT NULL,
-    ts      INTEGER NOT NULL,  -- bar start, epoch seconds, UTC
-    open    REAL    NOT NULL,
-    high    REAL    NOT NULL,
-    low     REAL    NOT NULL,
-    close   REAL    NOT NULL,
-    volume  INTEGER NOT NULL,
+    ticker     TEXT    NOT NULL,
+    ts         INTEGER NOT NULL,  -- bar start, epoch seconds, UTC
+    open       REAL    NOT NULL,
+    high       REAL    NOT NULL,
+    low        REAL    NOT NULL,
+    close      REAL    NOT NULL,
+    volume     INTEGER NOT NULL,
+    fetched_at INTEGER NOT NULL,  -- write time, epoch seconds, UTC
     PRIMARY KEY (ticker, ts)
 ) WITHOUT ROWID;
 
@@ -213,18 +232,20 @@ CREATE TABLE events (
 
 CREATE TABLE trades (
     ticker TEXT    NOT NULL,
+    algo   TEXT    NOT NULL,
     ts     INTEGER NOT NULL,  -- exact entry or exit time, epoch seconds, UTC
     action TEXT    NOT NULL,
-    PRIMARY KEY (ticker, ts, action),
-    CHECK (action IN ('entry', 'exit'))
+    PRIMARY KEY (ticker, algo, ts, action),
+    CHECK (action IN ('entry', 'exit', 'exit_all'))
 ) WITHOUT ROWID;
 
 CREATE TABLE outputs (
-    ticker TEXT    NOT NULL,
-    ts     INTEGER NOT NULL,
-    kind   TEXT    NOT NULL,  -- a signal name or an algo name
-    config TEXT    NOT NULL,  -- the config file version
-    output TEXT    NOT NULL,  -- JSON
+    ticker      TEXT    NOT NULL,
+    ts          INTEGER NOT NULL,
+    kind        TEXT    NOT NULL,  -- a signal name or an algo name
+    config      TEXT    NOT NULL,  -- the config file version
+    output      TEXT    NOT NULL,  -- JSON
+    computed_at INTEGER NOT NULL,  -- evaluation time, epoch seconds, UTC
     PRIMARY KEY (ticker, ts, kind, config)
 ) WITHOUT ROWID;
 
@@ -250,9 +271,10 @@ Notes:
   and busy timeout. All timestamps are epoch seconds, UTC.
 - Bar writes are idempotent upserts; a repeated fetch is harmless.
 - `bars` needs no quality flag: bad rows are rejected at ingest.
-- `trades` has no algo column (a trade is the consolidated decision), no
-  price (recomputable), and no size (a row is one unit). Per-algo
-  attribution is in outputs.
+- `trades` binds every row to one algo; nothing consolidates across algos.
+  No price (recomputable) and no size (a row is one unit).
+- The loop's work rule compares `bars.fetched_at` with
+  `outputs.computed_at`; the two columns exist for that rule.
 - `outputs` grows fastest; `logs` grows steadily.
 - `configs` maps every stored version hash back to the full config file.
 - `logs` is append-only and the one table with a rowid and an extra index.
@@ -264,7 +286,7 @@ Notes:
 ```mermaid
 flowchart TB
     BARS[bars service<br/>minute poll from the last bar<br/>+ nightly 30-day sweep]
-    EVENTS[events service<br/>daily]
+    EVENTS[events service<br/>daily — deferred]
 
     BARS --> BT[(bars)]
     EVENTS --> ET[(events)]
@@ -279,7 +301,7 @@ flowchart TB
     end
 
     subgraph ALGO [algo service]
-        LOOP[loop<br/>owns the clock] -- each minute --> CORE[stateless core<br/>data → signals → algos<br/>all config-defined]
+        LOOP[loop<br/>polls the db every 30 s] -- work rule --> CORE[stateless core<br/>data → signals → algos<br/>all config-defined]
     end
 
     BT -. read only .-> CORE
@@ -293,9 +315,9 @@ flowchart TB
 
 ## Decisions (2026-08-17)
 
-1. No book, no counters, no size: one trades row per consolidated entry or
-   exit, and a row is one unit. Counts are queries; performance is the
-   percent result per unit, summed over units.
+1. No book, no counters, no size: a trades row is one unit and belongs to
+   one algo. Counts are queries; performance is the percent result per
+   unit, summed over units.
 2. One database; isolation is per-table ownership.
 3. One shared config file.
 4. The runner and the algo library merged into the algo service; the core
@@ -308,7 +330,7 @@ flowchart TB
 9. Inputs: the ticker list for bars and events; the ticker list plus the
    definitions for algo.
 10. Signals and algos are config-defined, config-versioned, and layered:
-    signals read data and signals, algos read signal outputs only.
+    signals read data and signals; algos read signals and other algos.
 11. A signal's output is opaque, and the consuming algo interprets it. The
     events service owns the per-event impact formula; consolidation across
     events belongs to a planned sentiment signal, a separate task.
@@ -322,17 +344,24 @@ flowchart TB
 14. The version is one hash of the whole config file; per-node composite
     hashes were dropped.
 15. A change is a standard operation: the algo service detects the new
-    file version and backfills outputs over all stored bars. A bulk run
-    writes outputs and no trades.
+    file version and backfills outputs over the evaluation window. A bulk
+    run writes outputs and no trades.
 16. An event's impact is (direction, strength): direction is a value from
     -1 to 1, and a high strength means high expected volatility. The
     separate volatility column and known_at are gone.
 17. No backtest concept: the loop applies the core to timestamps, in bulk
     or in real time. An output updates in place per version; old versions
     stay for reference.
+18. Algos are independent; nothing consolidates across them. Composition
+    is an algo that reads other algos. An exit closes one unit or all of
+    the algo's open units; an exit for one unit closes the oldest entry.
+19. The loop is data-driven: a 30-second poll and one work rule — an
+    output row is missing under the current version, or the bar is newer
+    than the row. bars.fetched_at and outputs.computed_at exist for this
+    rule, and the work is bounded by the evaluation window.
+20. The events service is deferred: designed, not built. Nothing reads
+    events until the sentiment signal task.
 
 ## Open
 
-1. The consolidation rule. Default: enter when any algo enters, exit when
-   any algo exits and a position is open.
-2. The prune policy for old output versions.
+1. The prune policy for old output versions.

@@ -1,13 +1,14 @@
 PRAGMA journal_mode = WAL;
 
 CREATE TABLE IF NOT EXISTS bars (
-    ticker  TEXT    NOT NULL,
-    ts      INTEGER NOT NULL,
-    open    REAL    NOT NULL,
-    high    REAL    NOT NULL,
-    low     REAL    NOT NULL,
-    close   REAL    NOT NULL,
-    volume  INTEGER NOT NULL,
+    ticker     TEXT    NOT NULL,
+    ts         INTEGER NOT NULL,
+    open       REAL    NOT NULL,
+    high       REAL    NOT NULL,
+    low        REAL    NOT NULL,
+    close      REAL    NOT NULL,
+    volume     INTEGER NOT NULL,
+    fetched_at INTEGER NOT NULL,
     PRIMARY KEY (ticker, ts)
 ) WITHOUT ROWID;
 
@@ -27,18 +28,20 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE TABLE IF NOT EXISTS trades (
     ticker TEXT    NOT NULL,
+    algo   TEXT    NOT NULL,
     ts     INTEGER NOT NULL,
     action TEXT    NOT NULL,
-    PRIMARY KEY (ticker, ts, action),
-    CHECK (action IN ('entry', 'exit'))
+    PRIMARY KEY (ticker, algo, ts, action),
+    CHECK (action IN ('entry', 'exit', 'exit_all'))
 ) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS outputs (
-    ticker TEXT    NOT NULL,
-    ts     INTEGER NOT NULL,
-    kind   TEXT    NOT NULL,
-    config TEXT    NOT NULL,
-    output TEXT    NOT NULL,
+    ticker      TEXT    NOT NULL,
+    ts          INTEGER NOT NULL,
+    kind        TEXT    NOT NULL,
+    config      TEXT    NOT NULL,
+    output      TEXT    NOT NULL,
+    computed_at INTEGER NOT NULL,
     PRIMARY KEY (ticker, ts, kind, config)
 ) WITHOUT ROWID;
 
