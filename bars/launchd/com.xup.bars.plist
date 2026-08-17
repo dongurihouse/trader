@@ -9,7 +9,7 @@
         <string>/Users/xup/dh/trader/bars/.venv/bin/python</string>
         <string>/Users/xup/dh/trader/bars/bars_service.py</string>
         <string>--config</string>
-        <string>/Users/xup/dh/trader/bars/config.json</string>
+        <string>/Users/xup/dh/trader/config.json</string>
         <string>serve</string>
     </array>
     <key>WorkingDirectory</key>

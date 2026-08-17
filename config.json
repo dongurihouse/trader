@@ -1,0 +1,28 @@
+{
+  "database": "data/trader.sqlite3",
+  "tickers": ["SNDK", "SNXX", "SNDQ", "MU", "SPY", "QQQ", "SOXX"],
+  "early_closes": ["2026-11-27", "2026-12-24"],
+  "live_polling": {
+    "start": "04:00",
+    "regular_close": "16:00",
+    "early_close": "13:00",
+    "after_close_minutes": 5,
+    "poll_seconds": 60
+  },
+  "bars": {
+    "sweep_days": 30,
+    "idle_seconds": 300,
+    "retry_seconds": 30,
+    "retry_max_seconds": 900,
+    "provider": {
+      "url": "https://agent.robinhood.com/mcp/trading",
+      "bounds": "extended",
+      "oauth_store": "bars/data/robinhood_oauth.json",
+      "oauth_callback_port": 8765,
+      "timeout_seconds": 300,
+      "max_symbols_per_call": 3
+    }
+  },
+  "signals": {},
+  "algos": {}
+}

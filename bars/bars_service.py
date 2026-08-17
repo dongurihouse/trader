@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
@@ -37,7 +37,9 @@ from mcp.shared.auth import (
 from pydantic import AnyUrl
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_CONFIG_PATH = ROOT / "config.json"
+REPO_ROOT = ROOT.parent
+DEFAULT_CONFIG_PATH = REPO_ROOT / "config.json"
+SCHEMA_PATH = REPO_ROOT / "schema.sql"
 EASTERN = ZoneInfo("America/New_York")
 UTC = timezone.utc
 SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.-]{0,14}$")
@@ -58,15 +60,17 @@ class RelayAuthRequired(RelayError):
 @dataclass(frozen=True)
 class Settings:
     tickers: Tuple[str, ...]
-    interval: str
     bounds: str
+    live_start: time
+    regular_close: time
+    early_close: time
+    early_close_days: frozenset
+    after_close_minutes: int
     poll_seconds: int
+    sweep_days: int
     idle_seconds: int
     retry_seconds: int
     retry_max_seconds: int
-    final_delay_minutes: int
-    edge_empty_sessions: int
-    recovery_days: int
     database: Path
     provider_url: str
     oauth_store: Path
@@ -81,6 +85,18 @@ def _positive_int(value, name: str, minimum: int = 1) -> int:
     return value
 
 
+def _clock(value, name: str) -> time:
+    if not isinstance(value, str):
+        raise ConfigError("%s must be HH:MM" % name)
+    try:
+        parsed = time.fromisoformat(value)
+    except ValueError as exc:
+        raise ConfigError("%s must be HH:MM" % name) from exc
+    if parsed.second or parsed.microsecond:
+        raise ConfigError("%s must be precise to the minute" % name)
+    return parsed
+
+
 def load_settings(path: Path) -> Settings:
     try:
         raw = json.loads(path.read_text())
@@ -88,6 +104,8 @@ def load_settings(path: Path) -> Settings:
         raise ConfigError("config file does not exist: %s" % path) from exc
     except json.JSONDecodeError as exc:
         raise ConfigError("invalid JSON in %s: %s" % (path, exc)) from exc
+    if not isinstance(raw, dict):
+        raise ConfigError("config must be a JSON object")
 
     tickers_raw = raw.get("tickers")
     if not isinstance(tickers_raw, list) or not tickers_raw:
@@ -102,60 +120,75 @@ def load_settings(path: Path) -> Settings:
         if ticker not in tickers:
             tickers.append(ticker)
 
-    interval = raw.get("interval", "minute")
-    if interval != "minute":
-        raise ConfigError(
-            "this minimal collector supports interval='minute' only; got %r"
-            % interval
-        )
-    bounds = raw.get("bounds", "regular")
-    if bounds not in ("regular", "extended"):
-        raise ConfigError("bounds must be 'regular' or 'extended'")
+    live = raw.get("live_polling") or {}
+    bars = raw.get("bars") or {}
+    for value, name in (
+        (live, "live_polling"),
+        (bars, "bars"),
+    ):
+        if not isinstance(value, dict):
+            raise ConfigError("%s must be a JSON object" % name)
+    provider = bars.get("provider") or {}
+    if not isinstance(provider, dict):
+        raise ConfigError("bars.provider must be a JSON object")
 
-    service = raw.get("service") or {}
-    backfill = raw.get("backfill") or {}
-    provider = raw.get("provider") or {}
-    database_value = raw.get("database", "data/bars.sqlite3")
+    bounds = provider.get("bounds", "extended")
+    if bounds not in ("regular", "extended"):
+        raise ConfigError("bars.provider.bounds must be 'regular' or 'extended'")
+
+    early_closes_raw = raw.get("early_closes") or []
+    if not isinstance(early_closes_raw, list):
+        raise ConfigError("early_closes must be a JSON list")
+    try:
+        early_close_days = frozenset(
+            date.fromisoformat(value) for value in early_closes_raw
+        )
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("early_closes must contain YYYY-MM-DD strings") from exc
+
+    database_value = raw.get("database", "data/trader.sqlite3")
     database = Path(database_value).expanduser()
     if not database.is_absolute():
-        database = ROOT / database
-    oauth_store_value = provider.get("oauth_store", "data/robinhood_oauth.json")
+        database = path.parent / database
+    oauth_store_value = provider.get(
+        "oauth_store", "bars/data/robinhood_oauth.json"
+    )
     oauth_store = Path(oauth_store_value).expanduser()
     if not oauth_store.is_absolute():
-        oauth_store = ROOT / oauth_store
+        oauth_store = path.parent / oauth_store
 
     return Settings(
         tickers=tuple(tickers),
-        interval=interval,
         bounds=bounds,
-        poll_seconds=_positive_int(
-            service.get("poll_seconds", 300), "service.poll_seconds", 30
+        live_start=_clock(live.get("start", "04:00"), "live_polling.start"),
+        regular_close=_clock(
+            live.get("regular_close", "16:00"),
+            "live_polling.regular_close",
         ),
+        early_close=_clock(
+            live.get("early_close", "13:00"),
+            "live_polling.early_close",
+        ),
+        early_close_days=early_close_days,
+        after_close_minutes=_positive_int(
+            live.get("after_close_minutes", 5),
+            "live_polling.after_close_minutes",
+            0,
+        ),
+        poll_seconds=_positive_int(
+            live.get("poll_seconds", 60), "live_polling.poll_seconds", 30
+        ),
+        sweep_days=_positive_int(bars.get("sweep_days", 30), "bars.sweep_days"),
         idle_seconds=_positive_int(
-            service.get("idle_seconds", 300), "service.idle_seconds", 30
+            bars.get("idle_seconds", 300), "bars.idle_seconds", 30
         ),
         retry_seconds=_positive_int(
-            service.get("retry_seconds", 30), "service.retry_seconds", 5
+            bars.get("retry_seconds", 30), "bars.retry_seconds", 5
         ),
         retry_max_seconds=_positive_int(
-            service.get("retry_max_seconds", 900),
-            "service.retry_max_seconds",
+            bars.get("retry_max_seconds", 900),
+            "bars.retry_max_seconds",
             30,
-        ),
-        final_delay_minutes=_positive_int(
-            service.get("final_delay_minutes", 5),
-            "service.final_delay_minutes",
-            1,
-        ),
-        edge_empty_sessions=_positive_int(
-            backfill.get("empty_sessions_to_stop", 10),
-            "backfill.empty_sessions_to_stop",
-            2,
-        ),
-        recovery_days=_positive_int(
-            backfill.get("recovery_days", 60),
-            "backfill.recovery_days",
-            1,
         ),
         database=database,
         provider_url=str(
@@ -192,33 +225,16 @@ def _parse_iso(value: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
-def session_window(day: date, bounds: str) -> Tuple[str, str]:
-    start_clock = time(9, 30) if bounds == "regular" else time(4, 0)
-    start = datetime.combine(day, start_clock, tzinfo=EASTERN)
-    end = datetime.combine(day, time(16, 0), tzinfo=EASTERN)
-    return _iso_utc(start), _iso_utc(end)
+def _epoch(value: datetime) -> int:
+    return int(value.astimezone(UTC).timestamp())
 
 
-def previous_weekday(day: date) -> date:
-    candidate = day - timedelta(days=1)
-    while candidate.weekday() >= 5:
-        candidate -= timedelta(days=1)
-    return candidate
-
-
-def next_weekday(day: date) -> date:
-    candidate = day + timedelta(days=1)
-    while candidate.weekday() >= 5:
-        candidate += timedelta(days=1)
-    return candidate
-
-
-def weekdays(start: date, end: date) -> Iterable[date]:
-    cursor = start
-    while cursor <= end:
-        if cursor.weekday() < 5:
-            yield cursor
-        cursor += timedelta(days=1)
+def _query_epoch(value: str, end: bool = False) -> int:
+    if len(value) == 10:
+        day = date.fromisoformat(value)
+        clock = time(23, 59, 59) if end else time(0, 0)
+        return _epoch(datetime.combine(day, clock, tzinfo=UTC))
+    return _epoch(_parse_iso(value))
 
 
 class FileTokenStorage(TokenStorage):
@@ -473,7 +489,7 @@ class RobinhoodClient:
                         "symbols": list(batch),
                         "start_time": start_iso,
                         "end_time": end_iso,
-                        "interval": self.settings.interval,
+                        "interval": "minute",
                         "bounds": self.settings.bounds,
                     },
                     interactive=False,
@@ -536,42 +552,6 @@ class RobinhoodClient:
                     )
 
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS bar (
-    symbol TEXT NOT NULL,
-    interval TEXT NOT NULL,
-    begins_at TEXT NOT NULL,
-    open REAL NOT NULL,
-    high REAL NOT NULL,
-    low REAL NOT NULL,
-    close REAL NOT NULL,
-    volume REAL NOT NULL,
-    session TEXT,
-    fetched_at TEXT NOT NULL,
-    PRIMARY KEY (symbol, interval, begins_at)
-) WITHOUT ROWID;
-
-CREATE INDEX IF NOT EXISTS bar_time_idx
-ON bar(interval, begins_at);
-
-CREATE TABLE IF NOT EXISTS fetch (
-    symbol TEXT NOT NULL,
-    interval TEXT NOT NULL,
-    session_date TEXT NOT NULL,
-    attempted_at TEXT NOT NULL,
-    real_bars INTEGER NOT NULL,
-    interpolated_bars INTEGER NOT NULL,
-    PRIMARY KEY (symbol, interval, session_date)
-) WITHOUT ROWID;
-
-CREATE TABLE IF NOT EXISTS state (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-) WITHOUT ROWID;
-"""
-
-
 class BarStore:
     PRICE_FIELDS = (
         ("open", "open_price"),
@@ -583,8 +563,12 @@ class BarStore:
     def __init__(self, path: Path):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            schema = SCHEMA_PATH.read_text()
+        except FileNotFoundError as exc:
+            raise ConfigError("schema file does not exist: %s" % SCHEMA_PATH) from exc
         with self.connect() as connection:
-            connection.executescript(SCHEMA)
+            connection.executescript(schema)
 
     def connect(self):
         connection = sqlite3.connect(str(self.path), timeout=30)
@@ -606,164 +590,179 @@ class BarStore:
             raise RelayError("non-finite bar field %s" % field)
         return value
 
-    def store_payload(
-        self,
-        payload: dict,
-        requested: Sequence[str],
-        interval: str,
-        session_day: date,
-    ) -> Dict[str, dict]:
-        fetched_at = _iso_utc(datetime.now(UTC))
+    @staticmethod
+    def _ordered(open_price: float, high: float, low: float, close: float) -> bool:
+        return low <= open_price <= high and low <= close <= high
+
+    def _upsert(self, rows: Sequence[tuple]) -> None:
+        with self.connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO bars (ticker, ts, open, high, low, close, volume)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(ticker, ts) DO UPDATE SET
+                    open=excluded.open,
+                    high=excluded.high,
+                    low=excluded.low,
+                    close=excluded.close,
+                    volume=excluded.volume
+                """,
+                rows,
+            )
+
+    def store_payload(self, payload: dict) -> Dict[str, int]:
         stats = {
-            symbol: {"real_bars": 0, "interpolated_bars": 0}
-            for symbol in requested
+            "received": 0,
+            "written": 0,
+            "interpolated": 0,
+            "unordered": 0,
+            "invalid": 0,
         }
         results = payload["data"]["results"]
         rows: List[tuple] = []
         for result in results:
-            symbol = result["symbol"]
+            ticker = result["symbol"]
             for bar in result.get("bars") or []:
+                stats["received"] += 1
                 if bar.get("interpolated"):
-                    stats[symbol]["interpolated_bars"] += 1
+                    stats["interpolated"] += 1
                     continue
-                timestamp = _iso_utc(_parse_iso(str(bar["begins_at"])))
-                prices = [self._number(bar, field) for _, field in self.PRICE_FIELDS]
-                volume = self._number(bar, "volume")
-                if volume < 0:
-                    raise RelayError(
-                        "negative volume for %s at %s" % (symbol, timestamp)
-                    )
+                try:
+                    timestamp = _epoch(_parse_iso(str(bar["begins_at"])))
+                    prices = [
+                        self._number(bar, field) for _, field in self.PRICE_FIELDS
+                    ]
+                    volume_value = self._number(bar, "volume")
+                except (RelayError, KeyError):
+                    stats["invalid"] += 1
+                    continue
+                if volume_value < 0 or not volume_value.is_integer():
+                    stats["invalid"] += 1
+                    continue
+                if not self._ordered(prices[0], prices[1], prices[2], prices[3]):
+                    stats["unordered"] += 1
+                    continue
                 rows.append(
                     (
-                        symbol,
-                        interval,
+                        ticker,
                         timestamp,
                         prices[0],
                         prices[1],
                         prices[2],
                         prices[3],
-                        volume,
-                        bar.get("session"),
-                        fetched_at,
+                        int(volume_value),
                     )
                 )
-                stats[symbol]["real_bars"] += 1
-
-        with self.connect() as connection:
-            connection.executemany(
-                """
-                INSERT INTO bar (
-                    symbol, interval, begins_at, open, high, low, close,
-                    volume, session, fetched_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(symbol, interval, begins_at) DO UPDATE SET
-                    open=excluded.open,
-                    high=excluded.high,
-                    low=excluded.low,
-                    close=excluded.close,
-                    volume=excluded.volume,
-                    session=excluded.session,
-                    fetched_at=excluded.fetched_at
-                """,
-                rows,
-            )
-            connection.executemany(
-                """
-                INSERT INTO fetch (
-                    symbol, interval, session_date, attempted_at,
-                    real_bars, interpolated_bars
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(symbol, interval, session_date) DO UPDATE SET
-                    attempted_at=excluded.attempted_at,
-                    real_bars=excluded.real_bars,
-                    interpolated_bars=excluded.interpolated_bars
-                """,
-                [
-                    (
-                        symbol,
-                        interval,
-                        session_day.isoformat(),
-                        fetched_at,
-                        values["real_bars"],
-                        values["interpolated_bars"],
-                    )
-                    for symbol, values in stats.items()
-                ],
-            )
+        self._upsert(rows)
+        stats["written"] = len(rows)
         return stats
 
-    def get_state(self, key: str):
+    def latest_by_ticker(self, tickers: Sequence[str]) -> Dict[str, Optional[int]]:
+        latest = {ticker: None for ticker in tickers}
+        placeholders = ",".join("?" for _ in tickers)
         with self.connect() as connection:
-            row = connection.execute(
-                "SELECT value FROM state WHERE key=?", (key,)
-            ).fetchone()
-        return json.loads(row["value"]) if row else None
+            rows = connection.execute(
+                "SELECT ticker, MAX(ts) AS ts FROM bars "
+                "WHERE ticker IN (%s) GROUP BY ticker" % placeholders,
+                tuple(tickers),
+            ).fetchall()
+        for row in rows:
+            latest[row["ticker"]] = row["ts"]
+        return latest
 
-    def set_state(self, key: str, value) -> None:
-        now = _iso_utc(datetime.now(UTC))
+    def append_log(self, level: str, message: str) -> None:
         with self.connect() as connection:
             connection.execute(
-                """
-                INSERT INTO state(key, value, updated_at) VALUES (?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET
-                    value=excluded.value,
-                    updated_at=excluded.updated_at
-                """,
-                (key, json.dumps(value, separators=(",", ":")), now),
+                "INSERT INTO logs(ts, service, level, message) VALUES (?, ?, ?, ?)",
+                (_epoch(datetime.now(UTC)), "bars", level, message),
             )
 
-    def latest_fetch_day(self, symbol: str, interval: str) -> Optional[date]:
+    def sweep_complete(self, day: date) -> bool:
         with self.connect() as connection:
             row = connection.execute(
-                "SELECT MAX(session_date) AS day FROM fetch "
-                "WHERE symbol=? AND interval=?",
-                (symbol, interval),
-            ).fetchone()
-        return date.fromisoformat(row["day"]) if row and row["day"] else None
-
-    def has_fetch(self, symbol: str, interval: str, day: date) -> bool:
-        with self.connect() as connection:
-            row = connection.execute(
-                "SELECT 1 FROM fetch WHERE symbol=? AND interval=? "
-                "AND session_date=?",
-                (symbol, interval, day.isoformat()),
+                "SELECT 1 FROM logs WHERE service='bars' AND level='info' "
+                "AND message LIKE ? LIMIT 1",
+                ("sweep complete day=%s %%" % day.isoformat(),),
             ).fetchone()
         return row is not None
 
-    def summary(self, tickers: Sequence[str], interval: str) -> List[sqlite3.Row]:
+    def summary(self, tickers: Sequence[str]) -> List[sqlite3.Row]:
         placeholders = ",".join("?" for _ in tickers)
         query = """
-            SELECT symbol, COUNT(*) AS bars, MIN(begins_at) AS earliest,
-                   MAX(begins_at) AS latest
-            FROM bar
-            WHERE interval=? AND symbol IN (%s)
-            GROUP BY symbol
-            ORDER BY symbol
+            SELECT ticker, COUNT(*) AS bars, MIN(ts) AS earliest, MAX(ts) AS latest
+            FROM bars
+            WHERE ticker IN (%s)
+            GROUP BY ticker
+            ORDER BY ticker
         """ % placeholders
         with self.connect() as connection:
-            rows = connection.execute(query, (interval,) + tuple(tickers)).fetchall()
-        return rows
+            return connection.execute(query, tuple(tickers)).fetchall()
+
+    def migrate_legacy(self, source: Path) -> Dict[str, int]:
+        if source.resolve() == self.path.resolve():
+            raise ConfigError("legacy and destination databases must differ")
+        if not source.is_file():
+            raise ConfigError("legacy database does not exist: %s" % source)
+        stats = {"read": 0, "written": 0, "rejected": 0}
+        rows: List[tuple] = []
+        legacy = sqlite3.connect(str(source))
+        legacy.row_factory = sqlite3.Row
+        try:
+            cursor = legacy.execute(
+                "SELECT symbol, begins_at, open, high, low, close, volume FROM bar"
+            )
+            for row in cursor:
+                stats["read"] += 1
+                values = tuple(float(row[name]) for name in ("open", "high", "low", "close"))
+                volume = float(row["volume"])
+                if (
+                    not all(math.isfinite(value) for value in values)
+                    or not math.isfinite(volume)
+                    or volume < 0
+                    or not volume.is_integer()
+                    or not self._ordered(*values)
+                ):
+                    stats["rejected"] += 1
+                    continue
+                rows.append(
+                    (
+                        row["symbol"],
+                        _epoch(_parse_iso(row["begins_at"])),
+                        *values,
+                        int(volume),
+                    )
+                )
+        except sqlite3.Error as exc:
+            raise ConfigError("cannot read legacy database %s: %s" % (source, exc)) from exc
+        finally:
+            legacy.close()
+        self._upsert(rows)
+        stats["written"] = len(rows)
+        self.append_log(
+            "info",
+            "migration complete source=%s read=%d written=%d rejected=%d"
+            % (source, stats["read"], stats["written"], stats["rejected"]),
+        )
+        return stats
 
     def query(
         self,
-        symbol: str,
-        interval: str,
+        ticker: str,
         start: Optional[str],
         end: Optional[str],
         limit: Optional[int],
     ) -> List[sqlite3.Row]:
-        clauses = ["symbol=?", "interval=?"]
-        arguments: List[object] = [symbol, interval]
+        clauses = ["ticker=?"]
+        arguments: List[object] = [ticker]
         if start:
-            clauses.append("begins_at>=?")
-            arguments.append(start + "T00:00:00Z" if len(start) == 10 else start)
+            clauses.append("ts>=?")
+            arguments.append(_query_epoch(start))
         if end:
-            clauses.append("begins_at<=?")
-            arguments.append(end + "T23:59:59Z" if len(end) == 10 else end)
+            clauses.append("ts<=?")
+            arguments.append(_query_epoch(end, end=True))
         query = (
-            "SELECT symbol, interval, begins_at, open, high, low, close, "
-            "volume, session FROM bar WHERE %s ORDER BY begins_at"
-            % " AND ".join(clauses)
+            "SELECT ticker, ts, open, high, low, close, volume "
+            "FROM bars WHERE %s ORDER BY ts" % " AND ".join(clauses)
         )
         if limit:
             query += " LIMIT ?"
@@ -778,144 +777,111 @@ class Collector:
         self.store = store
         self.provider = RobinhoodClient(settings)
 
-    def fetch_day(
+    @staticmethod
+    def _empty_stats() -> Dict[str, int]:
+        return {
+            "received": 0,
+            "written": 0,
+            "interpolated": 0,
+            "unordered": 0,
+            "invalid": 0,
+        }
+
+    @staticmethod
+    def _add_stats(total: Dict[str, int], part: Dict[str, int]) -> None:
+        for key in total:
+            total[key] += part[key]
+
+    def fetch_range(
         self,
-        day: date,
-        symbols: Optional[Sequence[str]] = None,
+        symbols: Sequence[str],
+        start: datetime,
+        end: datetime,
         allow_missing: bool = False,
-    ) -> Dict[str, dict]:
-        selected = tuple(symbols or self.settings.tickers)
-        start_iso, end_iso = session_window(day, self.settings.bounds)
+    ) -> Dict[str, int]:
+        start_iso = _iso_utc(start)
+        end_iso = _iso_utc(end)
         logging.info(
-            "fetching %s for %s (%s)",
-            ",".join(selected),
-            day.isoformat(),
-            self.settings.interval,
+            "fetching %s from %s through %s",
+            ",".join(symbols),
+            start_iso,
+            end_iso,
         )
         payload = self.provider.fetch(
-            selected, start_iso, end_iso, allow_missing=allow_missing
+            symbols, start_iso, end_iso, allow_missing=allow_missing
         )
-        stats = self.store.store_payload(
-            payload, selected, self.settings.interval, day
-        )
-        logging.info(
-            "stored %s",
-            ", ".join(
-                "%s=%d real/%d interpolated"
-                % (
-                    symbol,
-                    values["real_bars"],
-                    values["interpolated_bars"],
-                )
-                for symbol, values in sorted(stats.items())
-            ),
-        )
+        return self.store.store_payload(payload)
+
+    def poll(self, now: Optional[datetime] = None) -> Dict[str, int]:
+        current = (now or datetime.now(UTC)).astimezone(UTC)
+        floor = current - timedelta(days=self.settings.sweep_days)
+        groups: Dict[int, List[str]] = {}
+        for ticker, latest in self.store.latest_by_ticker(
+            self.settings.tickers
+        ).items():
+            start_ts = latest if latest is not None else _epoch(floor)
+            if start_ts < _epoch(floor) or start_ts > _epoch(current):
+                start_ts = _epoch(floor)
+            groups.setdefault(start_ts, []).append(ticker)
+
+        total = self._empty_stats()
+        for start_ts, tickers in sorted(groups.items()):
+            start = datetime.fromtimestamp(start_ts, UTC)
+            self._add_stats(
+                total,
+                self.fetch_range(tickers, start, current, allow_missing=True),
+            )
+        self._record("poll complete", total)
+        return total
+
+    def sweep(self, now: Optional[datetime] = None) -> Dict[str, int]:
+        current = (now or datetime.now(UTC)).astimezone(UTC)
+        start = current - timedelta(days=self.settings.sweep_days)
+        stats = self.fetch_range(self.settings.tickers, start, current)
+        local_day = current.astimezone(EASTERN).date().isoformat()
+        self._record("sweep complete day=%s" % local_day, stats)
         return stats
 
-    def _backfill_key(self, symbol: str) -> str:
-        return "backfill:v1:%s:%s:%s" % (
-            self.settings.interval,
-            self.settings.bounds,
-            symbol,
+    def _record(self, prefix: str, stats: Dict[str, int]) -> None:
+        message = self._summary(prefix, stats)
+        self.store.append_log("info", message)
+        logging.info(message)
+        rejected = stats["interpolated"] + stats["unordered"] + stats["invalid"]
+        if rejected:
+            warning = "%s rejected=%d" % (prefix, rejected)
+            self.store.append_log("warn", warning)
+            logging.warning(warning)
+
+    @staticmethod
+    def _summary(prefix: str, stats: Dict[str, int]) -> str:
+        return (
+            "%s received=%d written=%d rejected_interpolated=%d "
+            "rejected_unordered=%d rejected_invalid=%d"
+            % (
+                prefix,
+                stats["received"],
+                stats["written"],
+                stats["interpolated"],
+                stats["unordered"],
+                stats["invalid"],
+            )
         )
-
-    def _first_backfill_day(self, now: datetime) -> date:
-        local = now.astimezone(EASTERN)
-        day = local.date()
-        start_clock = time(9, 30) if self.settings.bounds == "regular" else time(4, 0)
-        if day.weekday() >= 5 or local.time() < start_clock:
-            return previous_weekday(day)
-        return day
-
-    def backfill(self, now: Optional[datetime] = None) -> None:
-        current = now or datetime.now(UTC)
-        first_day = self._first_backfill_day(current)
-        progress: Dict[str, dict] = {}
-        for symbol in self.settings.tickers:
-            key = self._backfill_key(symbol)
-            value = self.store.get_state(key)
-            if value and value.get("complete"):
-                continue
-            if not value:
-                value = {
-                    "cursor": first_day.isoformat(),
-                    "empty_streak": 0,
-                    "complete": False,
-                }
-            progress[symbol] = value
-
-        if not progress:
-            logging.info("startup backfill already complete")
-            return
-
-        logging.info(
-            "startup backfill begins; stopping after %d empty weekdays per ticker",
-            self.settings.edge_empty_sessions,
-        )
-        while progress:
-            groups: Dict[date, List[str]] = {}
-            for symbol, value in progress.items():
-                cursor = date.fromisoformat(value["cursor"])
-                groups.setdefault(cursor, []).append(symbol)
-
-            for day in sorted(groups, reverse=True):
-                symbols = groups[day]
-                stats = self.fetch_day(day, symbols)
-                for symbol in symbols:
-                    value = progress[symbol]
-                    real_bars = stats[symbol]["real_bars"]
-                    value["empty_streak"] = (
-                        value["empty_streak"] + 1 if real_bars == 0 else 0
-                    )
-                    if value["empty_streak"] >= self.settings.edge_empty_sessions:
-                        value["complete"] = True
-                        value["edge_checked_through"] = day.isoformat()
-                        logging.info(
-                            "%s reached the provider history edge at %s",
-                            symbol,
-                            day.isoformat(),
-                        )
-                    else:
-                        value["cursor"] = previous_weekday(day).isoformat()
-                    self.store.set_state(self._backfill_key(symbol), value)
-                    if value["complete"]:
-                        del progress[symbol]
-
-    def catch_up(self, now: Optional[datetime] = None) -> None:
-        current = (now or datetime.now(UTC)).astimezone(EASTERN)
-        today = current.date()
-        close_with_delay = datetime.combine(
-            today, time(16, 0), tzinfo=EASTERN
-        ) + timedelta(minutes=self.settings.final_delay_minutes)
-        last_closed = today if current >= close_with_delay else previous_weekday(today)
-        earliest_allowed = last_closed - timedelta(days=self.settings.recovery_days)
-
-        pending_by_day: Dict[date, List[str]] = {}
-        for symbol in self.settings.tickers:
-            latest = self.store.latest_fetch_day(symbol, self.settings.interval)
-            start = next_weekday(latest) if latest else earliest_allowed
-            if start < earliest_allowed:
-                start = earliest_allowed
-            for day in weekdays(start, last_closed):
-                if not self.store.has_fetch(symbol, self.settings.interval, day):
-                    pending_by_day.setdefault(day, []).append(symbol)
-
-        for day in sorted(pending_by_day):
-            self.fetch_day(day, pending_by_day[day])
 
     def status_text(self) -> str:
-        rows = self.store.summary(self.settings.tickers, self.settings.interval)
-        by_symbol = {row["symbol"]: row for row in rows}
-        lines = ["symbol  bars      earliest              latest"]
-        for symbol in self.settings.tickers:
-            row = by_symbol.get(symbol)
+        rows = self.store.summary(self.settings.tickers)
+        by_ticker = {row["ticker"]: row for row in rows}
+        lines = ["ticker  bars      earliest              latest"]
+        for ticker in self.settings.tickers:
+            row = by_ticker.get(ticker)
             if row:
+                earliest = _iso_utc(datetime.fromtimestamp(row["earliest"], UTC))
+                latest = _iso_utc(datetime.fromtimestamp(row["latest"], UTC))
                 lines.append(
                     "%-7s %-9d %-21s %s"
-                    % (symbol, row["bars"], row["earliest"], row["latest"])
+                    % (ticker, row["bars"], earliest, latest)
                 )
             else:
-                lines.append("%-7s %-9d %-21s %s" % (symbol, 0, "-", "-"))
+                lines.append("%-7s %-9d %-21s %s" % (ticker, 0, "-", "-"))
         lines.append("database %s" % self.store.path)
         return "\n".join(lines)
 
@@ -925,7 +891,6 @@ class Service:
         self.collector = collector
         self.settings = collector.settings
         self.stop_event = threading.Event()
-        self.bootstrapped = False
 
     def stop(self, signum=None, frame=None) -> None:
         logging.info("stopping service")
@@ -934,52 +899,52 @@ class Service:
     def _wait(self, seconds: int) -> None:
         self.stop_event.wait(seconds)
 
+    def _close(self, day: date) -> time:
+        if day in self.settings.early_close_days:
+            return self.settings.early_close
+        return self.settings.regular_close
+
     def _cycle(self) -> int:
         now = datetime.now(EASTERN)
         day = now.date()
+        self.collector.store.append_log("info", "heartbeat")
         if day.weekday() >= 5:
             return self.settings.idle_seconds
 
-        start_clock = time(9, 30) if self.settings.bounds == "regular" else time(4, 0)
-        start = datetime.combine(day, start_clock, tzinfo=EASTERN)
-        close = datetime.combine(day, time(16, 0), tzinfo=EASTERN)
-        final_at = close + timedelta(minutes=self.settings.final_delay_minutes)
-        final_key = "final:v1:%s:%s:%s" % (
-            self.settings.interval,
-            self.settings.bounds,
-            day.isoformat(),
-        )
-
+        start = datetime.combine(day, self.settings.live_start, tzinfo=EASTERN)
+        close = datetime.combine(day, self._close(day), tzinfo=EASTERN)
+        final_at = close + timedelta(minutes=self.settings.after_close_minutes)
         if start <= now < final_at:
-            self.collector.fetch_day(day, allow_missing=True)
+            self.collector.poll(now)
             return self.settings.poll_seconds
-        if now >= final_at and not self.collector.store.get_state(final_key):
-            self.collector.fetch_day(day)
-            self.collector.store.set_state(final_key, True)
+        if now >= final_at and not self.collector.store.sweep_complete(day):
+            self.collector.sweep(now)
         return self.settings.idle_seconds
 
     def run(self) -> None:
         signal.signal(signal.SIGTERM, self.stop)
         signal.signal(signal.SIGINT, self.stop)
         logging.info("service started with tickers=%s", ",".join(self.settings.tickers))
+        self.collector.store.append_log("info", "service started")
         delay = self.settings.retry_seconds
         while not self.stop_event.is_set():
             try:
-                if not self.bootstrapped:
-                    self.collector.backfill()
-                    self.collector.catch_up()
-                    self.bootstrapped = True
-                    logging.info("startup backfill and catch-up complete")
                 wait_seconds = self._cycle()
                 delay = self.settings.retry_seconds
                 self._wait(wait_seconds)
-            except Exception:
-                logging.exception(
-                    "collector cycle failed; retrying in %d seconds", delay
-                )
+            except Exception as exc:
+                message = "cycle failed: %s" % exc
+                logging.exception("%s; retrying in %d seconds", message, delay)
+                try:
+                    self.collector.store.append_log("error", message)
+                except sqlite3.Error:
+                    logging.exception("could not write failure to logs table")
                 self._wait(delay)
                 delay = min(delay * 2, self.settings.retry_max_seconds)
-        logging.info("service stopped")
+        self.collector.store.append_log("info", "service stopped")
+        logging.info(
+            "service stopped",
+        )
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -999,10 +964,12 @@ def _parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("auth", help="authorize the direct Robinhood connection")
     subparsers.add_parser("serve", help="run the always-on collector")
-    subparsers.add_parser("backfill", help="resume startup backfill and catch-up")
-    once = subparsers.add_parser("once", help="fetch one day now")
-    once.add_argument("--date", dest="day", type=date.fromisoformat)
+    subparsers.add_parser("once", help="run one live poll from the last stored bars")
+    subparsers.add_parser("sweep", help="fetch the configured trailing window")
     subparsers.add_parser("status", help="show local bar coverage")
+
+    migrate = subparsers.add_parser("migrate", help="import the legacy bar table")
+    migrate.add_argument("source", type=Path)
 
     query = subparsers.add_parser("query", help="read stored bars")
     query.add_argument("symbol")
@@ -1028,26 +995,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print("Available tools: %d" % len(tools))
         elif arguments.command == "serve":
             Service(collector).run()
-        elif arguments.command == "backfill":
-            collector.backfill()
-            collector.catch_up()
-            print(collector.status_text())
         elif arguments.command == "once":
-            day = arguments.day or datetime.now(EASTERN).date()
-            collector.fetch_day(
-                day,
-                allow_missing=(day == datetime.now(EASTERN).date()),
-            )
+            collector.poll()
+            print(collector.status_text())
+        elif arguments.command == "sweep":
+            collector.sweep()
             print(collector.status_text())
         elif arguments.command == "status":
             print(collector.status_text())
+        elif arguments.command == "migrate":
+            stats = store.migrate_legacy(arguments.source.expanduser().resolve())
+            print(
+                "migrated read=%d written=%d rejected=%d"
+                % (stats["read"], stats["written"], stats["rejected"])
+            )
         elif arguments.command == "query":
-            symbol = arguments.symbol.strip().upper()
-            if symbol not in settings.tickers:
-                raise ConfigError("ticker is not in config: %s" % symbol)
+            ticker = arguments.symbol.strip().upper()
+            if ticker not in settings.tickers:
+                raise ConfigError("ticker is not in config: %s" % ticker)
             rows = store.query(
-                symbol,
-                settings.interval,
+                ticker,
                 arguments.start,
                 arguments.end,
                 arguments.limit,
@@ -1061,15 +1028,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     list(objects[0].keys())
                     if objects
                     else [
-                        "symbol",
-                        "interval",
-                        "begins_at",
+                        "ticker",
+                        "ts",
                         "open",
                         "high",
                         "low",
                         "close",
                         "volume",
-                        "session",
                     ]
                 )
                 writer = csv.DictWriter(output, fieldnames=fields)
@@ -1077,7 +1042,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 writer.writerows(objects)
                 sys.stdout.write(output.getvalue())
         return 0
-    except (ConfigError, RelayError) as exc:
+    except (ConfigError, RelayError, ValueError) as exc:
         logging.error("%s", exc)
         return 1
 

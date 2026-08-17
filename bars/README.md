@@ -1,45 +1,37 @@
 # bars
 
-`bars` is one small, always-on Robinhood minute-bar collector. It reads the
-ticker list from `config.json`, fetches OHLCV bars through Robinhood's official
-Trading MCP, and upserts them into `data/bars.sqlite3`.
+`bars` is the one writer for the shared database's `bars` rows. It fetches
+minute OHLCV data through Robinhood's official Trading MCP and upserts it into
+`../data/trader.sqlite3`.
 
-It does not store a Robinhood password. It connects directly to Robinhood's
-MCP endpoint with the official MCP Python SDK and calls only
-`get_equity_historicals`. A refresh token is stored in the ignored
-`data/robinhood_oauth.json` file with owner-only permissions.
+The service reads the shared `../config.json`. It does not store a Robinhood
+password. Its ignored `data/robinhood_oauth.json` file contains the OAuth
+refresh token with owner-only permissions.
 
 ## Behavior
 
-- On first start, it walks backward one weekday at a time.
-- It drops Robinhood bars marked `interpolated`.
-- It stops separately for each ticker after 10 consecutive weekdays with no
-  real bars. This discovers the current provider edge instead of assuming a
-  fixed date.
-- It catches up missed days after later restarts.
-- During market hours, it refreshes the current day every five minutes.
-- Five minutes after the close, it performs one final refresh.
-- SQLite upserts make every fetch safe to repeat and preserve vendor revisions.
-- `launchd` keeps the process alive and starts it again after login or a crash.
-- No model, prompt, Codex subprocess, or tool-search step is in the data path.
-- Requests use small symbol batches because Robinhood can drop larger responses.
+- During the configured live window, poll once per minute from each ticker's
+  last stored bar. A restart or short outage catches up automatically.
+- After the close, fetch the trailing 30 days for every ticker. This nightly
+  sweep repairs gaps without a separate reconciliation path.
+- Drop Robinhood rows marked `interpolated`.
+- Drop rows whose open or close lies outside the low-to-high range.
+- Upsert by `(ticker, ts)`, so every repeated fetch is safe.
+- Append heartbeats, run summaries, and problems to the shared `logs` table.
+- Let `launchd` restart the process after login or a crash.
 
-Robinhood's minute history is a sliding window. The collector can preserve bars
-from this point forward, but it cannot recover a minute that Robinhood no
-longer serves. Keep the service running if continuous minute history matters.
+The collector supports one data contract: minute bars with UTC epoch-second
+timestamps. The shared schema is in `../schema.sql`.
 
 ## Configure
 
-Edit `config.json`. The required setting is the ticker list:
-
-```json
-"tickers": ["SNDK", "SPY", "QQQ"]
-```
-
-This first version deliberately supports one contract: regular-hours,
-one-minute equity bars. Set `bounds` to `extended` if premarket bars are needed.
+Edit `../config.json`. It contains the ticker list, early-close dates, live
+polling window, sweep length, and provider settings. The default live window is
+04:00 Eastern through five minutes after the regular or configured early close.
 
 ## Operate
+
+Run these commands from this directory:
 
 ```sh
 make auth                    # one-time Robinhood browser approval
@@ -47,14 +39,15 @@ make install                 # install and start the LaunchAgent
 make status                  # process state plus stored coverage
 make logs                    # follow collector logs
 make restart                 # reload after a config edit
+make once                    # run one live poll now
+make sweep                   # run the trailing 30-day sweep now
 make uninstall               # stop it; keep the database
 ```
 
-If Robinhood revokes the connection, authorize it again and restart:
+To import the old `bar` table into the shared schema:
 
 ```sh
-make auth
-make restart
+make migrate LEGACY=/absolute/path/to/bars.sqlite3
 ```
 
 ## Query stored bars
@@ -71,5 +64,5 @@ JSON is also available:
 .venv/bin/python bars_service.py query SNDK --limit 5 --format json
 ```
 
-The table key is `(symbol, interval, begins_at)`. Columns are `open`, `high`,
-`low`, `close`, `volume`, `session`, and `fetched_at`.
+The stored columns are `ticker`, `ts`, `open`, `high`, `low`, `close`, and
+`volume`.
