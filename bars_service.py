@@ -72,6 +72,7 @@ class Settings:
     oauth_store: Path
     oauth_callback_port: int
     timeout_seconds: int
+    max_symbols_per_call: int
 
 
 def _positive_int(value, name: str, minimum: int = 1) -> int:
@@ -170,6 +171,10 @@ def load_settings(path: Path) -> Settings:
             provider.get("timeout_seconds", 300),
             "provider.timeout_seconds",
             30,
+        ),
+        max_symbols_per_call=_positive_int(
+            provider.get("max_symbols_per_call", 3),
+            "provider.max_symbols_per_call",
         ),
     )
 
@@ -457,23 +462,28 @@ class RobinhoodClient:
         end_iso: str,
         allow_missing: bool = False,
     ) -> dict:
-        result = self._run(
-            self._session_call(
-                self.TOOL,
-                {
-                    "symbols": list(symbols),
-                    "start_time": start_iso,
-                    "end_time": end_iso,
-                    "interval": self.settings.interval,
-                    "bounds": self.settings.bounds,
-                },
-                interactive=False,
-            ),
-            "historicals request",
-        )
-        payload = self._payload(result)
-        self._validate(payload, symbols, start_iso, end_iso, allow_missing)
-        return payload
+        combined = {"data": {"results": []}}
+        size = self.settings.max_symbols_per_call
+        for offset in range(0, len(symbols), size):
+            batch = symbols[offset : offset + size]
+            result = self._run(
+                self._session_call(
+                    self.TOOL,
+                    {
+                        "symbols": list(batch),
+                        "start_time": start_iso,
+                        "end_time": end_iso,
+                        "interval": self.settings.interval,
+                        "bounds": self.settings.bounds,
+                    },
+                    interactive=False,
+                ),
+                "historicals request",
+            )
+            payload = self._payload(result)
+            self._validate(payload, batch, start_iso, end_iso, allow_missing)
+            combined["data"]["results"].extend(payload["data"]["results"])
+        return combined
 
     @staticmethod
     def _validate(

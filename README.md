@@ -22,6 +22,7 @@ MCP endpoint with the official MCP Python SDK and calls only
 - SQLite upserts make every fetch safe to repeat and preserve vendor revisions.
 - `launchd` keeps the process alive and starts it again after login or a crash.
 - No model, prompt, Codex subprocess, or tool-search step is in the data path.
+- Requests use small symbol batches because Robinhood can drop larger responses.
 
 Robinhood's minute history is a sliding window. The collector can preserve bars
 from this point forward, but it cannot recover a minute that Robinhood no
