@@ -115,17 +115,22 @@ and exit points per algo.
   inputs.
 - All parameters live in config. A complicated node points to a function in
   the code, and the function hard-codes nothing.
-- The version is one hash of the whole config file; there is no per-node
-  hash. When the algo service sees a new version, it writes the full file
-  to the configs table. A stored version therefore always resolves to
-  readable parameters, also after the config file has moved on.
+- The version is a field in the config file. The user bumps it by hand
+  with every change to a signal or an algo. When the algo service sees a
+  version that is not in the configs table, it stores the full file under
+  that version. A stored version therefore always resolves to readable
+  parameters, also after the config file has moved on.
+- The service trusts the version field, not the content. When the file
+  differs from the stored content under the same version, the loop logs a
+  warning; the fix is a version bump.
 
 ### A change is a standard operation
 
-Add a signal, add an algo, or change a parameter: edit the config file.
-That is the whole procedure. The algo service reacts on its own:
+Add a signal, add an algo, or change a parameter: edit the config file
+and bump the version field. That is the whole procedure. The algo service
+reacts on its own:
 
-1. It sees the new file hash and stores the file in configs.
+1. It sees the new version and stores the file in configs.
 2. The work rule (see the loop) now matches every pair in the evaluation
    window, because no output rows exist under the new version, and fills
    them. The rows are keyed, so the run is idempotent and resumable.
@@ -250,7 +255,7 @@ CREATE TABLE outputs (
 );
 
 CREATE TABLE configs (
-    version    TEXT    NOT NULL PRIMARY KEY,  -- hash of the whole config file
+    version    TEXT    NOT NULL PRIMARY KEY,  -- the version field from the config file
     first_seen INTEGER NOT NULL,              -- epoch seconds, UTC
     content    TEXT    NOT NULL               -- the full config file, JSON
 );
@@ -276,7 +281,7 @@ Notes:
 - The loop's work rule compares `bars.fetched_at` with
   `outputs.computed_at`; the two columns exist for that rule.
 - `outputs` grows fastest; `logs` grows steadily.
-- `configs` maps every stored version hash back to the full config file.
+- `configs` maps every stored version back to the full config file.
 - `logs` is append-only and the one table with an extra index.
 - No other indexes beyond the primary keys. Config stays in files; the
   configs table is a record of versions, not the source of truth.
@@ -319,6 +324,7 @@ flowchart TB
 2. No backtest concept: the loop applies the core to timestamps, in bulk
    or in real time. An output updates in place per version; old versions
    stay for reference.
+3. No version hash: the user bumps the version field in config by hand.
 
 ## Open
 
