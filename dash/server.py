@@ -429,6 +429,303 @@ class DashboardData:
         performance_rows.sort(key=lambda item: (item["algo"], str(item["version"])))
         return {"ticker": ticker, "rows": performance_rows}
 
+    @staticmethod
+    def _median(values: list[float]) -> float | None:
+        if not values:
+            return None
+        ordered = sorted(values)
+        middle = len(ordered) // 2
+        if len(ordered) % 2:
+            return ordered[middle]
+        return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+    @classmethod
+    def _outcome_stats(
+        cls,
+        closed_trades: list[dict[str, Any]],
+        open_positions: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        returns = [float(item["return_pct"]) for item in closed_trades]
+        unrealized = [
+            float(item["return_pct"])
+            for item in open_positions
+            if item.get("return_pct") is not None
+        ]
+        holds = [float(item["hold_minutes"]) for item in closed_trades]
+        wins = sum(value > 0 for value in returns)
+        losses = sum(value < 0 for value in returns)
+        flats = len(returns) - wins - losses
+        gross_profit = sum(value for value in returns if value > 0)
+        gross_loss = sum(value for value in returns if value < 0)
+        realized = sum(returns)
+
+        exit_returns: dict[int, float] = {}
+        for item in closed_trades:
+            timestamp = int(item["exit_ts"])
+            exit_returns[timestamp] = exit_returns.get(timestamp, 0.0) + float(
+                item["return_pct"]
+            )
+        cumulative = 0.0
+        peak = 0.0
+        maximum_drawdown = 0.0
+        for timestamp in sorted(exit_returns):
+            cumulative += exit_returns[timestamp]
+            peak = max(peak, cumulative)
+            maximum_drawdown = min(maximum_drawdown, cumulative - peak)
+
+        return {
+            "closed_units": len(returns),
+            "open_units": len(open_positions),
+            "wins": wins,
+            "losses": losses,
+            "flats": flats,
+            "win_rate": round((wins / len(returns)) * 100.0, 1) if returns else None,
+            "realized_return_pct": round(realized, 4),
+            "unrealized_return_pct": round(sum(unrealized), 4),
+            "total_return_pct": round(realized + sum(unrealized), 4),
+            "average_return_pct": round(realized / len(returns), 4) if returns else None,
+            "median_return_pct": round(cls._median(returns), 4) if returns else None,
+            "best_return_pct": round(max(returns), 4) if returns else None,
+            "worst_return_pct": round(min(returns), 4) if returns else None,
+            "gross_profit_pct": round(gross_profit, 4),
+            "gross_loss_pct": round(gross_loss, 4),
+            "profit_factor": (
+                round(gross_profit / abs(gross_loss), 3) if gross_loss < 0 else None
+            ),
+            "profit_factor_unbounded": bool(gross_profit > 0 and gross_loss == 0),
+            "max_drawdown_pct": round(maximum_drawdown, 4),
+            "average_hold_minutes": round(sum(holds) / len(holds), 1) if holds else None,
+            "median_hold_minutes": round(cls._median(holds), 1) if holds else None,
+        }
+
+    def algorithms(self) -> dict[str, Any]:
+        config = self.config()
+        current_version = str(config.get("version", ""))
+        current_definitions = self._mapping(config.get("algos"))
+        definitions: dict[str, dict[str, Any]] = {
+            name: {
+                "definition": definition if isinstance(definition, dict) else {},
+                "version": current_version,
+                "configured": True,
+            }
+            for name, definition in current_definitions.items()
+        }
+
+        with self.connection() as connection:
+            for row in connection.execute(
+                "SELECT version, content FROM configs ORDER BY first_seen DESC"
+            ):
+                stored = self._json_value(row["content"])
+                if not isinstance(stored, dict):
+                    continue
+                for name, definition in self._mapping(stored.get("algos")).items():
+                    definitions.setdefault(
+                        name,
+                        {
+                            "definition": definition if isinstance(definition, dict) else {},
+                            "version": str(row["version"]),
+                            "configured": False,
+                        },
+                    )
+
+            trade_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(trades)")
+            }
+            direction_column = (
+                "t.direction" if "direction" in trade_columns else "1 AS direction"
+            )
+            trade_rows = connection.execute(
+                f"""
+                SELECT t.ticker, t.algo, t.ts, t.action, {direction_column}, b.close
+                FROM trades t
+                LEFT JOIN bars b ON b.ticker = t.ticker AND b.ts = t.ts
+                ORDER BY t.ts, t.ticker, t.algo,
+                         CASE WHEN t.action = 'entry' THEN 0 ELSE 1 END
+                """
+            ).fetchall()
+            latest_prices = {
+                row["ticker"]: {"ts": int(row["ts"]), "price": float(row["close"])}
+                for row in connection.execute(
+                    """
+                    SELECT b.ticker, b.ts, b.close
+                    FROM bars b
+                    JOIN (
+                        SELECT ticker, MAX(ts) AS ts FROM bars GROUP BY ticker
+                    ) latest ON latest.ticker = b.ticker AND latest.ts = b.ts
+                    """
+                )
+            }
+
+        algo_data: dict[str, dict[str, Any]] = {}
+
+        def group_for(name: str) -> dict[str, Any]:
+            return algo_data.setdefault(
+                name,
+                {
+                    "entries": 0,
+                    "exit_actions": 0,
+                    "orphan_exits": 0,
+                    "unpriced_units": 0,
+                    "first_action": None,
+                    "last_action": None,
+                    "sessions": set(),
+                    "closed": [],
+                    "ticker_counts": {},
+                },
+            )
+
+        open_units: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for row in trade_rows:
+            algo = str(row["algo"])
+            ticker = str(row["ticker"])
+            timestamp = int(row["ts"])
+            action = str(row["action"])
+            group = group_for(algo)
+            ticker_counts = group["ticker_counts"].setdefault(
+                ticker,
+                {"entries": 0, "exit_actions": 0, "first_action": None, "last_action": None},
+            )
+            group["first_action"] = timestamp if group["first_action"] is None else min(group["first_action"], timestamp)
+            group["last_action"] = timestamp if group["last_action"] is None else max(group["last_action"], timestamp)
+            ticker_counts["first_action"] = timestamp if ticker_counts["first_action"] is None else min(ticker_counts["first_action"], timestamp)
+            ticker_counts["last_action"] = timestamp if ticker_counts["last_action"] is None else max(ticker_counts["last_action"], timestamp)
+            group["sessions"].add(datetime.fromtimestamp(timestamp, tz=EASTERN).date().isoformat())
+            key = (algo, ticker)
+            units = open_units.setdefault(key, [])
+            price = float(row["close"]) if row["close"] is not None else None
+
+            if action == "entry":
+                group["entries"] += 1
+                ticker_counts["entries"] += 1
+                units.append(
+                    {
+                        "ticker": ticker,
+                        "entry_ts": timestamp,
+                        "entry_price": price,
+                        "direction": int(row["direction"]),
+                    }
+                )
+                continue
+
+            group["exit_actions"] += 1
+            ticker_counts["exit_actions"] += 1
+            if not units:
+                group["orphan_exits"] += 1
+                continue
+            for entry in units:
+                if entry["entry_price"] is None or price is None:
+                    group["unpriced_units"] += 1
+                    continue
+                result = (
+                    ((price / float(entry["entry_price"])) - 1.0)
+                    * 100.0
+                    * int(entry["direction"])
+                )
+                group["closed"].append(
+                    {
+                        **entry,
+                        "exit_ts": timestamp,
+                        "exit_price": price,
+                        "return_pct": round(result, 4),
+                        "hold_minutes": round(max(0, timestamp - int(entry["entry_ts"])) / 60.0, 1),
+                    }
+                )
+            open_units[key] = []
+
+        for name in definitions:
+            group_for(name)
+
+        algorithms = []
+        for name in sorted(algo_data):
+            group = algo_data[name]
+            definition_meta = definitions.get(
+                name,
+                {"definition": {}, "version": None, "configured": False},
+            )
+            definition = definition_meta["definition"]
+            positions = []
+            for (algo, ticker), units in open_units.items():
+                if algo != name:
+                    continue
+                latest = latest_prices.get(ticker)
+                for entry in units:
+                    marked_return = None
+                    if entry["entry_price"] is not None and latest:
+                        marked_return = (
+                            ((latest["price"] / float(entry["entry_price"])) - 1.0)
+                            * 100.0
+                            * int(entry["direction"])
+                        )
+                    positions.append(
+                        {
+                            **entry,
+                            "mark_ts": latest["ts"] if latest else None,
+                            "mark_price": latest["price"] if latest else None,
+                            "return_pct": round(marked_return, 4) if marked_return is not None else None,
+                        }
+                    )
+
+            ticker_rows = []
+            tickers = sorted(
+                set(group["ticker_counts"])
+                | {item["ticker"] for item in group["closed"]}
+                | {item["ticker"] for item in positions}
+            )
+            for ticker in tickers:
+                counts = group["ticker_counts"].get(
+                    ticker,
+                    {"entries": 0, "exit_actions": 0, "first_action": None, "last_action": None},
+                )
+                ticker_stats = self._outcome_stats(
+                    [item for item in group["closed"] if item["ticker"] == ticker],
+                    [item for item in positions if item["ticker"] == ticker],
+                )
+                ticker_rows.append({"ticker": ticker, **counts, **ticker_stats})
+
+            stats = self._outcome_stats(group["closed"], positions)
+            stats.update(
+                {
+                    "entries": group["entries"],
+                    "exit_actions": group["exit_actions"],
+                    "orphan_exits": group["orphan_exits"],
+                    "unpriced_units": group["unpriced_units"],
+                    "session_count": len(group["sessions"]),
+                    "ticker_count": len(tickers),
+                    "first_action": group["first_action"],
+                    "last_action": group["last_action"],
+                }
+            )
+            algorithms.append(
+                {
+                    "name": name,
+                    "function": definition.get("function", name),
+                    "inputs": definition.get("inputs", []),
+                    "params": definition.get("params", {}),
+                    "trades_enabled": definition.get("trades") is True,
+                    "configured": definition_meta["configured"],
+                    "version": definition_meta["version"],
+                    "stats": stats,
+                    "tickers": ticker_rows,
+                    "recent_trades": sorted(
+                        group["closed"], key=lambda item: item["exit_ts"], reverse=True
+                    )[:12],
+                    "open_positions": sorted(
+                        positions, key=lambda item: item["entry_ts"], reverse=True
+                    ),
+                }
+            )
+
+        return {
+            "generated_at": int(datetime.now(tz=UTC).timestamp()),
+            "market": self._market_state(config),
+            "version": current_version,
+            "return_basis": (
+                "Gross percentage points summed per entry unit; no sizing, fees, or slippage. "
+                "Trades are grouped by algorithm name because trade rows do not store config versions."
+            ),
+            "algorithms": algorithms,
+        }
+
     def health(self) -> dict[str, Any]:
         with self.connection() as connection:
             connection.execute("SELECT 1 FROM bars LIMIT 1").fetchone()
@@ -956,6 +1253,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 )
             elif path == "/api/performance":
                 payload = self.data.performance(self._param(query, "ticker"))
+            elif path == "/api/algorithms":
+                payload = self.data.algorithms()
             elif path == "/api/health":
                 payload = self.data.health()
             else:
@@ -974,6 +1273,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "/": "index.html",
             "/logs": "logs.html",
             "/logs/": "logs.html",
+            "/algos": "algos.html",
+            "/algos/": "algos.html",
         }
         relative = route_files.get(path, path.lstrip("/"))
         candidate = (STATIC_DIR / relative).resolve()

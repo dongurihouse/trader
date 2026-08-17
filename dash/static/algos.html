@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0b1017" />
+    <meta name="description" content="Stored performance summaries for trader algorithms." />
+    <title>Trader — Algorithms</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/algos.js" defer></script>
+  </head>
+  <body class="algos-page">
+    <a class="skip-link" href="#main">Skip to algorithms</a>
+
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Trader dashboard home">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span>TRADER</span>
+      </a>
+      <nav class="topbar-nav" aria-label="Dashboard views">
+        <a href="/">Chart</a>
+        <a class="active" href="/algos" aria-current="page">Algos</a>
+        <a href="/logs">Logs</a>
+      </nav>
+      <div class="topbar-meta">
+        <span class="header-market" id="market-status" aria-label="Checking market" title="Checking market">
+          <span class="status-dot" id="market-dot"></span>
+        </span>
+      </div>
+    </header>
+
+    <main id="main" class="algos-main">
+      <section class="algo-rollup surface" aria-label="Algorithm book summary">
+        <div class="algo-rollup-metrics">
+          <span><small>Algorithms</small><strong id="algo-count">—</strong></span>
+          <span><small>Closed units</small><strong id="algo-closed">—</strong></span>
+          <span><small>Gross return</small><strong id="algo-return">—</strong></span>
+          <span><small>Win rate</small><strong id="algo-win-rate">—</strong></span>
+          <span><small>Open units</small><strong id="algo-open">—</strong></span>
+        </div>
+        <p class="algo-return-basis" id="return-basis">Loading return basis…</p>
+      </section>
+
+      <section class="algo-book" id="algo-book" aria-label="Algorithm summaries">
+        <div class="algo-loading surface">
+          <span></span>
+          Loading algorithm results
+        </div>
+      </section>
+    </main>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  </body>
+</html>

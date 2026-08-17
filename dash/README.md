@@ -46,18 +46,25 @@ the loopback ports configured by `bars.api_port` and `algo.api_port`.
 
 ## Chart
 
-- Opens on the latest one-day range; longer history is available from the range controls.
-- One-day, five-session, one-month, three-month, 120-day, and all-history ranges.
-- Minute-level bars remain available in every range for zooming and panning.
+- Opens on the latest trading date with the loaded history available from the date row.
+- Minute-level bars remain available for zooming and panning.
 - Switchable line and candlestick chart styles.
 - Automatic entry and exit markers for the configured trading algo, read from `trades`.
-- Visible opening-range bands for configured range-breakout algos, derived from bars and config.
 - Up/down marker direction for long and short actions, with action details on hover.
-- Time zoom with the `+`, `−`, and Reset controls or the mouse wheel.
+- Hover inspection and click-locked bar focus update price, change, time, and shape probabilities.
+- Time zoom with the mouse wheel.
 - Horizontal wheel, trackpad, Shift+wheel, and drag panning across the loaded minute history.
 - Ticker switching from the configured ticker list.
-- Current price, session change, open, high, low, and volume.
 - Automatic refresh every 30 seconds.
+
+## Algorithms
+
+Open <http://127.0.0.1:8790/algos> for per-algorithm summaries calculated
+from stored trade actions and exact bar-close prices. The page shows gross
+unit return, win rate, profit factor, drawdown, holding time, per-ticker
+results, current marks, and recent closed units. Returns do not include
+position sizing, fees, or slippage, and trade rows are grouped by algorithm
+name because they do not store a config version.
 
 ## Logs
 

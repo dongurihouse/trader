@@ -1748,6 +1748,422 @@ pre {
   display: none !important;
 }
 
+.algos-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  gap: 18px;
+  padding-block: 18px 70px;
+}
+
+.algo-rollup {
+  display: grid;
+  min-width: 0;
+  gap: 13px;
+  padding: 18px 22px;
+}
+
+.algo-rollup-metrics {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.algo-rollup-metrics span {
+  display: grid;
+  gap: 5px;
+  padding-inline: 18px;
+  border-right: 1px solid var(--line);
+}
+
+.algo-rollup-metrics span:first-child {
+  padding-left: 0;
+}
+
+.algo-rollup-metrics span:last-child {
+  padding-right: 0;
+  border-right: 0;
+}
+
+.algo-rollup-metrics small,
+.algo-coverage small,
+.algo-inputs > small {
+  color: var(--subtle);
+  font-family: var(--mono);
+  font-size: 0.52rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.algo-rollup-metrics strong {
+  color: var(--text);
+  font-size: 1.2rem;
+  font-weight: 580;
+  letter-spacing: -0.025em;
+}
+
+.algo-return-basis {
+  margin: 0;
+  color: var(--subtle);
+  font-family: var(--mono);
+  font-size: 0.55rem;
+  line-height: 1.5;
+}
+
+.algo-book {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  gap: 18px;
+}
+
+.algo-card {
+  min-width: 0;
+  padding: clamp(22px, 3vw, 34px);
+}
+
+.algo-card-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 24px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.algo-title-row {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+
+.algo-title-row h2 {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 1.25rem;
+  letter-spacing: 0.045em;
+}
+
+.algo-heading p {
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.61rem;
+}
+
+.algo-status {
+  padding: 5px 8px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.49rem;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: rgba(137, 149, 159, 0.08);
+  border: 1px solid rgba(137, 149, 159, 0.16);
+  border-radius: 99px;
+}
+
+.algo-status.active {
+  color: var(--acid);
+  background: var(--acid-soft);
+  border-color: rgba(216, 255, 114, 0.2);
+}
+
+.algo-coverage {
+  display: grid;
+  justify-items: end;
+  gap: 4px;
+  font-family: var(--mono);
+  text-align: right;
+}
+
+.algo-coverage strong {
+  font-size: 0.67rem;
+  font-weight: 650;
+}
+
+.algo-coverage span {
+  color: var(--subtle);
+  font-size: 0.55rem;
+}
+
+.algo-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-top: 20px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.algo-metric {
+  display: grid;
+  min-height: 78px;
+  align-content: center;
+  gap: 7px;
+  padding: 14px 16px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.algo-metric:nth-child(4n) {
+  border-right: 0;
+}
+
+.algo-metric:nth-last-child(-n + 4) {
+  border-bottom: 0;
+}
+
+.algo-metric small {
+  color: var(--subtle);
+  font-family: var(--mono);
+  font-size: 0.5rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.algo-metric strong {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.algo-definition {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.65fr) minmax(0, 1.35fr);
+  gap: 24px;
+  margin-top: 20px;
+  padding: 18px;
+  background: rgba(10, 15, 21, 0.44);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.algo-inputs {
+  display: flex;
+  align-content: start;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.algo-inputs > small {
+  width: 100%;
+  margin-bottom: 2px;
+}
+
+.algo-chip {
+  padding: 5px 7px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.52rem;
+  background: rgba(23, 32, 43, 0.8);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.algo-params {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px 18px;
+  margin: 0;
+}
+
+.algo-params div {
+  display: grid;
+}
+
+.algo-params dt {
+  color: var(--subtle);
+  font-family: var(--mono);
+  font-size: 0.48rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.algo-params dd {
+  margin: 3px 0 0;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.58rem;
+}
+
+.algo-section {
+  min-width: 0;
+  margin-top: 26px;
+}
+
+.algo-section h3 {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.algo-table-wrap {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  scrollbar-width: thin;
+}
+
+.algo-table {
+  width: 100%;
+  min-width: 850px;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 0.57rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.algo-table th,
+.algo-table td {
+  padding: 11px 13px;
+  text-align: right;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.algo-table thead th {
+  color: var(--subtle);
+  font-size: 0.48rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  background: rgba(10, 15, 21, 0.55);
+}
+
+.algo-table th:first-child,
+.algo-table td:first-child {
+  text-align: left;
+}
+
+.algo-table tbody tr:last-child th,
+.algo-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.algo-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.algo-ticker {
+  color: var(--text);
+  font-size: 0.61rem;
+}
+
+.algo-trade-list {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.algo-trade-row {
+  display: grid;
+  grid-template-columns: 90px minmax(320px, 1fr) 170px 70px 74px;
+  align-items: center;
+  gap: 14px;
+  min-height: 54px;
+  padding: 10px 13px;
+  font-family: var(--mono);
+  font-size: 0.55rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.algo-trade-row:last-child {
+  border-bottom: 0;
+}
+
+.algo-trade-identity {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.algo-trade-identity strong {
+  color: var(--text);
+}
+
+.algo-trade-identity span {
+  padding: 3px 5px;
+  color: var(--cyan);
+  font-size: 0.45rem;
+  text-transform: uppercase;
+  background: rgba(112, 216, 220, 0.08);
+  border-radius: 4px;
+}
+
+.algo-trade-identity span.short {
+  color: var(--red);
+  background: rgba(255, 123, 115, 0.08);
+}
+
+.algo-trade-times {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+}
+
+.algo-trade-times i {
+  color: var(--subtle);
+  font-style: normal;
+}
+
+.algo-trade-prices,
+.algo-trade-hold {
+  color: var(--subtle);
+}
+
+.algo-trade-return {
+  text-align: right;
+}
+
+.algo-muted {
+  margin: 0;
+  color: var(--subtle);
+  font-family: var(--mono);
+  font-size: 0.57rem;
+}
+
+.algo-loading,
+.algo-empty {
+  display: grid;
+  min-height: 260px;
+  align-content: center;
+  justify-items: center;
+  gap: 12px;
+  padding: 30px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  text-align: center;
+}
+
+.algo-loading span {
+  width: 24px;
+  height: 24px;
+  border: 2px solid var(--line-strong);
+  border-top-color: var(--acid);
+  border-radius: 50%;
+  animation: spin 700ms linear infinite;
+}
+
+.algo-empty strong {
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 0.9rem;
+}
+
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
@@ -2043,6 +2459,137 @@ pre {
     padding-left: 0;
     border-top: 1px solid var(--line);
     border-left: 0;
+  }
+}
+
+@media (max-width: 900px) {
+  .algo-metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .algo-metric:nth-child(4n) {
+    border-right: 1px solid var(--line);
+  }
+
+  .algo-metric:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .algo-metric:nth-last-child(-n + 4) {
+    border-bottom: 1px solid var(--line);
+  }
+
+  .algo-metric:nth-last-child(-n + 2) {
+    border-bottom: 0;
+  }
+
+  .algo-definition {
+    grid-template-columns: 1fr;
+  }
+
+  .algo-trade-row {
+    grid-template-columns: 80px minmax(0, 1fr) 72px;
+    gap: 5px 12px;
+  }
+
+  .algo-trade-identity {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+  }
+
+  .algo-trade-times {
+    grid-column: 2;
+    grid-row: 1;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+
+  .algo-trade-prices {
+    grid-column: 2;
+    grid-row: 2;
+  }
+
+  .algo-trade-hold {
+    grid-column: 3;
+    grid-row: 2;
+    text-align: right;
+  }
+
+  .algo-trade-return {
+    grid-column: 3;
+    grid-row: 1;
+  }
+}
+
+@media (max-width: 680px) {
+  .algos-main {
+    gap: 12px;
+    padding-block: 11px 40px;
+  }
+
+  .algo-rollup {
+    padding: 12px 14px;
+  }
+
+  .algo-rollup-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .algo-rollup-metrics span,
+  .algo-rollup-metrics span:first-child,
+  .algo-rollup-metrics span:last-child {
+    padding: 10px;
+    border-right: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+  }
+
+  .algo-rollup-metrics span:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .algo-rollup-metrics span:last-child {
+    grid-column: 1 / -1;
+    border-right: 0;
+    border-bottom: 0;
+  }
+
+  .algo-card {
+    padding: 18px;
+  }
+
+  .algo-card-header {
+    display: grid;
+    gap: 14px;
+  }
+
+  .algo-coverage {
+    justify-items: start;
+    text-align: left;
+  }
+
+  .algo-definition {
+    gap: 18px;
+    padding: 14px;
+  }
+
+  .algo-params {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .algo-trade-row {
+    grid-template-columns: 72px minmax(0, 1fr) 58px;
+    padding-inline: 10px;
+  }
+
+  .algo-trade-times {
+    gap: 4px;
+    font-size: 0.49rem;
+  }
+
+  .algo-trade-prices {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 }
 
