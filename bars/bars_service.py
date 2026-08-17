@@ -1271,9 +1271,14 @@ class Collector:
                             datetime.fromtimestamp(latest + 60, UTC),
                         )
                     while cursor < end:
+                        chunk_days = (
+                            1
+                            if spec.name == "pivot_points"
+                            else TECHNICAL_CHUNK_DAYS
+                        )
                         chunk_end = min(
                             end,
-                            cursor + timedelta(days=TECHNICAL_CHUNK_DAYS),
+                            cursor + timedelta(days=chunk_days),
                         )
                         logging.info(
                             "fetching %s %s from %s through %s",
