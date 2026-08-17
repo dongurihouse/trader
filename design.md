@@ -177,10 +177,9 @@ number.
 - No private clock. The loop polls the database and the config file every
   30 seconds and reacts to what changed.
 - The work list is every (ticker, timestamp) pair inside the evaluation
-  window where outputs has no row under the current version, or where the
-  bar's fetched_at is newer than the output row's computed_at. This one
-  rule covers a live bar, a bar the sweep repaired, and a config change;
-  the loop does not tell the cases apart.
+  window where outputs has no row under the current version. This one
+  rule covers a live bar and a config change; the loop does not tell the
+  cases apart.
 - Work updates outputs; a rerun is a safe upsert because the rows are
   keyed and the core is deterministic. Only the newest bar of a ticker
   also trades: the loop writes trade rows for its points, and older work
@@ -294,8 +293,6 @@ Notes:
 - `bars` needs no quality flag: bad rows are rejected at ingest.
 - `trades` binds every row to one algo; nothing consolidates across algos.
   No price (recomputable) and no size (a row is one unit).
-- The loop's work rule compares `bars.fetched_at` with
-  `outputs.computed_at`; the two columns exist for that rule.
 - `outputs` grows fastest; `logs` grows steadily.
 - `configs` maps every stored version back to the full config file.
 - `logs` is append-only and the one table with an extra index.
