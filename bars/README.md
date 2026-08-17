@@ -10,6 +10,8 @@ refresh token with owner-only permissions.
 
 ## Behavior
 
+- Backfill the configured 120-day window once for each ticker. A ticker added
+  later gets the same backfill before its next poll or sweep.
 - During the configured live window, poll once per minute from each ticker's
   last stored bar. A restart or short outage catches up automatically.
 - After the close, fetch the trailing 30 days for every ticker. This nightly
@@ -25,9 +27,10 @@ timestamps. The shared schema is in `../config/schema.sql`.
 
 ## Configure
 
-Edit `../config/config.json`. It contains the ticker list, early-close dates, live
-polling window, sweep length, and provider settings. The default live window is
-04:00 Eastern through five minutes after the regular or configured early close.
+Edit `../config/config.json`. It contains the ticker list, early-close dates,
+live polling window, 120-day initial backfill, 30-day sweep, and provider
+settings. The default live window is 04:00 Eastern through five minutes after
+the regular or configured early close.
 
 ## Operate
 
@@ -40,6 +43,7 @@ make status                  # process state plus stored coverage
 make logs                    # show the latest database logs
 make restart                 # reload after a config edit
 make once                    # run one live poll now
+make backfill                # force the 120-day backfill for every ticker
 make sweep                   # run the trailing 30-day sweep now
 make uninstall               # stop it; keep the database
 ```

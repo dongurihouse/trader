@@ -65,6 +65,7 @@ class Settings:
     early_close_days: frozenset
     after_close_minutes: int
     poll_seconds: int
+    backfill_days: int
     sweep_days: int
     idle_seconds: int
     retry_seconds: int
@@ -175,6 +176,9 @@ def load_settings(path: Path) -> Settings:
         ),
         poll_seconds=_positive_int(
             live.get("poll_seconds", 60), "live_polling.poll_seconds", 30
+        ),
+        backfill_days=_positive_int(
+            bars.get("backfill_days", 120), "bars.backfill_days"
         ),
         sweep_days=_positive_int(bars.get("sweep_days", 30), "bars.sweep_days"),
         idle_seconds=_positive_int(
@@ -686,6 +690,40 @@ class BarStore:
             ).fetchone()
         return row is not None
 
+    def pending_backfills(
+        self, tickers: Sequence[str], days: int
+    ) -> List[str]:
+        messages = {
+            "backfill complete ticker=%s days=%d" % (ticker, days): ticker
+            for ticker in tickers
+        }
+        placeholders = ",".join("?" for _ in messages)
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT message FROM logs WHERE service='bars' AND level='info' "
+                "AND message IN (%s)" % placeholders,
+                tuple(messages),
+            ).fetchall()
+        complete = {messages[row["message"]] for row in rows}
+        return [ticker for ticker in tickers if ticker not in complete]
+
+    def mark_backfills_complete(
+        self, tickers: Sequence[str], days: int
+    ) -> None:
+        timestamp = _epoch(datetime.now(UTC))
+        with self.connect() as connection:
+            connection.executemany(
+                "INSERT INTO logs(ts, service, level, message) "
+                "VALUES (?, 'bars', 'info', ?)",
+                [
+                    (
+                        timestamp,
+                        "backfill complete ticker=%s days=%d" % (ticker, days),
+                    )
+                    for ticker in tickers
+                ],
+            )
+
     def summary(self, tickers: Sequence[str]) -> List[sqlite3.Row]:
         placeholders = ",".join("?" for _ in tickers)
         query = """
@@ -834,6 +872,7 @@ class Collector:
 
     def poll(self, now: Optional[datetime] = None) -> Dict[str, int]:
         current = (now or datetime.now(UTC)).astimezone(UTC)
+        self.backfill_pending(current)
         floor = current - timedelta(days=self.settings.sweep_days)
         groups: Dict[int, List[str]] = {}
         for ticker, latest in self.store.latest_by_ticker(
@@ -860,6 +899,7 @@ class Collector:
         scheduled_day: Optional[date] = None,
     ) -> Dict[str, int]:
         current = (now or datetime.now(UTC)).astimezone(UTC)
+        self.backfill_pending(current)
         start = current - timedelta(days=self.settings.sweep_days)
         stats = self.fetch_range(self.settings.tickers, start, current)
         prefix = "sweep complete"
@@ -867,6 +907,35 @@ class Collector:
             prefix += " day=%s" % scheduled_day.isoformat()
         self._record(prefix, stats)
         return stats
+
+    def backfill(
+        self,
+        now: Optional[datetime] = None,
+        tickers: Optional[Sequence[str]] = None,
+    ) -> Dict[str, int]:
+        current = (now or datetime.now(UTC)).astimezone(UTC)
+        selected = tuple(tickers or self.settings.tickers)
+        start = current - timedelta(days=self.settings.backfill_days)
+        stats = self.fetch_range(selected, start, current)
+        self._record(
+            "backfill run complete tickers=%s days=%d"
+            % (",".join(selected), self.settings.backfill_days),
+            stats,
+        )
+        self.store.mark_backfills_complete(
+            selected, self.settings.backfill_days
+        )
+        return stats
+
+    def backfill_pending(
+        self, now: Optional[datetime] = None
+    ) -> Optional[Dict[str, int]]:
+        pending = self.store.pending_backfills(
+            self.settings.tickers, self.settings.backfill_days
+        )
+        if not pending:
+            return None
+        return self.backfill(now=now, tickers=pending)
 
     def _record(self, prefix: str, stats: Dict[str, int]) -> None:
         message = (
@@ -979,6 +1048,7 @@ def _parser() -> argparse.ArgumentParser:
     subparsers.add_parser("auth", help="authorize the direct Robinhood connection")
     subparsers.add_parser("serve", help="run the always-on collector")
     subparsers.add_parser("once", help="run one live poll from the last stored bars")
+    subparsers.add_parser("backfill", help="fetch the configured initial window")
     subparsers.add_parser("sweep", help="fetch the configured trailing window")
     subparsers.add_parser("status", help="show local bar coverage")
 
@@ -1012,6 +1082,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             Service(collector).run()
         elif arguments.command == "once":
             collector.poll()
+            print(collector.status_text())
+        elif arguments.command == "backfill":
+            collector.backfill()
             print(collector.status_text())
         elif arguments.command == "sweep":
             collector.sweep()

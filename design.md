@@ -31,10 +31,18 @@ walk.
 ## 1. bars (service)
 
 Collects minute bars from Robinhood and preserves their source quality. One
-process does both jobs: a live poll each minute and a nightly sweep. Writes are
+process does the initial backfill, live poll, and nightly sweep. Writes are
 idempotent upserts keyed by ticker and timestamp, so a repeated fetch is
-harmless. Every write stamps `fetched_at`, so a reader can see what
-changed and when.
+harmless. Every write stamps `fetched_at`, so a reader can see what changed and
+when.
+
+Initial backfill:
+
+- Fetch 120 days of minute bars once for each ticker.
+- Record completion in `logs`. A failed backfill retries, while a completed
+  ticker does not repeat the initial fetch.
+- A ticker added to config gets the same backfill before its next poll or
+  sweep.
 
 Live poll:
 

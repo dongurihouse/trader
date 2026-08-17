@@ -4,7 +4,7 @@ LABEL := com.xup.bars
 PLIST := $(HOME)/Library/LaunchAgents/$(LABEL).plist
 UID := $(shell id -u)
 
-.PHONY: sync auth install uninstall restart status logs once sweep migrate query
+.PHONY: sync auth install uninstall restart status logs once backfill sweep migrate query
 
 sync:
 	@$(UV) sync --project bars --frozen
@@ -37,6 +37,9 @@ logs:
 
 once:
 	@$(PYTHON) bars/bars_service.py once
+
+backfill:
+	@$(PYTHON) bars/bars_service.py backfill
 
 sweep:
 	@$(PYTHON) bars/bars_service.py sweep
