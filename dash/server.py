@@ -160,7 +160,11 @@ class DashboardData:
                 """,
                 (ticker, start),
             ).fetchall()
-            compacted = self._compact_bars(rows)
+            # The All view is the literal stored history: one returned point for
+            # every minute row. Shorter ranges retain the render cap so they stay
+            # responsive if the configured collection window grows later.
+            render_limit = len(rows) if span == "ALL" else 1400
+            compacted = self._compact_bars(rows, limit=render_limit)
             trades = [
                 dict(row)
                 for row in connection.execute(
