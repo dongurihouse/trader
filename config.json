@@ -1,0 +1,24 @@
+{
+  "tickers": ["SNDK", "SNXX", "SNDQ", "MU", "SPY", "QQQ", "SOXX"],
+  "interval": "minute",
+  "bounds": "regular",
+  "database": "data/bars.sqlite3",
+  "service": {
+    "poll_seconds": 300,
+    "idle_seconds": 300,
+    "retry_seconds": 30,
+    "retry_max_seconds": 900,
+    "final_delay_minutes": 5
+  },
+  "backfill": {
+    "empty_sessions_to_stop": 10,
+    "recovery_days": 60
+  },
+  "provider": {
+    "codex_bin": "/Users/xup/.local/bin/codex",
+    "model": "gpt-5.4-mini",
+    "reasoning_effort": "low",
+    "timeout_seconds": 300,
+    "max_symbols_per_call": 3
+  }
+}
