@@ -1,11 +1,18 @@
-PYTHON := /usr/bin/python3
+PYTHON := .venv/bin/python
+UV := /Users/xup/.local/bin/uv
 LABEL := com.xup.bars
 PLIST := $(HOME)/Library/LaunchAgents/$(LABEL).plist
 UID := $(shell id -u)
 
-.PHONY: install uninstall restart status logs once backfill query
+.PHONY: sync auth install uninstall restart status logs once backfill query
 
-install:
+sync:
+	@$(UV) sync --frozen
+
+auth: sync
+	@$(PYTHON) bars_service.py auth
+
+install: sync
 	@mkdir -p data logs "$(HOME)/Library/LaunchAgents"
 	@cp launchd/$(LABEL).plist "$(PLIST)"
 	@launchctl bootout gui/$(UID)/$(LABEL) >/dev/null 2>&1 || true

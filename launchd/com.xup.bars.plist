@@ -6,7 +6,7 @@
     <string>com.xup.bars</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
+        <string>/Users/xup/dh/bars/.venv/bin/python</string>
         <string>/Users/xup/dh/bars/bars_service.py</string>
         <string>--config</string>
         <string>/Users/xup/dh/bars/config.json</string>
@@ -17,7 +17,7 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/Users/xup/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>PYTHONUNBUFFERED</key>
         <string>1</string>
     </dict>

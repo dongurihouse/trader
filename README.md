@@ -4,9 +4,10 @@
 ticker list from `config.json`, fetches OHLCV bars through Robinhood's official
 Trading MCP, and upserts them into `data/bars.sqlite3`.
 
-It does not store a Robinhood password or token. The fetch subprocess reuses
-the Codex CLI OAuth login and can reach only the read-only
-`get_equity_historicals` tool. Order tools are not available to it.
+It does not store a Robinhood password. It connects directly to Robinhood's
+MCP endpoint with the official MCP Python SDK and calls only
+`get_equity_historicals`. A refresh token is stored in the ignored
+`data/robinhood_oauth.json` file with owner-only permissions.
 
 ## Behavior
 
@@ -20,6 +21,7 @@ the Codex CLI OAuth login and can reach only the read-only
 - Five minutes after the close, it performs one final refresh.
 - SQLite upserts make every fetch safe to repeat and preserve vendor revisions.
 - `launchd` keeps the process alive and starts it again after login or a crash.
+- No model, prompt, Codex subprocess, or tool-search step is in the data path.
 
 Robinhood's minute history is a sliding window. The collector can preserve bars
 from this point forward, but it cannot recover a minute that Robinhood no
@@ -39,6 +41,7 @@ one-minute equity bars. Set `bounds` to `extended` if premarket bars are needed.
 ## Operate
 
 ```sh
+make auth                    # one-time Robinhood browser approval
 make install                 # install and start the LaunchAgent
 make status                  # process state plus stored coverage
 make logs                    # follow collector logs
@@ -46,10 +49,10 @@ make restart                 # reload after a config edit
 make uninstall               # stop it; keep the database
 ```
 
-If Robinhood OAuth expires, run this once and then restart the service:
+If Robinhood revokes the connection, authorize it again and restart:
 
 ```sh
-codex mcp login robinhood-trading
+make auth
 make restart
 ```
 
@@ -64,7 +67,7 @@ make query SYMBOL=SNDK ARGS='--start 2026-08-14 --end 2026-08-14'
 JSON is also available:
 
 ```sh
-/usr/bin/python3 bars_service.py query SNDK --limit 5 --format json
+.venv/bin/python bars_service.py query SNDK --limit 5 --format json
 ```
 
 The table key is `(symbol, interval, begins_at)`. Columns are `open`, `high`,

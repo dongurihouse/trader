@@ -2,24 +2,39 @@
 """Always-on Robinhood minute-bar collector with a small SQLite query CLI."""
 
 import argparse
+import asyncio
 import csv
 import io
 import json
 import logging
 import math
+import os
 import re
 import signal
 import sqlite3
-import subprocess
 import sys
 import threading
 import time as system_time
+import webbrowser
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
+import httpx2
+from mcp import ClientSession
+from mcp.client.auth import OAuthClientProvider, TokenStorage
+from mcp.client.streamable_http import streamable_http_client
+from mcp.shared.auth import (
+    AuthorizationCodeResult,
+    OAuthClientInformationFull,
+    OAuthClientMetadata,
+    OAuthToken,
+)
+from pydantic import AnyUrl
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = ROOT / "config.json"
@@ -53,11 +68,10 @@ class Settings:
     edge_empty_sessions: int
     recovery_days: int
     database: Path
-    codex_bin: str
-    model: str
-    reasoning_effort: str
+    provider_url: str
+    oauth_store: Path
+    oauth_callback_port: int
     timeout_seconds: int
-    max_symbols_per_call: int
 
 
 def _positive_int(value, name: str, minimum: int = 1) -> int:
@@ -104,6 +118,10 @@ def load_settings(path: Path) -> Settings:
     database = Path(database_value).expanduser()
     if not database.is_absolute():
         database = ROOT / database
+    oauth_store_value = provider.get("oauth_store", "data/robinhood_oauth.json")
+    oauth_store = Path(oauth_store_value).expanduser()
+    if not oauth_store.is_absolute():
+        oauth_store = ROOT / oauth_store
 
     return Settings(
         tickers=tuple(tickers),
@@ -139,18 +157,19 @@ def load_settings(path: Path) -> Settings:
             1,
         ),
         database=database,
-        codex_bin=str(provider.get("codex_bin", "/Users/xup/.local/bin/codex")),
-        model=str(provider.get("model", "gpt-5.4-mini")),
-        reasoning_effort=str(provider.get("reasoning_effort", "low")),
+        provider_url=str(
+            provider.get("url", "https://agent.robinhood.com/mcp/trading")
+        ),
+        oauth_store=oauth_store,
+        oauth_callback_port=_positive_int(
+            provider.get("oauth_callback_port", 8765),
+            "provider.oauth_callback_port",
+            1024,
+        ),
         timeout_seconds=_positive_int(
             provider.get("timeout_seconds", 300),
             "provider.timeout_seconds",
             30,
-        ),
-        max_symbols_per_call=_positive_int(
-            provider.get("max_symbols_per_call", 3),
-            "provider.max_symbols_per_call",
-            1,
         ),
     )
 
@@ -197,200 +216,239 @@ def weekdays(start: date, end: date) -> Iterable[date]:
         cursor += timedelta(days=1)
 
 
-class RobinhoodRelay:
-    SERVER = "robinhood-trading"
-    URL = "https://agent.robinhood.com/mcp/trading"
+class FileTokenStorage(TokenStorage):
+    """Persist the MCP OAuth client registration and rotating tokens."""
+
+    def __init__(self, path: Path):
+        self.path = path
+
+    def _read(self) -> dict:
+        try:
+            value = json.loads(self.path.read_text())
+        except FileNotFoundError:
+            return {}
+        except json.JSONDecodeError as exc:
+            raise ConfigError("invalid OAuth store %s: %s" % (self.path, exc)) from exc
+        if not isinstance(value, dict):
+            raise ConfigError("OAuth store is not a JSON object: %s" % self.path)
+        return value
+
+    def _write(self, value: dict) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        descriptor = os.open(
+            str(temporary),
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            0o600,
+        )
+        with os.fdopen(descriptor, "w") as handle:
+            json.dump(value, handle, separators=(",", ":"))
+            handle.write("\n")
+        os.replace(str(temporary), str(self.path))
+        os.chmod(self.path, 0o600)
+
+    async def get_tokens(self) -> Optional[OAuthToken]:
+        value = self._read().get("tokens")
+        return OAuthToken.model_validate(value) if isinstance(value, dict) else None
+
+    async def set_tokens(self, tokens: OAuthToken) -> None:
+        value = self._read()
+        value["tokens"] = tokens.model_dump(mode="json", exclude_none=True)
+        self._write(value)
+
+    async def get_client_info(self) -> Optional[OAuthClientInformationFull]:
+        value = self._read().get("client_info")
+        return (
+            OAuthClientInformationFull.model_validate(value)
+            if isinstance(value, dict)
+            else None
+        )
+
+    async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
+        value = self._read()
+        value["client_info"] = client_info.model_dump(mode="json", exclude_none=True)
+        self._write(value)
+
+
+class _OAuthCallbackHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        self.server.callback_path = self.path
+        body = b"Robinhood authorization complete. You can close this window.\n"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args) -> None:
+        return
+
+
+class BrowserOAuthCallbacks:
+    def __init__(self, port: int):
+        self.server = HTTPServer(("127.0.0.1", port), _OAuthCallbackHandler)
+        self.server.timeout = 300
+        self.server.callback_path = None
+
+    async def redirect(self, authorization_url: str) -> None:
+        print("Opening Robinhood authorization in your browser.")
+        print(authorization_url)
+        webbrowser.open(authorization_url)
+
+    async def callback(self) -> AuthorizationCodeResult:
+        try:
+            await asyncio.to_thread(self.server.handle_request)
+        finally:
+            self.server.server_close()
+        callback_path = self.server.callback_path
+        if not callback_path:
+            raise RelayAuthRequired("Robinhood authorization timed out; run: make auth")
+        parameters = parse_qs(urlparse(callback_path).query)
+        if "error" in parameters:
+            raise RelayAuthRequired(
+                "Robinhood authorization failed: %s"
+                % parameters.get("error_description", parameters["error"])[0]
+            )
+        if "code" not in parameters:
+            raise RelayAuthRequired(
+                "Robinhood callback did not include an authorization code"
+            )
+        return AuthorizationCodeResult(
+            code=parameters["code"][0],
+            state=parameters.get("state", [None])[0],
+            iss=parameters.get("iss", [None])[0],
+        )
+
+
+class NonInteractiveOAuthCallbacks:
+    async def redirect(self, authorization_url: str) -> None:
+        raise RelayAuthRequired("Robinhood OAuth approval required; run: make auth")
+
+    async def callback(self) -> AuthorizationCodeResult:
+        raise RelayAuthRequired("Robinhood OAuth approval required; run: make auth")
+
+
+def _contains_exception(error: BaseException, wanted_type) -> bool:
+    pending = [error]
+    seen = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, wanted_type):
+            return True
+        pending.extend(getattr(current, "exceptions", ()) or ())
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+    return False
+
+
+class RobinhoodClient:
     TOOL = "get_equity_historicals"
-    AUTH_MARKERS = (
-        "auth",
-        "unavailable",
-        "not available",
-        "no such tool",
-        "not connected",
-    )
 
     def __init__(self, settings: Settings):
         self.settings = settings
+        self.storage = FileTokenStorage(settings.oauth_store)
 
-    def _command(
-        self, symbols: Sequence[str], start_iso: str, end_iso: str
-    ) -> List[str]:
-        arguments = json.dumps(
-            {
-                "symbols": list(symbols),
-                "start_time": start_iso,
-                "end_time": end_iso,
-                "interval": self.settings.interval,
-                "bounds": self.settings.bounds,
-            },
-            separators=(",", ":"),
+    def _oauth(self, interactive: bool) -> OAuthClientProvider:
+        callbacks = (
+            BrowserOAuthCallbacks(self.settings.oauth_callback_port)
+            if interactive
+            else NonInteractiveOAuthCallbacks()
         )
-        prompt = (
-            "Use tool search to locate the MCP tool named %s on server %s, "
-            "then call it exactly once with exactly these arguments:\n%s\n"
-            "Do not change any argument. Make no other tool calls. After the "
-            "tool returns, reply with exactly DONE and no other text."
-            % (self.TOOL, self.SERVER, arguments)
+        callback_url = (
+            "http://127.0.0.1:%d/callback" % self.settings.oauth_callback_port
         )
-        return [
-            self.settings.codex_bin,
-            "exec",
-            "--ignore-user-config",
-            "--json",
-            "-s",
-            "read-only",
-            "--skip-git-repo-check",
-            "--ephemeral",
-            "--disable",
-            "shell_tool",
-            "-m",
-            self.settings.model,
-            "-c",
-            'model_reasoning_effort="%s"' % self.settings.reasoning_effort,
-            "-c",
-            "tools.web_search=false",
-            "-c",
-            'mcp_servers.%s.url="%s"' % (self.SERVER, self.URL),
-            "-c",
-            "mcp_servers.%s.enabled_tools=%s"
-            % (self.SERVER, json.dumps([self.TOOL])),
-            "-c",
-            'mcp_servers.%s.default_tools_approval_mode="approve"'
-            % self.SERVER,
-            prompt,
-        ]
+        return OAuthClientProvider(
+            server_url=self.settings.provider_url,
+            client_metadata=OAuthClientMetadata(
+                client_name="bars",
+                redirect_uris=[AnyUrl(callback_url)],
+                grant_types=["authorization_code", "refresh_token"],
+                response_types=["code"],
+                scope="internal",
+                token_endpoint_auth_method="none",
+                application_type="native",
+            ),
+            storage=self.storage,
+            redirect_handler=callbacks.redirect,
+            callback_handler=callbacks.callback,
+        )
+
+    async def _session_call(self, name: str, arguments: dict, interactive: bool):
+        oauth = self._oauth(interactive)
+        timeout = httpx2.Timeout(float(self.settings.timeout_seconds))
+        async with httpx2.AsyncClient(
+            auth=oauth,
+            follow_redirects=True,
+            timeout=timeout,
+        ) as http_client:
+            async with streamable_http_client(
+                self.settings.provider_url,
+                http_client=http_client,
+                terminate_on_close=False,
+            ) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    if name == "tools/list":
+                        return await session.list_tools()
+                    return await session.call_tool(
+                        name,
+                        arguments,
+                        read_timeout_seconds=float(self.settings.timeout_seconds),
+                    )
 
     @staticmethod
-    def _events(stdout: str) -> List[dict]:
-        events: List[dict] = []
-        for line in (stdout or "").splitlines():
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(event, dict):
-                events.append(event)
-        return events
-
-    @staticmethod
-    def _calls(events: Sequence[dict], event_type: str) -> List[dict]:
-        calls: List[dict] = []
-        for event in events:
-            item = event.get("item")
-            if (
-                event.get("type") == event_type
-                and isinstance(item, dict)
-                and item.get("type") == "mcp_tool_call"
-            ):
-                calls.append(item)
-        return calls
-
-    @staticmethod
-    def _content_text(content) -> str:
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            return "\n".join(
-                block.get("text", "")
-                for block in content
-                if isinstance(block, dict)
-            )
-        return ""
-
-    def _failure(self, message: str, detail: str):
-        lowered = detail.lower()
-        if any(marker in lowered for marker in self.AUTH_MARKERS):
-            raise RelayAuthRequired(
-                "%s. Run: codex mcp login robinhood-trading" % message
-            )
-        raise RelayError(message)
-
-    def _extract(self, events: Sequence[dict], process) -> dict:
-        completed = self._calls(events, "item.completed")
-        attempted = completed + self._calls(events, "item.started")
-        stray = {
-            "%s/%s" % (call.get("server"), call.get("tool"))
-            for call in attempted
-            if (call.get("server"), call.get("tool"))
-            != (self.SERVER, self.TOOL)
-        }
-        if stray:
-            raise RelayError(
-                "read-only tool allowlist failed; reached: %s"
-                % ", ".join(sorted(stray))
-            )
-        if len(completed) != 1:
-            details = []
-            for event in events:
-                if event.get("type") in ("error", "turn.failed"):
-                    details.append(json.dumps(event))
-                item = event.get("item") or {}
-                if (
-                    event.get("type") == "item.completed"
-                    and item.get("type") == "agent_message"
-                ):
-                    details.append(str(item.get("text", "")))
-            details.append(process.stderr or "")
-            detail = "\n".join(part for part in details if part)
-            self._failure(
-                "expected one %s/%s call; got %d (exit %s): %s"
-                % (
-                    self.SERVER,
-                    self.TOOL,
-                    len(completed),
-                    process.returncode,
-                    detail[:500],
-                ),
-                detail,
-            )
-
-        call = completed[0]
-        error = call.get("error")
-        if call.get("status") != "completed" or error:
-            detail = json.dumps(error) if error else str(call.get("status"))
-            self._failure("Robinhood tool call failed: %s" % detail, detail)
-
-        result = call.get("result")
-        if not isinstance(result, dict):
-            raise RelayError("Robinhood tool call returned no result object")
-        text = self._content_text(result.get("content"))
-        if text.strip():
-            try:
-                payload = json.loads(text)
-            except json.JSONDecodeError as exc:
-                raise RelayError(
-                    "Robinhood result is invalid JSON at character %d of %d"
-                    % (exc.pos, len(text))
+    def _run(awaitable, action: str):
+        try:
+            return asyncio.run(awaitable)
+        except RelayAuthRequired:
+            raise
+        except Exception as exc:
+            if _contains_exception(exc, RelayAuthRequired):
+                raise RelayAuthRequired(
+                    "Robinhood OAuth approval required; run: make auth"
                 ) from exc
-            if isinstance(payload, dict):
-                return payload
-            raise RelayError("Robinhood result is not a JSON object")
-        structured = result.get("structured_content")
+            raise RelayError("Robinhood %s failed: %s" % (action, exc)) from exc
+
+    def authorize(self) -> List[str]:
+        result = self._run(
+            self._session_call("tools/list", {}, interactive=True),
+            "authorization",
+        )
+        tools = [tool.name for tool in result.tools]
+        if self.TOOL not in tools:
+            raise RelayError("Robinhood connection does not expose %s" % self.TOOL)
+        return tools
+
+    @staticmethod
+    def _payload(result) -> dict:
+        if getattr(result, "is_error", False):
+            detail = "\n".join(
+                str(getattr(block, "text", "")) for block in result.content
+            )
+            raise RelayError("Robinhood tool returned an error: %s" % detail)
+        structured = getattr(result, "structured_content", None)
         if isinstance(structured, dict):
             return structured
-        raise RelayError("Robinhood result contains no JSON payload")
-
-    def _run_once(
-        self, symbols: Sequence[str], start_iso: str, end_iso: str
-    ) -> dict:
-        command = self._command(symbols, start_iso, end_iso)
+        text = "\n".join(
+            str(getattr(block, "text", ""))
+            for block in getattr(result, "content", [])
+            if getattr(block, "text", None) is not None
+        )
         try:
-            process = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=self.settings.timeout_seconds,
-                stdin=subprocess.DEVNULL,
-                cwd=str(ROOT),
-            )
-        except FileNotFoundError as exc:
-            raise RelayError("Codex CLI not found: %s" % self.settings.codex_bin) from exc
-        except subprocess.TimeoutExpired as exc:
+            payload = json.loads(text)
+        except json.JSONDecodeError as exc:
             raise RelayError(
-                "Robinhood relay timed out after %d seconds"
-                % self.settings.timeout_seconds
+                "Robinhood result is invalid JSON at character %d of %d"
+                % (exc.pos, len(text))
             ) from exc
-        return self._extract(self._events(process.stdout), process)
+        if not isinstance(payload, dict):
+            raise RelayError("Robinhood result is not a JSON object")
+        return payload
 
     def fetch(
         self,
@@ -399,25 +457,32 @@ class RobinhoodRelay:
         end_iso: str,
         allow_missing: bool = False,
     ) -> dict:
-        results: List[dict] = []
-        chunk_size = self.settings.max_symbols_per_call
-        for offset in range(0, len(symbols), chunk_size):
-            chunk = symbols[offset : offset + chunk_size]
-            payload = self._run_once(chunk, start_iso, end_iso)
-            chunk_results = self._validate(
-                payload, chunk, start_iso, end_iso, allow_missing
-            )
-            results.extend(chunk_results)
-        return {"data": {"results": results}}
+        result = self._run(
+            self._session_call(
+                self.TOOL,
+                {
+                    "symbols": list(symbols),
+                    "start_time": start_iso,
+                    "end_time": end_iso,
+                    "interval": self.settings.interval,
+                    "bounds": self.settings.bounds,
+                },
+                interactive=False,
+            ),
+            "historicals request",
+        )
+        payload = self._payload(result)
+        self._validate(payload, symbols, start_iso, end_iso, allow_missing)
+        return payload
 
+    @staticmethod
     def _validate(
-        self,
         payload: dict,
         symbols: Sequence[str],
         start_iso: str,
         end_iso: str,
         allow_missing: bool,
-    ) -> List[dict]:
+    ) -> None:
         data = payload.get("data") if isinstance(payload, dict) else None
         results = data.get("results") if isinstance(data, dict) else None
         if not isinstance(results, list):
@@ -459,7 +524,6 @@ class RobinhoodRelay:
                         "%s bar %s is outside [%s, %s]"
                         % (result.get("symbol"), bar["begins_at"], start_iso, end_iso)
                     )
-        return results
 
 
 SCHEMA = """
@@ -525,7 +589,9 @@ class BarStore:
         try:
             value = float(bar[field])
         except (KeyError, TypeError, ValueError) as exc:
-            raise RelayError("invalid bar field %s: %r" % (field, bar.get(field))) from exc
+            raise RelayError(
+                "invalid bar field %s: %r" % (field, bar.get(field))
+            ) from exc
         if not math.isfinite(value):
             raise RelayError("non-finite bar field %s" % field)
         return value
@@ -554,7 +620,9 @@ class BarStore:
                 prices = [self._number(bar, field) for _, field in self.PRICE_FIELDS]
                 volume = self._number(bar, "volume")
                 if volume < 0:
-                    raise RelayError("negative volume for %s at %s" % (symbol, timestamp))
+                    raise RelayError(
+                        "negative volume for %s at %s" % (symbol, timestamp)
+                    )
                 rows.append(
                     (
                         symbol,
@@ -698,7 +766,7 @@ class Collector:
     def __init__(self, settings: Settings, store: BarStore):
         self.settings = settings
         self.store = store
-        self.relay = RobinhoodRelay(settings)
+        self.provider = RobinhoodClient(settings)
 
     def fetch_day(
         self,
@@ -714,7 +782,7 @@ class Collector:
             day.isoformat(),
             self.settings.interval,
         )
-        payload = self.relay.fetch(
+        payload = self.provider.fetch(
             selected, start_iso, end_iso, allow_missing=allow_missing
         )
         stats = self.store.store_payload(
@@ -896,7 +964,9 @@ class Service:
                 delay = self.settings.retry_seconds
                 self._wait(wait_seconds)
             except Exception:
-                logging.exception("collector cycle failed; retrying in %d seconds", delay)
+                logging.exception(
+                    "collector cycle failed; retrying in %d seconds", delay
+                )
                 self._wait(delay)
                 delay = min(delay * 2, self.settings.retry_max_seconds)
         logging.info("service stopped")
@@ -917,6 +987,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--verbose", action="store_true")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    subparsers.add_parser("auth", help="authorize the direct Robinhood connection")
     subparsers.add_parser("serve", help="run the always-on collector")
     subparsers.add_parser("backfill", help="resume startup backfill and catch-up")
     once = subparsers.add_parser("once", help="fetch one day now")
@@ -940,7 +1011,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         store = BarStore(settings.database)
         collector = Collector(settings, store)
 
-        if arguments.command == "serve":
+        if arguments.command == "auth":
+            tools = collector.provider.authorize()
+            print("Robinhood authorization complete.")
+            print("Verified tool: %s" % collector.provider.TOOL)
+            print("Available tools: %d" % len(tools))
+        elif arguments.command == "serve":
             Service(collector).run()
         elif arguments.command == "backfill":
             collector.backfill()
@@ -948,7 +1024,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(collector.status_text())
         elif arguments.command == "once":
             day = arguments.day or datetime.now(EASTERN).date()
-            collector.fetch_day(day, allow_missing=(day == datetime.now(EASTERN).date()))
+            collector.fetch_day(
+                day,
+                allow_missing=(day == datetime.now(EASTERN).date()),
+            )
             print(collector.status_text())
         elif arguments.command == "status":
             print(collector.status_text())
