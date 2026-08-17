@@ -136,10 +136,28 @@ algo; a list restricts the call to those algos.
 
 ### Config defines every signal and every algo
 
-- A signal and an algo have the same shape in config: name, parameters,
-  inputs.
-- All parameters live in config. A complicated node points to a function in
-  the code, and the function hard-codes nothing.
+- A signal and an algo have the same shape in config: an entry in a
+  name-keyed map with `inputs` and `params`. Example:
+
+  ```json
+  "signals": {
+    "sma20": { "inputs": ["bars"], "params": { "length": 20 } },
+    "shape": { "inputs": ["bars"], "function": "shape_v1", "params": {} }
+  },
+  "algos": {
+    "dip": { "trades": true, "inputs": ["sma20"],
+             "params": { "drop_pct": 1.5, "trail_pct": 0.8 } }
+  }
+  ```
+
+- The map key is the name, and it is the `kind` value in outputs. Presence
+  in the map means enabled; to disable a node, remove the entry and bump
+  the version.
+- `inputs` declares what a node reads. `trades` marks an algo that writes
+  trade rows; an algo without it evaluates like a signal.
+- All parameters live in `params`. A complicated node adds `function`,
+  which points to a function in the code, and the function hard-codes
+  nothing.
 - The version is a field in the config file. The user bumps it by hand
   with every change to a signal or an algo. When the algo service sees a
   version that is not in the configs table, it stores the full file under
