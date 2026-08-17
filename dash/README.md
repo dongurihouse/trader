@@ -49,3 +49,9 @@ and refreshes the live view every 30 seconds.
 - Ticker switching from the configured ticker list.
 - Current price, session change, open, high, low, and volume.
 - Automatic refresh every 30 seconds.
+
+## Logs
+
+Open <http://127.0.0.1:8790/logs> to see service logs in Dash. The view reads
+the shared SQLite `logs` table, refreshes every five seconds, and filters by
+service, level, and row count.

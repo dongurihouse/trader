@@ -23,6 +23,7 @@ EASTERN = ZoneInfo("America/New_York")
 UTC = ZoneInfo("UTC")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,24}$")
+SERVICE_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
 class DashboardError(Exception):
@@ -199,6 +200,75 @@ class DashboardData:
             "bars": compacted,
             "trades": trades,
             "events": events,
+        }
+
+    def logs(
+        self,
+        service: str | None,
+        level: str | None,
+        limit: str | int,
+    ) -> dict[str, Any]:
+        service = service or None
+        level = level or None
+        if service and not SERVICE_PATTERN.fullmatch(service):
+            raise DashboardError("Invalid service filter")
+        if level and level not in {"info", "warn", "error"}:
+            raise DashboardError("Level must be info, warn, or error")
+        try:
+            row_limit = int(limit)
+        except (TypeError, ValueError) as exc:
+            raise DashboardError("Log limit must be a number") from exc
+        if not 1 <= row_limit <= 1000:
+            raise DashboardError("Log limit must be between 1 and 1000")
+
+        row_clauses: list[str] = []
+        row_parameters: list[Any] = []
+        if service:
+            row_clauses.append("service = ?")
+            row_parameters.append(service)
+        if level:
+            row_clauses.append("level = ?")
+            row_parameters.append(level)
+        row_where = f"WHERE {' AND '.join(row_clauses)}" if row_clauses else ""
+
+        count_where = "WHERE service = ?" if service else ""
+        count_parameters = (service,) if service else ()
+        with self.connection() as connection:
+            services = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT DISTINCT service FROM logs ORDER BY service"
+                )
+            ]
+            counts = {"info": 0, "warn": 0, "error": 0}
+            for row in connection.execute(
+                f"SELECT level, COUNT(*) AS rows FROM logs {count_where} GROUP BY level",
+                count_parameters,
+            ):
+                counts[row["level"]] = row["rows"]
+            rows = [
+                dict(row)
+                for row in connection.execute(
+                    f"""
+                    SELECT ts, service, level, message
+                    FROM logs
+                    {row_where}
+                    ORDER BY ts DESC, rowid DESC
+                    LIMIT ?
+                    """,
+                    (*row_parameters, row_limit),
+                )
+            ]
+
+        return {
+            "generated_at": int(datetime.now(tz=UTC).timestamp()),
+            "service": service,
+            "level": level,
+            "limit": row_limit,
+            "services": services,
+            "counts": {**counts, "total": sum(counts.values())},
+            "rows": rows,
+            "has_more": len(rows) == row_limit,
         }
 
     def node_detail(self, ticker: str, kind: str, version: str | None) -> dict[str, Any]:
@@ -636,6 +706,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 payload = self.data.overview()
             elif path == "/api/bars":
                 payload = self.data.bars(self._param(query, "ticker"), self._param(query, "range", "1D"))
+            elif path == "/api/logs":
+                payload = self.data.logs(
+                    self._param(query, "service", None),
+                    self._param(query, "level", None),
+                    self._param(query, "limit", "250"),
+                )
             elif path == "/api/detail":
                 payload = self.data.node_detail(
                     self._param(query, "ticker"),
@@ -657,7 +733,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._json({"error": "The dashboard could not read this view"}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def _static(self, path: str) -> None:
-        relative = "index.html" if path in {"", "/"} else path.lstrip("/")
+        route_files = {
+            "": "index.html",
+            "/": "index.html",
+            "/logs": "logs.html",
+            "/logs/": "logs.html",
+        }
+        relative = route_files.get(path, path.lstrip("/"))
         candidate = (STATIC_DIR / relative).resolve()
         if STATIC_DIR not in candidate.parents and candidate != STATIC_DIR:
             self.send_error(HTTPStatus.NOT_FOUND)

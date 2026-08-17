@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0b1017" />
+    <meta name="description" content="Live service logs for the trader system." />
+    <title>Trader — Service logs</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/logs.js" defer></script>
+  </head>
+  <body class="logs-page">
+    <a class="skip-link" href="#main">Skip to logs</a>
+
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Trader dashboard home">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span>TRADER</span>
+      </a>
+      <nav class="topbar-nav" aria-label="Dashboard views">
+        <a href="/">Chart</a>
+        <a class="active" href="/logs" aria-current="page">Logs</a>
+      </nav>
+      <div class="topbar-meta">
+        <span class="live-refresh"><i></i> Auto · 5s</span>
+        <span class="readonly-pill"><span aria-hidden="true">◇</span> Read only</span>
+        <span class="updated" id="logs-updated">Connecting…</span>
+        <button class="icon-button" id="logs-refresh" type="button" aria-label="Refresh logs">
+          <span aria-hidden="true">↻</span>
+        </button>
+      </div>
+    </header>
+
+    <main id="main" class="logs-main">
+      <section class="logs-heading" aria-labelledby="logs-title">
+        <div>
+          <p class="eyebrow">Shared SQLite activity</p>
+          <h1 id="logs-title">Service logs</h1>
+          <p class="logs-description">Heartbeats, run summaries, warnings, and failures from every writing service.</p>
+        </div>
+        <div class="log-counts" aria-label="Log totals">
+          <span><small>Total</small><strong id="count-total">—</strong></span>
+          <span><small>Info</small><strong id="count-info">—</strong></span>
+          <span class="warn"><small>Warn</small><strong id="count-warn">—</strong></span>
+          <span class="error"><small>Error</small><strong id="count-error">—</strong></span>
+        </div>
+      </section>
+
+      <section class="log-surface surface" aria-label="Service log entries">
+        <div class="log-toolbar">
+          <label>
+            <span>Service</span>
+            <select id="service-filter">
+              <option value="">All services</option>
+            </select>
+          </label>
+          <label>
+            <span>Level</span>
+            <select id="level-filter">
+              <option value="">All levels</option>
+              <option value="info">Info</option>
+              <option value="warn">Warning</option>
+              <option value="error">Error</option>
+            </select>
+          </label>
+          <label>
+            <span>Rows</span>
+            <select id="limit-filter">
+              <option value="100">100</option>
+              <option value="250" selected>250</option>
+              <option value="500">500</option>
+              <option value="1000">1,000</option>
+            </select>
+          </label>
+          <span class="shown-count" id="shown-count">Loading logs…</span>
+        </div>
+
+        <div class="log-table-head" aria-hidden="true">
+          <span>Time</span>
+          <span>Level</span>
+          <span>Service</span>
+          <span>Message</span>
+        </div>
+        <div class="log-list" id="log-list" aria-live="polite">
+          <div class="logs-loading"><span></span>Loading service logs</div>
+        </div>
+      </section>
+    </main>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  </body>
+</html>
