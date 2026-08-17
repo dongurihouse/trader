@@ -3,7 +3,7 @@ const $ = (selector) => document.querySelector(selector);
 const state = {
   overview: null,
   ticker: null,
-  range: "ALL",
+  range: "1D",
   style: "line",
   bars: null,
   chartRequest: 0,
@@ -490,7 +490,9 @@ class PriceChart {
   onWheel(event) {
     if (!this.totalBars() || !this.bounds) return;
     event.preventDefault();
-    const horizontal = event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY);
+    const horizontalDelta = Math.abs(event.deltaX);
+    const verticalDelta = Math.abs(event.deltaY);
+    const horizontal = event.shiftKey || (horizontalDelta > 0 && horizontalDelta >= verticalDelta * 0.65);
     const deltaScale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? this.bounds.plotWidth : 1;
     if (horizontal) {
       if (this.viewLength() === this.totalBars()) return;
@@ -643,7 +645,9 @@ $("#range-control").addEventListener("click", (event) => {
   if (!button || button.dataset.range === state.range) return;
   state.range = button.dataset.range;
   document.querySelectorAll("#range-control button").forEach((candidate) => {
-    candidate.classList.toggle("active", candidate === button);
+    const active = candidate === button;
+    candidate.classList.toggle("active", active);
+    candidate.setAttribute("aria-pressed", String(active));
   });
   loadBars();
 });

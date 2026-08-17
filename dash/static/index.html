@@ -65,12 +65,12 @@
               <button type="button" data-style="candles" aria-pressed="false">Candles</button>
             </div>
             <div class="range-control" id="range-control" role="group" aria-label="Chart range">
-              <button type="button" data-range="1D">1D</button>
-              <button type="button" data-range="5D">5D</button>
-              <button type="button" data-range="1M">1M</button>
-              <button type="button" data-range="3M">3M</button>
-              <button type="button" data-range="120D">120D</button>
-              <button type="button" data-range="ALL" class="active">All</button>
+              <button type="button" data-range="1D" class="active" aria-pressed="true">1D</button>
+              <button type="button" data-range="5D" aria-pressed="false">5D</button>
+              <button type="button" data-range="1M" aria-pressed="false">1M</button>
+              <button type="button" data-range="3M" aria-pressed="false">3M</button>
+              <button type="button" data-range="120D" aria-pressed="false">120D</button>
+              <button type="button" data-range="ALL" aria-pressed="false">All</button>
             </div>
           </div>
         </div>
@@ -85,7 +85,7 @@
         </div>
 
         <div class="chart-stage" id="chart-stage">
-          <canvas id="price-chart" role="img" aria-label="Minute price chart" title="Scroll horizontally or drag to pan. Scroll vertically to zoom."></canvas>
+          <canvas id="price-chart" role="img" aria-label="Minute price chart" title="Zoom in, then scroll horizontally or drag to pan. Scroll vertically to zoom."></canvas>
           <div class="chart-tooltip" id="chart-tooltip" hidden></div>
           <div class="chart-loading" id="chart-loading">
             <span></span>
