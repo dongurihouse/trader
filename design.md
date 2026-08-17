@@ -293,41 +293,8 @@ flowchart TB
 
 ## Decisions (2026-08-17)
 
-1. No book, no counters, no size: one trades row per consolidated entry or
-   exit, and a row is one unit. Counts are queries; performance is the
-   percent result per unit, summed over units.
-2. One database; isolation is per-table ownership.
-3. One shared config file.
-4. The runner and the algo library merged into the algo service; the core
-   stays a pure function.
-5. The algo service stays a separate process; bars never triggers trading.
-6. No calendar table; the early-close days live in config.
-7. Outputs stored as cache and history, keyed by the config file version.
-8. Bars: one process; a live poll from the last bar each minute, plus a
-   nightly 30-day bulk sweep; minute bars only.
-9. Inputs: the ticker list for bars and events; the ticker list plus the
-   definitions for algo.
-10. Signals and algos are config-defined, config-versioned, and layered:
-    signals read data and signals, algos read signal outputs only.
-11. A signal's output is opaque, and the consuming algo interprets it. The
-    events service owns the per-event impact formula; consolidation across
-    events belongs to a planned sentiment signal, a separate task.
-12. The dashboard is served entirely by the tables; no service exposes an
-    API. A configs table maps every stored version hash to the full config
-    file, and every enabled signal is stored each tick, so visual-aid
-    signals reach the dashboard without an algo consumer.
-13. Service status goes through an append-only logs table: heartbeats, run
-    summaries, and problems, each process writing only its own rows. The
-    dashboard derives status, history, and problems from it.
-14. The version is one hash of the whole config file; per-node composite
-    hashes were dropped.
-15. A change is a standard operation: the algo service detects the new
-    file version and backfills outputs over all stored bars. A bulk run
-    writes outputs and no trades.
-16. An event's impact is (direction, strength): direction is a value from
-    -1 to 1, and a high strength means high expected volatility. The
-    separate volatility column and known_at are gone.
-17. No backtest concept: the loop applies the core to timestamps, in bulk
+1. No calendar table; the early-close days live in config.
+2 No backtest concept: the loop applies the core to timestamps, in bulk
     or in real time. An output updates in place per version; old versions
     stay for reference.
 
