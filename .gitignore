@@ -1,8 +1,5 @@
 .DS_Store
 .pytest_cache/
-.superpowers/
 .venv/
 __pycache__/
 *.pyc
-data/*
-!data/.gitkeep
