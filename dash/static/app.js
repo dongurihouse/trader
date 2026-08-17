@@ -313,9 +313,18 @@ class PriceChart {
 
     const maximumVolume = Math.max(...bars.map((bar) => Number(bar.volume)), 1);
     bars.forEach((bar, index) => {
-      const barHeight = (Number(bar.volume) / maximumVolume) * volumeHeight;
-      ctx.fillStyle = "rgba(112, 216, 220, 0.12)";
-      ctx.fillRect(x(index), height - margin.bottom - barHeight, Math.max(1, Math.min(step, 3)), barHeight);
+      const relativeVolume = Math.max(0, Number(bar.volume)) / maximumVolume;
+      const barHeight = Math.max(1, Math.sqrt(relativeVolume) * volumeHeight);
+      const barWidth = Math.max(1, Math.min(step, 3));
+      const top = height - margin.bottom - barHeight;
+      const open = Number(bar.open);
+      const close = Number(bar.close);
+      const color = close > open ? "216, 255, 114" : close < open ? "255, 123, 115" : "112, 216, 220";
+      const opacity = 0.38 + Math.sqrt(relativeVolume) * 0.42;
+      ctx.fillStyle = `rgba(${color}, ${opacity})`;
+      ctx.fillRect(x(index), top, barWidth, barHeight);
+      ctx.fillStyle = `rgba(${color}, ${Math.min(1, opacity + 0.18)})`;
+      ctx.fillRect(x(index), top, barWidth, Math.min(1.25, barHeight));
     });
 
     const rising = Number(bars.at(-1).close) >= Number(bars[0].open);
