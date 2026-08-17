@@ -828,7 +828,7 @@ class RobinhoodClient:
             self._close_state(state)
             raise error
         try:
-            yield RobinhoodSession(self)
+            yield self
         finally:
             close_timed_out = self._close_state(state)
             if close_timed_out:
@@ -868,13 +868,6 @@ class RobinhoodClient:
         except Exception as exc:
             raise self._relay_error(exc, action) from exc
 
-    def authorize(self) -> List[str]:
-        with self.session(interactive=True) as session:
-            tools = session.list_tools()
-        if self.TOOL not in tools:
-            raise RelayError("Robinhood connection does not expose %s" % self.TOOL)
-        return tools
-
     @staticmethod
     def _payload(result) -> dict:
         if getattr(result, "is_error", False):
@@ -901,7 +894,18 @@ class RobinhoodClient:
             raise RelayError("Robinhood result is not a JSON object")
         return payload
 
-    def _fetch_bars(
+    def list_tools(self) -> List[str]:
+        result = self._request("list")
+        return [tool.name for tool in result.tools]
+
+    def authorize(self) -> List[str]:
+        with self.session(interactive=True) as session:
+            tools = session.list_tools()
+        if self.TOOL not in tools:
+            raise RelayError("Robinhood connection does not expose %s" % self.TOOL)
+        return tools
+
+    def fetch_bars(
         self,
         symbols: Sequence[str],
         start_iso: str,
@@ -930,7 +934,7 @@ class RobinhoodClient:
             rows.extend(_bar_rows(payload, batch, start, end))
         return rows
 
-    def _fetch_technical(
+    def fetch_technical(
         self,
         ticker: str,
         spec: TechnicalSpec,
@@ -957,30 +961,11 @@ class RobinhoodClient:
         return _metadata_points(self._payload(result), ticker, spec, start, end)
 
 
-class RobinhoodSession:
-    def __init__(self, client: RobinhoodClient):
-        self.client = client
-
-    def list_tools(self) -> List[str]:
-        result = self.client._request("list")
-        return [tool.name for tool in result.tools]
-
-    def fetch_bars(
-        self,
-        symbols: Sequence[str],
-        start_iso: str,
-        end_iso: str,
-    ) -> List[BarRow]:
-        return self.client._fetch_bars(symbols, start_iso, end_iso)
-
-    def fetch_technical(
-        self,
-        ticker: str,
-        spec: TechnicalSpec,
-        start_iso: str,
-        end_iso: str,
-    ) -> List[MetadataPoint]:
-        return self.client._fetch_technical(ticker, spec, start_iso, end_iso)
+@dataclass(frozen=True)
+class JobRef:
+    kind: str
+    target: str
+    scopes: Tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -1044,8 +1029,11 @@ class BarStore:
     def store_bars(
         self,
         bars: Sequence[BarRow],
-        job: Optional[Tuple[str, Sequence[str], str, int]] = None,
+        job: Optional[JobRef] = None,
+        progress_ts: Optional[int] = None,
     ) -> Dict[str, int]:
+        if (job is None) != (progress_ts is None):
+            raise ValueError("job and progress_ts must be supplied together")
         stats = {
             "received": len(bars),
             "written": 0,
@@ -1069,7 +1057,6 @@ class BarStore:
         with self.transaction() as connection:
             self._upsert(connection, rows)
             if job is not None:
-                kind, scopes, target, progress_ts = job
                 connection.executemany(
                     """
                     UPDATE bar_jobs
@@ -1080,8 +1067,14 @@ class BarStore:
                     WHERE kind=? AND scope=? AND target=? AND completed_at IS NULL
                     """,
                     [
-                        (progress_ts, progress_ts, kind, scope, target)
-                        for scope in scopes
+                        (
+                            progress_ts,
+                            progress_ts,
+                            job.kind,
+                            scope,
+                            job.target,
+                        )
+                        for scope in job.scopes
                     ],
                 )
         stats["written"] = len(rows)
@@ -1297,7 +1290,7 @@ class Collector:
         symbols: Sequence[str],
         start: datetime,
         end: datetime,
-        job: Optional[Tuple[str, str, Sequence[str]]] = None,
+        job: Optional[JobRef] = None,
     ) -> Dict[str, int]:
         total = self._empty_stats()
         start = start.astimezone(UTC)
@@ -1315,17 +1308,13 @@ class Collector:
                     end_iso,
                 )
                 bars = session.fetch_bars(symbols, start_iso, end_iso)
-                progress = None
-                if job is not None:
-                    progress = (
-                        job[0],
-                        job[2],
-                        job[1],
-                        _epoch(chunk_end),
-                    )
                 self._add_stats(
                     total,
-                    self.store.store_bars(bars, job=progress),
+                    self.store.store_bars(
+                        bars,
+                        job=job,
+                        progress_ts=_epoch(chunk_end) if job is not None else None,
+                    ),
                 )
         return total
 
@@ -1397,7 +1386,11 @@ class Collector:
                         scopes,
                         datetime.fromtimestamp(start_ts, UTC),
                         datetime.fromtimestamp(window_end, UTC),
-                        job=(kind, target, scopes),
+                        job=JobRef(
+                            kind=kind,
+                            target=target,
+                            scopes=tuple(scopes),
+                        ),
                     ),
                 )
             self.store.complete_jobs(kind, scopes, target)
@@ -1405,7 +1398,7 @@ class Collector:
 
     def poll(self, now: Optional[datetime] = None) -> Dict[str, int]:
         current = (now or datetime.now(UTC)).astimezone(UTC)
-        self.backfill_pending(current)
+        self.backfill(current)
         floor = current - timedelta(days=self.settings.sweep_days)
         groups: Dict[int, List[str]] = {}
         for ticker, latest in self.store.latest_by_ticker(
@@ -1441,7 +1434,7 @@ class Collector:
                 datetime.now(UTC).date(), clock_time(0), tzinfo=UTC
             )
         )
-        self.backfill_pending(current)
+        self.backfill(current)
         start = current - timedelta(days=self.settings.sweep_days)
         scheduled = scheduled_day is not None
         if not scheduled:
@@ -1472,7 +1465,11 @@ class Collector:
                     selected,
                     datetime.fromtimestamp(resume, UTC),
                     datetime.fromtimestamp(sweep_job.window_end, UTC),
-                    job=("sweep", target, ("all",)),
+                    job=JobRef(
+                        kind="sweep",
+                        target=target,
+                        scopes=("all",),
+                    ),
                 )
             else:
                 stats = self._empty_stats()
@@ -1495,11 +1492,10 @@ class Collector:
     def backfill(
         self,
         now: Optional[datetime] = None,
-        tickers: Optional[Sequence[str]] = None,
         force: bool = False,
-    ) -> Dict[str, int]:
+    ) -> Optional[Dict[str, int]]:
         current = (now or datetime.now(UTC)).astimezone(UTC)
-        selected = tuple(tickers or self.settings.tickers)
+        selected = self.settings.tickers
         start = current - timedelta(days=self.settings.backfill_days)
         target = str(self.settings.backfill_days)
         self.store.ensure_jobs(
@@ -1511,29 +1507,6 @@ class Collector:
             force=force,
         )
         jobs = self.store.incomplete_jobs("backfill", selected, target)
-        stats = self._run_jobs("backfill", target, jobs)
-        self._record(
-            "backfill run complete tickers=%s days=%d"
-            % (",".join(selected), self.settings.backfill_days),
-            stats,
-        )
-        return stats
-
-    def backfill_pending(
-        self, now: Optional[datetime] = None
-    ) -> Optional[Dict[str, int]]:
-        current = (now or datetime.now(UTC)).astimezone(UTC)
-        target = str(self.settings.backfill_days)
-        self.store.ensure_jobs(
-            "backfill",
-            self.settings.tickers,
-            target,
-            _epoch(current - timedelta(days=self.settings.backfill_days)),
-            _epoch(current),
-        )
-        jobs = self.store.incomplete_jobs(
-            "backfill", self.settings.tickers, target
-        )
         if not jobs:
             return None
         stats = self._run_jobs("backfill", target, jobs)
