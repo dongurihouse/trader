@@ -13,10 +13,24 @@
     <a class="skip-link" href="#main">Skip to chart</a>
 
     <header class="topbar">
-      <a class="brand" href="/" aria-label="Trader chart home">
-        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-        <span>TRADER</span>
-      </a>
+      <div class="trader-menu">
+        <button class="brand" id="trader-menu-button" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="trader-menu-dropdown">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span>TRADER</span>
+          <span class="brand-chevron" aria-hidden="true">⌄</span>
+        </button>
+        <div class="trader-menu-dropdown" id="trader-menu-dropdown" role="menu" aria-label="Chart display" hidden>
+          <small>Chart style</small>
+          <button type="button" role="menuitemradio" data-style="line" aria-checked="true">
+            <span class="menu-style-icon line" aria-hidden="true"></span>
+            Line
+          </button>
+          <button type="button" role="menuitemradio" data-style="candles" aria-checked="false">
+            <span class="menu-style-icon candles" aria-hidden="true"></span>
+            Candles
+          </button>
+        </div>
+      </div>
       <nav class="topbar-nav" aria-label="Dashboard views">
         <a class="active" href="/" aria-current="page">Chart</a>
         <a href="/logs">Logs</a>
@@ -42,13 +56,15 @@
         <div class="ticker-skeleton"></div>
       </section>
 
-      <section class="chart-card surface" aria-labelledby="chart-title">
+      <section class="date-rail" aria-label="Trading dates">
+        <div class="date-strip" id="date-strip" role="group" aria-label="Focus chart on a trading date">
+          <span class="date-strip-loading">Loading dates…</span>
+        </div>
+      </section>
+
+      <section class="chart-card surface" aria-label="Price chart">
         <div class="chart-header">
           <div class="quote-block">
-            <div class="symbol-row">
-              <h1 id="chart-title">—</h1>
-              <span class="exchange-label">US EQUITY</span>
-            </div>
             <div class="quote-row">
               <strong id="quote-price">—</strong>
               <span id="quote-change">—</span>
@@ -57,17 +73,8 @@
           <div class="chart-controls">
             <div class="zoom-control" id="zoom-control" role="group" aria-label="Time zoom">
               <button type="button" id="zoom-out" aria-label="Zoom out" title="Zoom out">−</button>
-              <button type="button" id="zoom-reset" title="Show the full selected range">Reset</button>
+              <button type="button" id="zoom-reset" title="Show full history">Reset</button>
               <button type="button" id="zoom-in" aria-label="Zoom in" title="Zoom in">+</button>
-            </div>
-            <div class="style-control" id="style-control" role="group" aria-label="Chart style">
-              <button type="button" data-style="line" class="active" aria-pressed="true">Line</button>
-              <button type="button" data-style="candles" aria-pressed="false">Candles</button>
-            </div>
-            <div class="date-strip-shell">
-              <div class="date-strip" id="date-strip" role="group" aria-label="Focus chart on a trading date">
-                <span class="date-strip-loading">Loading dates…</span>
-              </div>
             </div>
           </div>
         </div>

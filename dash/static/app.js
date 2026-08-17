@@ -980,7 +980,6 @@ function renderTickers(quotes) {
 
 function renderQuote() {
   const quote = state.overview?.quotes.find((item) => item.ticker === state.ticker);
-  $("#chart-title").textContent = state.ticker || "—";
   $("#quote-price").textContent = quote?.available ? `$${formatPrice(quote.price)}` : "—";
   const change = $("#quote-change");
   change.textContent = quote?.available
@@ -1047,16 +1046,49 @@ $("#date-strip").addEventListener("keydown", (event) => {
   event.preventDefault();
 });
 
-$("#style-control").addEventListener("click", (event) => {
-  const button = event.target.closest("button[data-style]");
-  if (!button || button.dataset.style === state.style) return;
-  state.style = button.dataset.style;
-  document.querySelectorAll("#style-control button").forEach((candidate) => {
-    const active = candidate === button;
-    candidate.classList.toggle("active", active);
-    candidate.setAttribute("aria-pressed", String(active));
+function setTraderMenu(open) {
+  $("#trader-menu-button").setAttribute("aria-expanded", String(open));
+  $("#trader-menu-dropdown").hidden = !open;
+}
+
+function renderStyleSelection() {
+  document.querySelectorAll("#trader-menu-dropdown button[data-style]").forEach((button) => {
+    const active = button.dataset.style === state.style;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-checked", String(active));
   });
+}
+
+$("#trader-menu-button").addEventListener("click", () => {
+  const open = $("#trader-menu-button").getAttribute("aria-expanded") !== "true";
+  setTraderMenu(open);
+});
+
+$("#trader-menu-button").addEventListener("keydown", (event) => {
+  if (event.key !== "ArrowDown") return;
+  setTraderMenu(true);
+  $("#trader-menu-dropdown button.active")?.focus();
+  event.preventDefault();
+});
+
+$("#trader-menu-dropdown").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-style]");
+  if (!button) return;
+  state.style = button.dataset.style;
+  renderStyleSelection();
   chart.setStyle(state.style);
+  setTraderMenu(false);
+  $("#trader-menu-button").focus();
+});
+
+document.addEventListener("click", (event) => {
+  if (!event.target.closest(".trader-menu")) setTraderMenu(false);
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || $("#trader-menu-dropdown").hidden) return;
+  setTraderMenu(false);
+  $("#trader-menu-button").focus();
 });
 
 $("#zoom-in").addEventListener("click", () => chart.zoom(0.5));
