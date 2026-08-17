@@ -1,0 +1,10 @@
+data/*
+!data/.gitkeep
+logs/*
+!logs/.gitkeep
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.superpowers/
+.DS_Store

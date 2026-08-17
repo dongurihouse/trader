@@ -1,10 +1,6 @@
-data/*
-!data/.gitkeep
-logs/*
-!logs/.gitkeep
-__pycache__/
-*.pyc
-.venv/
+.DS_Store
 .pytest_cache/
 .superpowers/
-.DS_Store
+.venv/
+__pycache__/
+*.pyc
