@@ -926,35 +926,31 @@ def _write_result(
             """,
             rows,
         )
-        latest = connection.execute(
-            "SELECT MAX(ts) FROM bars WHERE ticker=?", (result["ticker"],)
-        ).fetchone()[0]
-        if latest == result["ts"]:
-            for name, output in result["algos"].items():
-                if not settings.algos[name]["trades"]:
-                    continue
-                is_entry, is_close, direction = _algo_output(output)
-                action = "exit_all" if is_close else "entry" if is_entry else None
-                if action is None:
-                    continue
-                if action == "exit_all":
-                    live_entries = _trade_open_entries(
-                        connection, result["ticker"], name, result["ts"]
-                    )
-                    if not live_entries:
-                        continue
-                    direction = int(live_entries[0]["direction"])
-                exists = connection.execute(
-                    "SELECT 1 FROM trades WHERE ticker=? AND algo=? AND ts=?",
-                    (result["ticker"], name, result["ts"]),
-                ).fetchone()
-                if exists:
-                    continue
-                connection.execute(
-                    "INSERT INTO trades(ticker,algo,ts,action,direction) VALUES (?,?,?,?,?)",
-                    (result["ticker"], name, result["ts"], action, direction),
+        for name, output in result["algos"].items():
+            if not settings.algos[name]["trades"]:
+                continue
+            is_entry, is_close, direction = _algo_output(output)
+            action = "exit_all" if is_close else "entry" if is_entry else None
+            if action is None:
+                continue
+            if action == "exit_all":
+                live_entries = _trade_open_entries(
+                    connection, result["ticker"], name, result["ts"]
                 )
-                stats["exits" if action == "exit_all" else "entries"] += 1
+                if not live_entries:
+                    continue
+                direction = int(live_entries[0]["direction"])
+            exists = connection.execute(
+                "SELECT 1 FROM trades WHERE ticker=? AND algo=? AND ts=?",
+                (result["ticker"], name, result["ts"]),
+            ).fetchone()
+            if exists:
+                continue
+            connection.execute(
+                "INSERT INTO trades(ticker,algo,ts,action,direction) VALUES (?,?,?,?,?)",
+                (result["ticker"], name, result["ts"], action, direction),
+            )
+            stats["exits" if action == "exit_all" else "entries"] += 1
         connection.commit()
     except Exception:
         connection.rollback()

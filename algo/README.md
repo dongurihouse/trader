@@ -10,8 +10,8 @@ the current version. It processes each ticker oldest first. A config change with
 a new version therefore fills the same bounded window without a separate
 backtest path.
 
-Only a ticker's newest stored bar can create a trade. Older evaluations write
-outputs only. An algo without `"trades": true` also writes outputs only.
+Every entry or exit produced by an algo with `"trades": true` writes a trade,
+whether the evaluated bar is historical or new. Other algos write outputs only.
 
 The default config enables the two-sided `orb5` opening-range breakout and the
 read-only `shape` path forecast.
