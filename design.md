@@ -30,8 +30,8 @@ walk.
 
 ## 1. bars (service)
 
-Collects minute bars from Robinhood and owns their quality. One process
-does both jobs: a live poll each minute and a nightly sweep. Writes are
+Collects minute bars from Robinhood and preserves their source quality. One
+process does both jobs: a live poll each minute and a nightly sweep. Writes are
 idempotent upserts keyed by ticker and timestamp, so a repeated fetch is
 harmless. Every write stamps `fetched_at`, so a reader can see what
 changed and when.
@@ -49,11 +49,10 @@ Nightly sweep:
 - Once per day, after the close, in bulk: the last 30 days of minute bars
   for every ticker, always, with no gap detection. The sweep is the gap
   repair.
-- 30 days sits inside the ~41-day boundary where Robinhood starts to serve
-  synthetic bars (marked only by `interpolated: true`), so every fetched bar
-  is real.
-- Simple validation: drop interpolated rows and rows with unordered prices,
-  write the rest.
+- Robinhood can return synthetic gap-fill bars at any age and marks them with
+  `interpolated: true`. Older minute requests can contain only these rows.
+- Store every returned bar and preserve the `interpolated` flag so each reader
+  can decide how to use it.
 
 ## 2. events (service)
 
@@ -214,10 +213,10 @@ Ad-hoc views may call the core directly; the call writes nothing.
 ## Service status (logs)
 
 Every service appends to the logs table: a heartbeat each cycle, a summary
-row per run (bars fetched, rows rejected), and a row per problem. The
-dashboard derives everything from it: status is the freshest heartbeat per
-service, history is the run summaries, and problems are the warn and error
-rows. This is the one shared-writer table; it is safe because it is
+row per run (bars fetched, rows written, and interpolated rows), and a row per
+problem. The dashboard derives everything from it: status is the freshest
+heartbeat per service, history is the run summaries, and problems are the warn
+and error rows. This is the one shared-writer table; it is safe because it is
 append-only and each service writes only rows tagged with its own name.
 
 ## Database schema
@@ -233,8 +232,10 @@ CREATE TABLE bars (
     low        REAL    NOT NULL,
     close      REAL    NOT NULL,
     volume     INTEGER NOT NULL,
+    interpolated INTEGER NOT NULL DEFAULT 0,  -- Robinhood gap-fill flag
     fetched_at INTEGER NOT NULL,  -- write time, epoch seconds, UTC
-    PRIMARY KEY (ticker, ts)
+    PRIMARY KEY (ticker, ts),
+    CHECK (interpolated IN (0, 1))
 );
 
 CREATE TABLE events (
@@ -291,7 +292,8 @@ Notes:
 - WAL: readers never block the writer. Each process has its own connection
   and busy timeout. All timestamps are epoch seconds, UTC.
 - Bar writes are idempotent upserts; a repeated fetch is harmless.
-- `bars` needs no quality flag: bad rows are rejected at ingest.
+- `bars.interpolated` preserves Robinhood's gap-fill flag; no returned bar is
+  discarded at ingest.
 - `trades` binds every row to one algo; nothing consolidates across algos.
   No price (recomputable) and no size (a row is one unit).
 - `outputs` grows fastest; `logs` grows steadily.

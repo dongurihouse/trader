@@ -8,8 +8,10 @@ CREATE TABLE IF NOT EXISTS bars (
     low        REAL    NOT NULL,
     close      REAL    NOT NULL,
     volume     INTEGER NOT NULL,
+    interpolated INTEGER NOT NULL DEFAULT 0,
     fetched_at INTEGER NOT NULL,
-    PRIMARY KEY (ticker, ts)
+    PRIMARY KEY (ticker, ts),
+    CHECK (interpolated IN (0, 1))
 );
 
 CREATE TABLE IF NOT EXISTS events (

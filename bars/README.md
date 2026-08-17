@@ -14,8 +14,7 @@ refresh token with owner-only permissions.
   last stored bar. A restart or short outage catches up automatically.
 - After the close, fetch the trailing 30 days for every ticker. This nightly
   sweep repairs gaps without a separate reconciliation path.
-- Drop Robinhood rows marked `interpolated`.
-- Drop rows whose open or close lies outside the low-to-high range.
+- Store every Robinhood bar and record its `interpolated` flag.
 - Upsert by `(ticker, ts)`, so every repeated fetch is safe.
 - Append heartbeats, run summaries, and problems to the shared `logs` table.
 - Keep no filesystem log; `make logs` reads the shared table.
@@ -65,5 +64,5 @@ JSON is also available:
 bars/.venv/bin/python bars/bars_service.py query SNDK --limit 5 --format json
 ```
 
-The stored columns are `ticker`, `ts`, `open`, `high`, `low`, `close`, and
-`volume`.
+The stored columns are `ticker`, `ts`, `open`, `high`, `low`, `close`,
+`volume`, and `interpolated`.

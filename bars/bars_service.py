@@ -7,7 +7,6 @@ import csv
 import io
 import json
 import logging
-import math
 import os
 import re
 import signal
@@ -584,6 +583,15 @@ class BarStore:
             raise ConfigError("schema file does not exist: %s" % SCHEMA_PATH) from exc
         with self.connect() as connection:
             connection.executescript(schema)
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(bars)").fetchall()
+            }
+            if "interpolated" not in columns:
+                connection.execute(
+                    "ALTER TABLE bars ADD COLUMN interpolated "
+                    "INTEGER NOT NULL DEFAULT 0 CHECK (interpolated IN (0, 1))"
+                )
 
     def connect(self):
         connection = sqlite3.connect(str(self.path), timeout=30)
@@ -593,36 +601,22 @@ class BarStore:
         connection.execute("PRAGMA busy_timeout=30000")
         return connection
 
-    @staticmethod
-    def _number(bar: dict, field: str) -> float:
-        try:
-            value = float(bar[field])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise RelayError(
-                "invalid bar field %s: %r" % (field, bar.get(field))
-            ) from exc
-        if not math.isfinite(value):
-            raise RelayError("non-finite bar field %s" % field)
-        return value
-
-    @staticmethod
-    def _ordered(open_price: float, high: float, low: float, close: float) -> bool:
-        return low <= open_price <= high and low <= close <= high
-
     def _upsert(self, rows: Sequence[tuple]) -> None:
         with self.connect() as connection:
             connection.executemany(
                 """
                 INSERT INTO bars (
-                    ticker, ts, open, high, low, close, volume, fetched_at
+                    ticker, ts, open, high, low, close, volume,
+                    interpolated, fetched_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(ticker, ts) DO UPDATE SET
                     open=excluded.open,
                     high=excluded.high,
                     low=excluded.low,
                     close=excluded.close,
                     volume=excluded.volume,
+                    interpolated=excluded.interpolated,
                     fetched_at=excluded.fetched_at
                 """,
                 rows,
@@ -633,8 +627,6 @@ class BarStore:
             "received": 0,
             "written": 0,
             "interpolated": 0,
-            "unordered": 0,
-            "invalid": 0,
         }
         results = payload["data"]["results"]
         fetched_at = _epoch(datetime.now(UTC))
@@ -643,24 +635,11 @@ class BarStore:
             ticker = result["symbol"]
             for bar in result.get("bars") or []:
                 stats["received"] += 1
-                if bar.get("interpolated"):
+                interpolated = int(bool(bar.get("interpolated", False)))
+                if interpolated:
                     stats["interpolated"] += 1
-                    continue
-                try:
-                    timestamp = _epoch(_parse_iso(str(bar["begins_at"])))
-                    prices = [
-                        self._number(bar, field) for _, field in self.PRICE_FIELDS
-                    ]
-                    volume_value = self._number(bar, "volume")
-                except (RelayError, KeyError):
-                    stats["invalid"] += 1
-                    continue
-                if volume_value < 0 or not volume_value.is_integer():
-                    stats["invalid"] += 1
-                    continue
-                if not self._ordered(prices[0], prices[1], prices[2], prices[3]):
-                    stats["unordered"] += 1
-                    continue
+                timestamp = _epoch(_parse_iso(str(bar["begins_at"])))
+                prices = [float(bar[field]) for _, field in self.PRICE_FIELDS]
                 rows.append(
                     (
                         ticker,
@@ -669,7 +648,8 @@ class BarStore:
                         prices[1],
                         prices[2],
                         prices[3],
-                        int(volume_value),
+                        int(bar["volume"]),
+                        interpolated,
                         fetched_at,
                     )
                 )
@@ -723,7 +703,7 @@ class BarStore:
             raise ConfigError("legacy and destination databases must differ")
         if not source.is_file():
             raise ConfigError("legacy database does not exist: %s" % source)
-        stats = {"read": 0, "written": 0, "rejected": 0}
+        stats = {"read": 0, "written": 0}
         fetched_at = _epoch(datetime.now(UTC))
         rows: List[tuple] = []
         legacy = sqlite3.connect(str(source))
@@ -735,22 +715,13 @@ class BarStore:
             for row in cursor:
                 stats["read"] += 1
                 values = tuple(float(row[name]) for name in ("open", "high", "low", "close"))
-                volume = float(row["volume"])
-                if (
-                    not all(math.isfinite(value) for value in values)
-                    or not math.isfinite(volume)
-                    or volume < 0
-                    or not volume.is_integer()
-                    or not self._ordered(*values)
-                ):
-                    stats["rejected"] += 1
-                    continue
                 rows.append(
                     (
                         row["symbol"],
                         _epoch(_parse_iso(row["begins_at"])),
                         *values,
-                        int(volume),
+                        int(row["volume"]),
+                        0,
                         fetched_at,
                     )
                 )
@@ -762,8 +733,8 @@ class BarStore:
         stats["written"] = len(rows)
         self.append_log(
             "info",
-            "migration complete source=%s read=%d written=%d rejected=%d"
-            % (source, stats["read"], stats["written"], stats["rejected"]),
+            "migration complete source=%s read=%d written=%d"
+            % (source, stats["read"], stats["written"]),
         )
         return stats
 
@@ -783,7 +754,7 @@ class BarStore:
             clauses.append("ts<=?")
             arguments.append(_query_epoch(end, end=True))
         query = (
-            "SELECT ticker, ts, open, high, low, close, volume "
+            "SELECT ticker, ts, open, high, low, close, volume, interpolated "
             "FROM bars WHERE %s ORDER BY ts" % " AND ".join(clauses)
         )
         if limit:
@@ -805,8 +776,6 @@ class Collector:
             "received": 0,
             "written": 0,
             "interpolated": 0,
-            "unordered": 0,
-            "invalid": 0,
         }
 
     @staticmethod
@@ -901,24 +870,16 @@ class Collector:
 
     def _record(self, prefix: str, stats: Dict[str, int]) -> None:
         message = (
-            "%s received=%d written=%d rejected_interpolated=%d "
-            "rejected_unordered=%d rejected_invalid=%d"
+            "%s received=%d written=%d interpolated=%d"
             % (
                 prefix,
                 stats["received"],
                 stats["written"],
                 stats["interpolated"],
-                stats["unordered"],
-                stats["invalid"],
             )
         )
         self.store.append_log("info", message)
         logging.info(message)
-        rejected = stats["interpolated"] + stats["unordered"] + stats["invalid"]
-        if rejected:
-            warning = "%s rejected=%d" % (prefix, rejected)
-            self.store.append_log("warn", warning)
-            logging.warning(warning)
 
     def status_text(self) -> str:
         rows = self.store.summary(self.settings.tickers)
@@ -1060,8 +1021,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         elif arguments.command == "migrate":
             stats = store.migrate_legacy(arguments.source.expanduser().resolve())
             print(
-                "migrated read=%d written=%d rejected=%d"
-                % (stats["read"], stats["written"], stats["rejected"])
+                "migrated read=%d written=%d"
+                % (stats["read"], stats["written"])
             )
         elif arguments.command == "query":
             ticker = arguments.symbol.strip().upper()
@@ -1089,6 +1050,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         "low",
                         "close",
                         "volume",
+                        "interpolated",
                     ]
                 )
                 writer = csv.DictWriter(output, fieldnames=fields)
