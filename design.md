@@ -16,7 +16,7 @@ through calls between services.
 | trades  | algo                  | dashboard       |
 | outputs | algo                  | dashboard       |
 | configs | algo                  | dashboard       |
-| logs    | every process, own rows only | dashboard |
+| logs    | every service, own rows only | dashboard |
 
 One shared config file holds the ticker list, the signal and algo
 definitions, the early-close days, the live-polling window, and the
@@ -88,7 +88,8 @@ One service runs the algos and contains the algo logic: a core plus a
 loop. Input: the ticker list and the signal and algo definitions; the
 bar timestamps supply `t`. One call carries all work:
 `core(ticker, t, algos=None)` returns the signal values at `t` and one
-`(is_entry, is_close_all)` pair per algo.
+`(is_entry, is_close_all)` pair per algo. `algos=None` runs every enabled
+algo; a list restricts the call to those algos.
 
 ### The core
 
@@ -212,12 +213,12 @@ Ad-hoc views may call the core directly; the call writes nothing.
 
 ## Service status (logs)
 
-Every process appends to the logs table: a heartbeat each cycle, a summary
+Every service appends to the logs table: a heartbeat each cycle, a summary
 row per run (bars fetched, rows rejected), and a row per problem. The
 dashboard derives everything from it: status is the freshest heartbeat per
-process, history is the run summaries, and problems are the warn and error
+service, history is the run summaries, and problems are the warn and error
 rows. This is the one shared-writer table; it is safe because it is
-append-only and each process writes only rows tagged with its own name.
+append-only and each service writes only rows tagged with its own name.
 
 ## Database schema
 
