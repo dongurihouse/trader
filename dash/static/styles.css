@@ -956,6 +956,14 @@ h1 em {
   color: var(--muted);
 }
 
+.chart-tooltip .algo-action.entry {
+  color: var(--cyan);
+}
+
+.chart-tooltip .algo-action.exit {
+  color: var(--red);
+}
+
 .chart-loading,
 .chart-empty {
   position: absolute;
@@ -1009,6 +1017,9 @@ h1 em {
 .chart-legend-row {
   justify-content: space-between;
   gap: 18px;
+  min-height: 31px;
+  margin-top: 12px;
+  padding-inline: 2px;
 }
 
 .chart-legend {
@@ -1023,6 +1034,31 @@ h1 em {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+}
+
+.chart-legend .algo-overlay-name {
+  gap: 6px;
+  color: var(--text);
+}
+
+.algo-overlay-name small {
+  color: var(--subtle);
+  font-size: 0.52rem;
+  letter-spacing: 0.1em;
+}
+
+.algo-overlay-name strong {
+  color: var(--acid);
+  font-size: 0.64rem;
+  letter-spacing: 0.06em;
+}
+
+.algo-overlay-count {
+  color: var(--subtle);
+  font-family: var(--mono);
+  font-size: 0.57rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .chart-legend i {

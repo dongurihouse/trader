@@ -5,6 +5,7 @@ const state = {
   ticker: null,
   range: "1D",
   style: "line",
+  algo: null,
   bars: null,
   chartRequest: 0,
 };
@@ -107,6 +108,7 @@ class PriceChart {
     this.onViewChange = onViewChange;
     this.context = canvas.getContext("2d");
     this.style = "line";
+    this.algo = null;
     this.payload = null;
     this.hoverIndex = null;
     this.bounds = null;
@@ -162,15 +164,41 @@ class PriceChart {
     this.draw();
   }
 
+  setAlgo(algo) {
+    const next = algo || null;
+    if (next === this.algo) return;
+    this.algo = next;
+    this.updateLabel();
+    this.draw();
+  }
+
+  visibleTrades(bars = this.visibleBars()) {
+    if (!this.algo || !bars.length) return [];
+    const timestamps = new Set(bars.map((bar) => Number(bar.ts)));
+    return (this.payload?.trades || []).filter(
+      (trade) => trade.algo === this.algo && timestamps.has(Number(trade.ts)),
+    );
+  }
+
+  tradesAt(timestamp) {
+    return (this.payload?.trades || []).filter(
+      (trade) => trade.algo === this.algo && Number(trade.ts) === Number(timestamp),
+    );
+  }
+
   updateLabel() {
     const label = this.style === "candles" ? "candlestick" : "line";
     const visible = this.visibleBars();
     const first = visible[0];
     const last = visible.at(-1);
+    const actionCount = this.visibleTrades(visible).length;
+    const overlayLabel = this.algo
+      ? `, ${this.algo} overlay with ${actionCount.toLocaleString()} ${actionCount === 1 ? "action" : "actions"}`
+      : "";
     this.canvas.setAttribute(
       "aria-label",
       visible.length
-        ? `${this.payload.ticker} ${label} chart, ${visible.length.toLocaleString()} visible points from ${easternDateTime.format(dateFromEpoch(first.ts))} to ${easternDateTime.format(dateFromEpoch(last.ts))}`
+        ? `${this.payload.ticker} ${label} chart, ${visible.length.toLocaleString()} visible points from ${easternDateTime.format(dateFromEpoch(first.ts))} to ${easternDateTime.format(dateFromEpoch(last.ts))}${overlayLabel}`
         : `${this.payload?.ticker || "Ticker"} ${label} chart with no available bars`,
     );
   }
@@ -249,6 +277,49 @@ class PriceChart {
     }
     this.context.setTransform(ratio, 0, 0, ratio, 0, 0);
     return { width, height };
+  }
+
+  drawTradeMarkers(ctx, bars, x, y, margin, priceBottom) {
+    const trades = this.visibleTrades(bars);
+    if (!trades.length) return;
+    const indexByTimestamp = new Map(bars.map((bar, index) => [Number(bar.ts), index]));
+    const markerSize = 5.5;
+    ctx.save();
+    ctx.lineJoin = "round";
+    trades.forEach((trade) => {
+      const index = indexByTimestamp.get(Number(trade.ts));
+      if (index === undefined) return;
+      const bar = bars[index];
+      const isEntry = trade.action === "entry";
+      const isLong = Number(trade.direction) >= 0;
+      const pointsUp = isEntry ? isLong : !isLong;
+      const pointX = x(index);
+      const priceY = y(pointsUp ? bar.low : bar.high);
+      const markerY = pointsUp
+        ? Math.min(priceBottom - markerSize, priceY + 13)
+        : Math.max(margin.top + markerSize, priceY - 13);
+      const tipY = markerY + (pointsUp ? -markerSize : markerSize);
+      const color = isEntry ? "#70d8dc" : "#ff7b73";
+
+      ctx.beginPath();
+      ctx.moveTo(pointX, priceY + (pointsUp ? 2 : -2));
+      ctx.lineTo(pointX, tipY);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(pointX, tipY);
+      ctx.lineTo(pointX + markerSize, markerY + (pointsUp ? markerSize * 0.7 : -markerSize * 0.7));
+      ctx.lineTo(pointX - markerSize, markerY + (pointsUp ? markerSize * 0.7 : -markerSize * 0.7));
+      ctx.closePath();
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.strokeStyle = "#101721";
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+    });
+    ctx.restore();
   }
 
   draw() {
@@ -405,6 +476,8 @@ class PriceChart {
       });
     }
 
+    this.drawTradeMarkers(ctx, bars, x, y, margin, priceBottom);
+
     if (this.hoverIndex !== null) {
       const index = Math.max(0, Math.min(bars.length - 1, this.hoverIndex));
       const pointX = x(index);
@@ -432,12 +505,24 @@ class PriceChart {
     this.hoverIndex = Math.round(ratio * (bars.length - 1));
     this.hoverIndex = Math.max(0, Math.min(bars.length - 1, this.hoverIndex));
     const bar = bars[this.hoverIndex];
-    this.tooltip.replaceChildren(
+    const contents = [
       createElement("strong", "", easternDateTime.format(dateFromEpoch(bar.ts))),
       createElement("span", "", `O ${formatPrice(bar.open)} · H ${formatPrice(bar.high)}`),
       createElement("span", "", `L ${formatPrice(bar.low)} · C ${formatPrice(bar.close)}`),
       createElement("span", "", `Vol ${compactFormat.format(bar.volume)}`),
-    );
+    ];
+    this.tradesAt(bar.ts).forEach((trade) => {
+      const action = trade.action === "exit_all" ? "exit" : "entry";
+      const direction = Number(trade.direction) < 0 ? "Short" : "Long";
+      contents.push(
+        createElement(
+          "span",
+          `algo-action ${action}`,
+          `${trade.algo.toUpperCase()} · ${direction} ${action}`,
+        ),
+      );
+    });
+    this.tooltip.replaceChildren(...contents);
     this.tooltip.hidden = false;
     const tooltipWidth = this.tooltip.offsetWidth || 150;
     const tooltipHeight = this.tooltip.offsetHeight || 94;
@@ -546,6 +631,26 @@ function renderViewport({ visible, total, canZoomIn, canZoomOut }) {
 
 const chart = new PriceChart($("#price-chart"), $("#chart-tooltip"), renderViewport);
 
+function renderAlgoOverlay(payload = null) {
+  const configured = Object.entries(state.overview?.config?.algos || {})
+    .filter(([, definition]) => definition?.trades === true)
+    .map(([name]) => name);
+  if (!configured.includes(state.algo)) state.algo = configured[0] || null;
+
+  const overlay = $("#algo-overlay");
+  overlay.hidden = !state.algo;
+  chart.setAlgo(state.algo);
+  if (!state.algo) return;
+
+  $("#algo-overlay-name").textContent = state.algo.toUpperCase();
+  const actionCount = (payload?.trades || []).filter((trade) => trade.algo === state.algo).length;
+  $("#algo-overlay-count").textContent = payload
+    ? actionCount
+      ? `${integerFormat.format(actionCount)} ${actionCount === 1 ? "action" : "actions"} in ${payload.range}`
+      : `No actions in ${payload.range}`
+    : "Loading actions…";
+}
+
 async function loadOverview({ quiet = false } = {}) {
   const refresh = $("#refresh-button");
   if (!quiet) refresh.classList.add("is-spinning");
@@ -572,6 +677,7 @@ function renderOverview() {
   $("#market-label").textContent = overview.market.label;
   $("#market-time").textContent = easternTime.format(dateFromEpoch(overview.market.eastern_time));
   $("#market-dot").classList.toggle("live", overview.market.state === "live");
+  renderAlgoOverlay();
   renderTickers(overview.quotes);
   renderQuote();
 }
@@ -630,6 +736,7 @@ async function loadBars({ quiet = false } = {}) {
     const payload = await api(`/api/bars?ticker=${encodeURIComponent(state.ticker)}&range=${state.range}`);
     if (request !== state.chartRequest) return;
     state.bars = payload;
+    renderAlgoOverlay(payload);
     chart.setData(payload);
     $("#chart-empty").hidden = payload.bars.length > 0;
     $("#stat-coverage").textContent = formatCoverage(payload);

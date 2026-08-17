@@ -84,6 +84,15 @@
           <span class="chart-density"><small>VIEW</small><b id="stat-density">—</b></span>
         </div>
 
+        <div class="chart-legend-row" id="algo-overlay" aria-live="polite" hidden>
+          <div class="chart-legend" aria-label="Algorithm trade overlay">
+            <span class="algo-overlay-name"><small>ALGO</small><strong id="algo-overlay-name">—</strong></span>
+            <span><i class="legend-entry" aria-hidden="true"></i> Entry</span>
+            <span><i class="legend-exit" aria-hidden="true"></i> Exit</span>
+          </div>
+          <span class="algo-overlay-count" id="algo-overlay-count">Checking actions…</span>
+        </div>
+
         <div class="chart-stage" id="chart-stage">
           <canvas id="price-chart" role="img" aria-label="Minute price chart" title="Zoom in, then scroll horizontally or drag to pan. Scroll vertically to zoom."></canvas>
           <div class="chart-tooltip" id="chart-tooltip" hidden></div>
