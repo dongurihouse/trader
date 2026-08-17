@@ -1,7 +1,0 @@
-# trader — console (localhost only; no external exposure)
-host: 127.0.0.1
-port: 8777
-# The console reads data/sessions/<id>/telemetry.jsonl and serves:
-#   /            dashboard page (SSE-driven)
-#   /events      Server-Sent Events tail of the telemetry file
-#   /sessions    list of session directories

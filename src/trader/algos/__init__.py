@@ -1,2 +1,0 @@
-"""Trading algorithm support modules."""
-
