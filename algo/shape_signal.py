@@ -402,6 +402,78 @@ def _parameters(parameters: Mapping[str, Any]) -> tuple[int, int, int, float, fl
     )
 
 
+def _preopen_shape(
+    candidates: Sequence[_Session],
+    today: date,
+    duration: int,
+    shape_base_rate_w: float,
+    age_halflife_days: float,
+    support_k: float,
+) -> dict[str, Any]:
+    raw_weights = [
+        candidate.quality
+        * math.exp(-float((today - candidate.day).days) / age_halflife_days)
+        for candidate in candidates
+    ]
+    effective_n = _effective(raw_weights)
+    support = effective_n / (effective_n + support_k)
+    analog = _normalized(raw_weights)
+    prior = _normalized([candidate.quality for candidate in candidates])
+    weights = [
+        support * analog_weight + (1.0 - support) * prior_weight
+        for analog_weight, prior_weight in zip(analog, prior)
+    ]
+    votes = {
+        name: sum(
+            weight
+            for candidate, weight in zip(candidates, weights)
+            if candidate.shape == name
+        )
+        for name in SHAPES
+    }
+    completed = _probabilities(votes)
+    counts = {
+        name: sum(candidate.shape == name for candidate in candidates)
+        for name in SHAPES
+    }
+    base_rate = _probabilities(counts)
+    probabilities = _probabilities(
+        {
+            name: (1.0 - shape_base_rate_w) * completed[name]
+            + shape_base_rate_w * base_rate[name]
+            for name in SHAPES
+        }
+    )
+    top = sorted(probabilities.items(), key=lambda item: item[1], reverse=True)[:3]
+    quality_mean = sum(
+        weight * candidate.quality for candidate, weight in zip(candidates, weights)
+    )
+    return {
+        "session_minute": None,
+        "remaining_minutes": duration,
+        "session_open": None,
+        "current_return": None,
+        "funnel": [],
+        "shapes": probabilities,
+        "top_shapes": [
+            {"shape": name, "probability": probability}
+            for name, probability in top
+        ],
+        "reliability": support,
+        "evidence": {
+            "analogs": len(candidates),
+            "effective_n": effective_n,
+            "bandwidth": None,
+            "shrinkage": support,
+            "quality_mean": quality_mean,
+            "dropped_weight": 0.0,
+            "shape_base_rate_w": shape_base_rate_w,
+            "shape_method": "preopen_prior",
+            "proximity": "not_measured",
+        },
+    }
+
+
 def _shape_v1(
     connection: sqlite3.Connection,
     ticker: str,
@@ -422,15 +494,9 @@ def _shape_v1(
         support_k,
     ) = _parameters(parameters)
     today, session_open, session_close = session_window(settings, ts)
-    if ts < session_open or ts >= session_close:
-        return None
-    session_minute = int((ts - session_open) // 60 + 1)
-    if session_minute % stride_minutes != 0:
+    if ts >= session_close:
         return None
     duration = int((session_close - session_open) // 60)
-    remaining = duration - session_minute
-    if remaining <= 0:
-        return None
 
     prior_all = list(
         _history_index(
@@ -444,6 +510,22 @@ def _shape_v1(
     )
     candidates = prior_all[-history_sessions:]
     if len(candidates) < min_sessions:
+        return None
+    if ts < session_open:
+        return _preopen_shape(
+            candidates,
+            today,
+            duration,
+            shape_base_rate_w,
+            age_halflife_days,
+            support_k,
+        )
+
+    session_minute = int((ts - session_open) // 60 + 1)
+    if session_minute % stride_minutes != 0:
+        return None
+    remaining = duration - session_minute
+    if remaining <= 0:
         return None
 
     rows = connection.execute(

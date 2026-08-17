@@ -65,12 +65,13 @@ signals ignore interpolated bars. Relative volume uses the median volume for
 each elapsed opening slot across the configured number of complete prior data
 sessions.
 
-`shape_v1` evaluates regular-session bars on the configured stride. It compares
-only the completed prefix with prior sessions, centers historical continuations
-to avoid directional bias, and classifies the completed path into eight fixed
-shapes. It needs at least `min_sessions` prior sessions. It returns `null` for
-all other bars, including extended-hours bars, while the service still stores
-that output row. No algo reads this signal, so it cannot create a trade.
+Before the regular open, `shape_v1` publishes a prior-session distribution on
+every stored bar. It has no price funnel because the session opening price does
+not exist yet. During regular hours it evaluates on the configured stride,
+compares only the completed prefix with prior sessions, centers historical
+continuations to avoid directional bias, and classifies the completed path into
+eight fixed shapes. It needs at least `min_sessions` prior sessions and returns
+`null` after the close. No algo reads this signal, so it cannot create a trade.
 
 It has these algo functions:
 
