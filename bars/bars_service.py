@@ -16,13 +16,12 @@ import sys
 import threading
 import time
 import webbrowser
-from concurrent.futures import Future, TimeoutError as FutureTimeoutError
-from contextlib import contextmanager
+from collections import Counter
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, time as clock_time, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
-from queue import Queue
 from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
@@ -688,14 +687,6 @@ def _contains_exception(error: BaseException, wanted_type) -> bool:
     return False
 
 
-@dataclass
-class _RobinhoodSessionState:
-    requests: Queue
-    ready: threading.Event
-    error: Optional[BaseException] = None
-    thread: Optional[threading.Thread] = None
-
-
 class RobinhoodClient:
     TOOL = "get_equity_historicals"
     MAX_RANGE = timedelta(days=1) - timedelta(seconds=1)
@@ -705,7 +696,7 @@ class RobinhoodClient:
     def __init__(self, settings: ProviderSettings):
         self.settings = settings
         self.storage = FileTokenStorage(settings.oauth_store)
-        self._state: Optional[_RobinhoodSessionState] = None
+        self._session: Optional[ClientSession] = None
 
     def _oauth(self, interactive: bool) -> OAuthClientProvider:
         callbacks = (
@@ -732,55 +723,28 @@ class RobinhoodClient:
             callback_handler=callbacks.callback,
         )
 
-    async def _session_worker(
-        self, state: _RobinhoodSessionState, interactive: bool
-    ) -> None:
+    async def _open_session(
+        self, stack: AsyncExitStack, interactive: bool
+    ) -> ClientSession:
         oauth = self._oauth(interactive)
         timeout = httpx2.Timeout(float(self.settings.timeout_seconds))
-        async with httpx2.AsyncClient(
-            auth=oauth,
-            follow_redirects=True,
-            timeout=timeout,
-        ) as http_client:
-            async with streamable_http_client(
+        http_client = await stack.enter_async_context(
+            httpx2.AsyncClient(
+                auth=oauth,
+                follow_redirects=True,
+                timeout=timeout,
+            )
+        )
+        read, write = await stack.enter_async_context(
+            streamable_http_client(
                 self.settings.url,
                 http_client=http_client,
                 terminate_on_close=False,
-            ) as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    state.ready.set()
-                    while True:
-                        request = await asyncio.to_thread(state.requests.get)
-                        if request is None:
-                            return
-                        action, name, arguments, future = request
-                        try:
-                            if action == "list":
-                                result = await session.list_tools()
-                            else:
-                                result = await session.call_tool(
-                                    name,
-                                    arguments,
-                                    read_timeout_seconds=float(
-                                        self.settings.timeout_seconds
-                                    ),
-                                )
-                        except Exception as exc:
-                            if not future.cancelled():
-                                future.set_exception(exc)
-                        else:
-                            if not future.cancelled():
-                                future.set_result(result)
-
-    def _worker_main(
-        self, state: _RobinhoodSessionState, interactive: bool
-    ) -> None:
-        try:
-            asyncio.run(self._session_worker(state, interactive))
-        except Exception as exc:
-            state.error = exc
-            state.ready.set()
+            )
+        )
+        session = await stack.enter_async_context(ClientSession(read, write))
+        await session.initialize()
+        return session
 
     @staticmethod
     def _relay_error(error: BaseException, action: str) -> RelayError:
@@ -792,78 +756,62 @@ class RobinhoodClient:
             )
         return RelayError("Robinhood %s failed: %s" % (action, error))
 
-    def _close_state(self, state: _RobinhoodSessionState) -> bool:
-        state.requests.put(None)
-        if state.thread is not None:
-            state.thread.join(timeout=self.CLOSE_TIMEOUT_SECONDS)
-        alive = state.thread is not None and state.thread.is_alive()
-        if self._state is state:
-            self._state = None
-        return alive
-
-    @contextmanager
-    def session(self, interactive: bool = False):
-        if self._state is not None:
+    @asynccontextmanager
+    async def session(self, interactive: bool = False):
+        if self._session is not None:
             raise RelayError("Robinhood session is already open")
-        state = _RobinhoodSessionState(Queue(), threading.Event())
-        state.thread = threading.Thread(
-            target=self._worker_main,
-            args=(state, interactive),
-            name="robinhood-mcp-session",
-            daemon=True,
-        )
-        self._state = state
-        state.thread.start()
+        stack = AsyncExitStack()
         open_timeout = (
             self.settings.timeout_seconds + self.REQUEST_GRACE_SECONDS
         )
-        if not state.ready.wait(timeout=open_timeout):
-            self._close_state(state)
-            raise RelayError(
-                "Robinhood session did not open within %d seconds"
-                % open_timeout
-            )
-        if state.error is not None:
-            error = self._relay_error(state.error, "connection")
-            self._close_state(state)
-            raise error
         try:
+            try:
+                async with asyncio.timeout(open_timeout):
+                    self._session = await self._open_session(stack, interactive)
+            except TimeoutError as exc:
+                raise RelayError(
+                    "Robinhood session did not open within %d seconds"
+                    % open_timeout
+                ) from exc
+            except Exception as exc:
+                raise self._relay_error(exc, "connection") from exc
             yield self
         finally:
-            close_timed_out = self._close_state(state)
-            if close_timed_out:
+            self._session = None
+            try:
+                async with asyncio.timeout(self.CLOSE_TIMEOUT_SECONDS):
+                    await stack.aclose()
+            except TimeoutError:
                 logging.error(
                     "Robinhood session did not close within %d seconds",
                     self.CLOSE_TIMEOUT_SECONDS,
                 )
-            if state.error is not None:
+            except Exception as exc:
                 logging.error(
                     "could not close Robinhood connection cleanly: %s",
-                    state.error,
+                    exc,
                 )
 
-    def _request(self, action: str, name: str = "", arguments=None):
-        state = self._state
-        if state is None:
+    async def _request(self, action: str, name: str = "", arguments=None):
+        session = self._session
+        if session is None:
             raise RelayError("Robinhood connection is not open")
-        if state.error is not None:
-            raise self._relay_error(state.error, action)
-        future = Future()
-        state.requests.put((action, name, arguments or {}, future))
+        timeout = self.settings.timeout_seconds + self.REQUEST_GRACE_SECONDS
         try:
-            return future.result(
-                timeout=(
-                    self.settings.timeout_seconds + self.REQUEST_GRACE_SECONDS
+            request = (
+                session.list_tools()
+                if action == "list"
+                else session.call_tool(
+                    name,
+                    arguments or {},
+                    read_timeout_seconds=float(self.settings.timeout_seconds),
                 )
             )
-        except FutureTimeoutError as exc:
-            future.cancel()
+            return await asyncio.wait_for(request, timeout=timeout)
+        except asyncio.TimeoutError as exc:
             raise RelayError(
                 "Robinhood %s timed out after %d seconds"
-                % (
-                    action,
-                    self.settings.timeout_seconds + self.REQUEST_GRACE_SECONDS,
-                )
+                % (action, timeout)
             ) from exc
         except Exception as exc:
             raise self._relay_error(exc, action) from exc
@@ -894,18 +842,18 @@ class RobinhoodClient:
             raise RelayError("Robinhood result is not a JSON object")
         return payload
 
-    def list_tools(self) -> List[str]:
-        result = self._request("list")
+    async def list_tools(self) -> List[str]:
+        result = await self._request("list")
         return [tool.name for tool in result.tools]
 
-    def authorize(self) -> List[str]:
-        with self.session(interactive=True) as session:
-            tools = session.list_tools()
+    async def authorize(self) -> List[str]:
+        async with self.session(interactive=True) as session:
+            tools = await session.list_tools()
         if self.TOOL not in tools:
             raise RelayError("Robinhood connection does not expose %s" % self.TOOL)
         return tools
 
-    def fetch_bars(
+    async def fetch_bars(
         self,
         symbols: Sequence[str],
         start_iso: str,
@@ -919,7 +867,7 @@ class RobinhoodClient:
         size = self.settings.max_symbols_per_call
         for offset in range(0, len(symbols), size):
             batch = symbols[offset : offset + size]
-            result = self._request(
+            result = await self._request(
                 "historicals request",
                 self.TOOL,
                 {
@@ -934,7 +882,7 @@ class RobinhoodClient:
             rows.extend(_bar_rows(payload, batch, start, end))
         return rows
 
-    def fetch_technical(
+    async def fetch_technical(
         self,
         ticker: str,
         spec: TechnicalSpec,
@@ -953,7 +901,7 @@ class RobinhoodClient:
             "output": "series",
         }
         arguments.update(spec.provider_params())
-        result = self._request(
+        result = await self._request(
             "technical indicator request",
             TECHNICAL_TOOL,
             arguments,
@@ -992,15 +940,6 @@ class BarStore:
         self.connection.execute("PRAGMA foreign_keys=ON")
         self.connection.execute("PRAGMA busy_timeout=30000")
         self.connection.executescript(schema)
-
-    @contextmanager
-    def transaction(self):
-        try:
-            yield self.connection
-            self.connection.commit()
-        except Exception:
-            self.connection.rollback()
-            raise
 
     def close(self) -> None:
         self.connection.close()
@@ -1054,7 +993,7 @@ class BarStore:
             )
             for bar in bars
         ]
-        with self.transaction() as connection:
+        with self.connection as connection:
             self._upsert(connection, rows)
             if job is not None:
                 connection.executemany(
@@ -1101,7 +1040,7 @@ class BarStore:
             for point in points
             if point.ts in allowed
         ]
-        with self.transaction() as connection:
+        with self.connection as connection:
             connection.executemany(
                 """
                 INSERT INTO bar_metadata (
@@ -1137,37 +1076,30 @@ class BarStore:
         force: bool = False,
     ) -> None:
         started_at = _epoch(datetime.now(UTC))
-        with self.transaction() as connection:
-            if force:
-                connection.executemany(
-                    """
-                    INSERT INTO bar_jobs (
-                        kind, scope, target, window_start, window_end, started_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(kind, scope, target) DO UPDATE SET
-                        window_start=excluded.window_start,
-                        window_end=excluded.window_end,
-                        progress_ts=NULL,
-                        started_at=excluded.started_at,
-                        completed_at=NULL
-                    """,
-                    [
-                        (kind, scope, target, window_start, window_end, started_at)
-                        for scope in scopes
-                    ],
-                )
-            else:
-                connection.executemany(
-                    """
-                    INSERT OR IGNORE INTO bar_jobs (
-                        kind, scope, target, window_start, window_end, started_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        (kind, scope, target, window_start, window_end, started_at)
-                        for scope in scopes
-                    ],
-                )
+        conflict = (
+            """ON CONFLICT(kind, scope, target) DO UPDATE SET
+                window_start=excluded.window_start,
+                window_end=excluded.window_end,
+                progress_ts=NULL,
+                started_at=excluded.started_at,
+                completed_at=NULL"""
+            if force
+            else "ON CONFLICT(kind, scope, target) DO NOTHING"
+        )
+        statement = """
+            INSERT INTO bar_jobs (
+                kind, scope, target, window_start, window_end, started_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            %s
+        """ % conflict
+        with self.connection as connection:
+            connection.executemany(
+                statement,
+                [
+                    (kind, scope, target, window_start, window_end, started_at)
+                    for scope in scopes
+                ],
+            )
 
     def incomplete_jobs(
         self, kind: str, scopes: Sequence[str], target: str
@@ -1189,7 +1121,7 @@ class BarStore:
         self, kind: str, scopes: Sequence[str], target: str
     ) -> None:
         completed_at = _epoch(datetime.now(UTC))
-        with self.transaction() as connection:
+        with self.connection as connection:
             connection.executemany(
                 """
                 UPDATE bar_jobs
@@ -1212,7 +1144,7 @@ class BarStore:
         return latest
 
     def append_log(self, level: str, message: str) -> None:
-        with self.transaction() as connection:
+        with self.connection as connection:
             connection.execute(
                 "INSERT INTO logs(ts, service, level, message) VALUES (?, ?, ?, ?)",
                 (_epoch(datetime.now(UTC)), "bars", level, message),
@@ -1272,30 +1204,17 @@ class Collector:
         self.store = store
         self.provider = provider or RobinhoodClient(settings.provider)
 
-    @staticmethod
-    def _empty_stats() -> Dict[str, int]:
-        return {
-            "received": 0,
-            "written": 0,
-            "interpolated": 0,
-        }
-
-    @staticmethod
-    def _add_stats(total: Dict[str, int], part: Dict[str, int]) -> None:
-        for key in total:
-            total[key] += part[key]
-
-    def fetch_range(
+    async def fetch_range(
         self,
         symbols: Sequence[str],
         start: datetime,
         end: datetime,
         job: Optional[JobRef] = None,
     ) -> Dict[str, int]:
-        total = self._empty_stats()
+        total = Counter(received=0, written=0, interpolated=0)
         start = start.astimezone(UTC)
         end = end.astimezone(UTC)
-        with self.provider.session() as session:
+        async with self.provider.session() as session:
             for chunk_start, chunk_end in _collection_chunks(
                 self.settings, start, end
             ):
@@ -1307,26 +1226,25 @@ class Collector:
                     start_iso,
                     end_iso,
                 )
-                bars = session.fetch_bars(symbols, start_iso, end_iso)
-                self._add_stats(
-                    total,
+                bars = await session.fetch_bars(symbols, start_iso, end_iso)
+                total.update(
                     self.store.store_bars(
                         bars,
                         job=job,
                         progress_ts=_epoch(chunk_end) if job is not None else None,
-                    ),
+                    )
                 )
         return total
 
-    def fetch_metadata_range(
+    async def fetch_metadata_range(
         self, start: datetime, end: datetime, refreshed_after: int
     ) -> Dict[str, int]:
-        total = {"requests": 0, "received": 0, "written": 0}
+        total = Counter(requests=0, received=0, written=0)
         start = start.astimezone(UTC)
         end = end.astimezone(UTC)
         if not self.settings.technical_specs:
             return total
-        with self.provider.session() as session:
+        async with self.provider.session() as session:
             for spec in self.settings.technical_specs:
                 for ticker in self.settings.tickers:
                     latest = self.store.latest_metadata(
@@ -1351,7 +1269,7 @@ class Collector:
                             _iso_utc(chunk_start),
                             _iso_utc(chunk_end),
                         )
-                        points = session.fetch_technical(
+                        points = await session.fetch_technical(
                             ticker,
                             spec,
                             _iso_utc(chunk_start),
@@ -1364,15 +1282,14 @@ class Collector:
                             chunk_start,
                             chunk_end,
                         )
+                        total.update(stats)
                         total["requests"] += 1
-                        total["received"] += stats["received"]
-                        total["written"] += stats["written"]
         return total
 
-    def _run_jobs(
+    async def _run_jobs(
         self, kind: str, target: str, jobs: Sequence[JobState]
     ) -> Dict[str, int]:
-        total = self._empty_stats()
+        total = Counter(received=0, written=0, interpolated=0)
         groups: Dict[Tuple[int, int, Optional[int]], List[str]] = {}
         for job in jobs:
             key = (job.window_start, job.window_end, job.progress_ts)
@@ -1380,9 +1297,8 @@ class Collector:
         for (window_start, window_end, progress_ts), scopes in groups.items():
             start_ts = window_start if progress_ts is None else progress_ts + 1
             if start_ts <= window_end:
-                self._add_stats(
-                    total,
-                    self.fetch_range(
+                total.update(
+                    await self.fetch_range(
                         scopes,
                         datetime.fromtimestamp(start_ts, UTC),
                         datetime.fromtimestamp(window_end, UTC),
@@ -1391,14 +1307,14 @@ class Collector:
                             target=target,
                             scopes=tuple(scopes),
                         ),
-                    ),
+                    )
                 )
             self.store.complete_jobs(kind, scopes, target)
         return total
 
-    def poll(self, now: Optional[datetime] = None) -> Dict[str, int]:
+    async def poll(self, now: Optional[datetime] = None) -> Dict[str, int]:
         current = (now or datetime.now(UTC)).astimezone(UTC)
-        self.backfill(current)
+        await self.backfill(current)
         floor = current - timedelta(days=self.settings.sweep_days)
         groups: Dict[int, List[str]] = {}
         for ticker, latest in self.store.latest_by_ticker(
@@ -1409,21 +1325,18 @@ class Collector:
                 start_ts = _epoch(floor)
             groups.setdefault(start_ts, []).append(ticker)
 
-        total = self._empty_stats()
+        total = Counter(received=0, written=0, interpolated=0)
         for start_ts, tickers in sorted(groups.items()):
             start = datetime.fromtimestamp(start_ts, UTC)
             end = min(
                 current,
                 start + timedelta(days=self.settings.poll_catchup_days),
             )
-            self._add_stats(
-                total,
-                self.fetch_range(tickers, start, end),
-            )
+            total.update(await self.fetch_range(tickers, start, end))
         self._record("poll complete", total)
         return total
 
-    def sweep(
+    async def sweep(
         self,
         now: Optional[datetime] = None,
         scheduled_day: Optional[date] = None,
@@ -1434,11 +1347,11 @@ class Collector:
                 datetime.now(UTC).date(), clock_time(0), tzinfo=UTC
             )
         )
-        self.backfill(current)
+        await self.backfill(current)
         start = current - timedelta(days=self.settings.sweep_days)
         scheduled = scheduled_day is not None
         if not scheduled:
-            stats = self.fetch_range(self.settings.tickers, start, current)
+            stats = await self.fetch_range(self.settings.tickers, start, current)
             metadata_start = start
             metadata_end = current
         else:
@@ -1452,7 +1365,7 @@ class Collector:
             )
             jobs = self.store.incomplete_jobs("sweep", ("all",), target)
             if not jobs:
-                return self._empty_stats()
+                return Counter(received=0, written=0, interpolated=0)
             sweep_job = jobs[0]
             selected = tuple(self.settings.tickers)
             resume = (
@@ -1461,7 +1374,7 @@ class Collector:
                 else sweep_job.progress_ts + 1
             )
             if resume <= sweep_job.window_end:
-                stats = self.fetch_range(
+                stats = await self.fetch_range(
                     selected,
                     datetime.fromtimestamp(resume, UTC),
                     datetime.fromtimestamp(sweep_job.window_end, UTC),
@@ -1472,10 +1385,10 @@ class Collector:
                     ),
                 )
             else:
-                stats = self._empty_stats()
+                stats = Counter(received=0, written=0, interpolated=0)
             metadata_start = datetime.fromtimestamp(sweep_job.window_start, UTC)
             metadata_end = datetime.fromtimestamp(sweep_job.window_end, UTC)
-        metadata_stats = self.fetch_metadata_range(
+        metadata_stats = await self.fetch_metadata_range(
             metadata_start,
             metadata_end,
             metadata_refreshed_after,
@@ -1486,10 +1399,10 @@ class Collector:
         if scheduled_day is not None:
             prefix += " day=%s" % scheduled_day.isoformat()
         self._record(prefix, stats)
-        self._record_metadata(metadata_stats)
+        self._record("metadata sweep complete", metadata_stats)
         return stats
 
-    def backfill(
+    async def backfill(
         self,
         now: Optional[datetime] = None,
         force: bool = False,
@@ -1509,7 +1422,7 @@ class Collector:
         jobs = self.store.incomplete_jobs("backfill", selected, target)
         if not jobs:
             return None
-        stats = self._run_jobs("backfill", target, jobs)
+        stats = await self._run_jobs("backfill", target, jobs)
         self._record(
             "backfill run complete tickers=%s days=%d"
             % (
@@ -1521,22 +1434,8 @@ class Collector:
         return stats
 
     def _record(self, prefix: str, stats: Dict[str, int]) -> None:
-        message = (
-            "%s received=%d written=%d interpolated=%d"
-            % (
-                prefix,
-                stats["received"],
-                stats["written"],
-                stats["interpolated"],
-            )
-        )
-        self.store.append_log("info", message)
-        logging.info(message)
-
-    def _record_metadata(self, stats: Dict[str, int]) -> None:
-        message = (
-            "metadata sweep complete requests=%d received=%d written=%d"
-            % (stats["requests"], stats["received"], stats["written"])
+        message = " ".join(
+            [prefix] + ["%s=%d" % item for item in stats.items()]
         )
         self.store.append_log("info", message)
         logging.info(message)
@@ -1581,10 +1480,7 @@ class Service:
         logging.info("stopping service")
         self.stop_event.set()
 
-    def _wait(self, seconds: int) -> None:
-        self.stop_event.wait(seconds)
-
-    def _cycle(self) -> int:
+    async def _cycle(self) -> int:
         now = datetime.now(UTC)
         day = now.astimezone(EASTERN).date()
         if day.weekday() >= 5:
@@ -1592,10 +1488,10 @@ class Service:
 
         start, final_at = _collection_window(self.settings, day)
         if start <= now < final_at:
-            self.collector.poll(now)
+            await self.collector.poll(now)
             return self.settings.poll_seconds
         if now >= final_at and not self.collector.store.sweep_complete(day):
-            self.collector.sweep(now, scheduled_day=day)
+            await self.collector.sweep(now, scheduled_day=day)
         return self.settings.idle_seconds
 
     def run(self) -> None:
@@ -1621,9 +1517,9 @@ class Service:
             delay = self.settings.retry_seconds
             while not self.stop_event.is_set():
                 try:
-                    wait_seconds = self._cycle()
+                    wait_seconds = asyncio.run(self._cycle())
                     delay = self.settings.retry_seconds
-                    self._wait(wait_seconds)
+                    self.stop_event.wait(wait_seconds)
                 except Exception as exc:
                     message = "cycle failed: %s" % exc
                     logging.exception("%s; retrying in %d seconds", message, delay)
@@ -1631,7 +1527,7 @@ class Service:
                         self.collector.store.append_log("error", message)
                     except sqlite3.Error:
                         logging.exception("could not write failure to logs table")
-                    self._wait(delay)
+                    self.stop_event.wait(delay)
                     delay = min(delay * 2, self.settings.retry_max_seconds)
             self.collector.store.append_log("info", "service stopped")
             logging.info("service stopped")
@@ -1701,20 +1597,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         collector = Collector(settings, store)
 
         if arguments.command == "auth":
-            tools = collector.provider.authorize()
+            tools = asyncio.run(collector.provider.authorize())
             print("Robinhood authorization complete.")
             print("Verified tool: %s" % collector.provider.TOOL)
             print("Available tools: %d" % len(tools))
         elif arguments.command == "serve":
             Service(collector).run()
         elif arguments.command == "once":
-            collector.poll()
+            asyncio.run(collector.poll())
             print(collector.status_text())
         elif arguments.command == "backfill":
-            collector.backfill(force=True)
+            asyncio.run(collector.backfill(force=True))
             print(collector.status_text())
         elif arguments.command == "sweep":
-            collector.sweep()
+            asyncio.run(collector.sweep())
             print(collector.status_text())
         elif arguments.command == "status":
             print(collector.status_text())
