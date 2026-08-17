@@ -123,11 +123,10 @@ bar timestamps supply `t`. One call carries all work:
   position starts.
 - An exit-only algo holds no units of its own, so it never trades; it acts
   through the algo that reads it.
-- Position state lives in the database only. Open units at `t` are the
-  entries since the last close in the algo's own output rows under the
-  same version, before `t`. The same query serves live and bulk work; the
-  loop keeps no position in memory. Work under one ticker therefore runs
-  oldest first.
+- Position state lives in the database only: open units are the entries
+  since the last `exit_all` in the trades table, regardless of version.
+  The loop keeps no position in memory. Work under one ticker runs oldest
+  first, so an algo's prior outputs exist when it reads them.
 - The pair is the one fixed shape in outputs, because the loop and the
   dashboard both read it. A signal's output stays opaque JSON.
 
