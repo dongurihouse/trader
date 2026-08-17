@@ -478,40 +478,42 @@ class RobinhoodClient:
         end_iso: str,
         allow_missing: bool = False,
     ) -> dict:
+        start = _parse_iso(start_iso)
+        end = _parse_iso(end_iso)
+        if end - start > self.MAX_RANGE:
+            raise RelayError("minute request exceeds the three-day provider limit")
         combined = {"data": {"results": []}}
         size = self.settings.max_symbols_per_call
-        cursor = _parse_iso(start_iso)
-        end = _parse_iso(end_iso)
-        while cursor <= end:
-            chunk_end = min(cursor + self.MAX_RANGE, end)
-            chunk_start_iso = _iso_utc(cursor)
-            chunk_end_iso = _iso_utc(chunk_end)
-            for offset in range(0, len(symbols), size):
-                batch = symbols[offset : offset + size]
-                result = self._run(
-                    self._session_call(
-                        self.TOOL,
-                        {
-                            "symbols": list(batch),
-                            "start_time": chunk_start_iso,
-                            "end_time": chunk_end_iso,
-                            "interval": "minute",
-                            "bounds": self.settings.bounds,
-                        },
-                        interactive=False,
-                    ),
-                    "historicals request",
-                )
-                payload = self._payload(result)
-                self._validate(
-                    payload,
-                    batch,
-                    chunk_start_iso,
-                    chunk_end_iso,
-                    allow_missing,
-                )
-                combined["data"]["results"].extend(payload["data"]["results"])
-            cursor = chunk_end + timedelta(seconds=1)
+        for offset in range(0, len(symbols), size):
+            batch = symbols[offset : offset + size]
+            for attempt in range(1, 4):
+                try:
+                    result = self._run(
+                        self._session_call(
+                            self.TOOL,
+                            {
+                                "symbols": list(batch),
+                                "start_time": start_iso,
+                                "end_time": end_iso,
+                                "interval": "minute",
+                                "bounds": self.settings.bounds,
+                            },
+                            interactive=False,
+                        ),
+                        "historicals request",
+                    )
+                    break
+                except RelayError:
+                    if attempt == 3:
+                        raise
+                    logging.warning(
+                        "historicals request failed for %s; retrying",
+                        ",".join(batch),
+                    )
+                    system_time.sleep(1)
+            payload = self._payload(result)
+            self._validate(payload, batch, start_iso, end_iso, allow_missing)
+            combined["data"]["results"].extend(payload["data"]["results"])
         return combined
 
     @staticmethod
@@ -812,18 +814,25 @@ class Collector:
         end: datetime,
         allow_missing: bool = False,
     ) -> Dict[str, int]:
-        start_iso = _iso_utc(start)
-        end_iso = _iso_utc(end)
-        logging.info(
-            "fetching %s from %s through %s",
-            ",".join(symbols),
-            start_iso,
-            end_iso,
-        )
-        payload = self.provider.fetch(
-            symbols, start_iso, end_iso, allow_missing=allow_missing
-        )
-        return self.store.store_payload(payload)
+        total = self._empty_stats()
+        cursor = start.astimezone(UTC)
+        end = end.astimezone(UTC)
+        while cursor <= end:
+            chunk_end = min(cursor + self.provider.MAX_RANGE, end)
+            start_iso = _iso_utc(cursor)
+            end_iso = _iso_utc(chunk_end)
+            logging.info(
+                "fetching %s from %s through %s",
+                ",".join(symbols),
+                start_iso,
+                end_iso,
+            )
+            payload = self.provider.fetch(
+                symbols, start_iso, end_iso, allow_missing=allow_missing
+            )
+            self._add_stats(total, self.store.store_payload(payload))
+            cursor = chunk_end + timedelta(seconds=1)
+        return total
 
     def poll(self, now: Optional[datetime] = None) -> Dict[str, int]:
         current = (now or datetime.now(UTC)).astimezone(UTC)
