@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS bars (
     volume     INTEGER NOT NULL,
     fetched_at INTEGER NOT NULL,
     PRIMARY KEY (ticker, ts)
-) WITHOUT ROWID;
+);
 
 CREATE TABLE IF NOT EXISTS events (
     ticker       TEXT    NOT NULL,
@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS events (
     CHECK (window_start <= event_ts AND event_ts <= window_end),
     CHECK (direction >= -1 AND direction <= 1),
     CHECK (strength >= 0)
-) WITHOUT ROWID;
+);
 
 CREATE TABLE IF NOT EXISTS trades (
     ticker TEXT    NOT NULL,
@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS trades (
     action TEXT    NOT NULL,
     PRIMARY KEY (ticker, algo, ts, action),
     CHECK (action IN ('entry', 'exit', 'exit_all'))
-) WITHOUT ROWID;
+);
 
 CREATE TABLE IF NOT EXISTS outputs (
     ticker      TEXT    NOT NULL,
@@ -43,13 +43,13 @@ CREATE TABLE IF NOT EXISTS outputs (
     output      TEXT    NOT NULL,
     computed_at INTEGER NOT NULL,
     PRIMARY KEY (ticker, ts, kind, config)
-) WITHOUT ROWID;
+);
 
 CREATE TABLE IF NOT EXISTS configs (
     version    TEXT    NOT NULL PRIMARY KEY,
     first_seen INTEGER NOT NULL,
     content    TEXT    NOT NULL
-) WITHOUT ROWID;
+);
 
 CREATE TABLE IF NOT EXISTS logs (
     ts      INTEGER NOT NULL,

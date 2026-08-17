@@ -84,16 +84,16 @@ separate task.
 
 ## 3. algo (service)
 
-One service runs the algos and contains the algo logic: a stateless core
-plus a loop. Input: the ticker list and the signal and algo definitions; the
+One service runs the algos and contains the algo logic: a core plus a
+loop. Input: the ticker list and the signal and algo definitions; the
 bar timestamps supply `t`. One call carries all work:
 `core(ticker, t, algos=None)` returns the signal values at `t` and the entry
 and exit points per algo.
 
-### The stateless core
+### The core
 
-- A pure function; no clock, no side effects. Data input: the bars and
-  events tables, read-only.
+- No clock, no side effects. Data input: the bars and events tables,
+  read-only.
 - Two layers with a strict rule: a signal (vwap, sma, and so on) queries
   bars, the events table, and other signals; an algo queries signal outputs
   and the outputs of other algos.
@@ -188,7 +188,7 @@ nothing. No service exposes an API; every view is served by the tables.
 | visual-aid signals, e.g. a shape forecast  | outputs, like any signal                |
 | service status, history, problems          | logs                                    |
 
-Ad-hoc views may call the core directly; a pure call is a read.
+Ad-hoc views may call the core directly; the call writes nothing.
 
 ## Service status (logs)
 
@@ -214,7 +214,7 @@ CREATE TABLE bars (
     volume     INTEGER NOT NULL,
     fetched_at INTEGER NOT NULL,  -- write time, epoch seconds, UTC
     PRIMARY KEY (ticker, ts)
-) WITHOUT ROWID;
+);
 
 CREATE TABLE events (
     ticker       TEXT    NOT NULL,
@@ -228,7 +228,7 @@ CREATE TABLE events (
     CHECK (window_start <= event_ts AND event_ts <= window_end),
     CHECK (direction >= -1 AND direction <= 1),
     CHECK (strength >= 0)
-) WITHOUT ROWID;
+);
 
 CREATE TABLE trades (
     ticker TEXT    NOT NULL,
@@ -237,7 +237,7 @@ CREATE TABLE trades (
     action TEXT    NOT NULL,
     PRIMARY KEY (ticker, algo, ts, action),
     CHECK (action IN ('entry', 'exit', 'exit_all'))
-) WITHOUT ROWID;
+);
 
 CREATE TABLE outputs (
     ticker      TEXT    NOT NULL,
@@ -247,13 +247,13 @@ CREATE TABLE outputs (
     output      TEXT    NOT NULL,  -- JSON
     computed_at INTEGER NOT NULL,  -- evaluation time, epoch seconds, UTC
     PRIMARY KEY (ticker, ts, kind, config)
-) WITHOUT ROWID;
+);
 
 CREATE TABLE configs (
     version    TEXT    NOT NULL PRIMARY KEY,  -- hash of the whole config file
     first_seen INTEGER NOT NULL,              -- epoch seconds, UTC
     content    TEXT    NOT NULL               -- the full config file, JSON
-) WITHOUT ROWID;
+);
 
 CREATE TABLE logs (
     ts      INTEGER NOT NULL,  -- epoch seconds, UTC
@@ -277,7 +277,7 @@ Notes:
   `outputs.computed_at`; the two columns exist for that rule.
 - `outputs` grows fastest; `logs` grows steadily.
 - `configs` maps every stored version hash back to the full config file.
-- `logs` is append-only and the one table with a rowid and an extra index.
+- `logs` is append-only and the one table with an extra index.
 - No other indexes beyond the primary keys. Config stays in files; the
   configs table is a record of versions, not the source of truth.
 
@@ -301,7 +301,7 @@ flowchart TB
     end
 
     subgraph ALGO [algo service]
-        LOOP[loop<br/>polls the db every 30 s] -- work rule --> CORE[stateless core<br/>data → signals → algos<br/>all config-defined]
+        LOOP[loop<br/>polls the db every 30 s] -- work rule --> CORE[core<br/>data → signals → algos<br/>all config-defined]
     end
 
     BT -. read only .-> CORE
