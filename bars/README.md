@@ -37,7 +37,7 @@ timestamps. The shared schema is in `../config/schema.sql`.
 
 Edit `../config/config.json`. It contains the ticker list, early-close dates,
 live polling window, 120-day initial backfill, 30-day sweep, and provider
-settings. The default live window is 04:00 Eastern through five minutes after
+settings. The default live window is 04:00 Eastern through four hours after
 the regular or configured early close. `bars.api_port` sets the loopback health
 API port. `bars.poll_catchup_days` bounds one live catch-up cycle.
 

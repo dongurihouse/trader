@@ -272,7 +272,7 @@ def load_settings(path: Path) -> Settings:
         ),
         early_close_days=early_close_days,
         after_close_minutes=_positive_int(
-            live.get("after_close_minutes", 5),
+            live.get("after_close_minutes", 240),
             "live_polling.after_close_minutes",
             0,
         ),

@@ -8,7 +8,7 @@
     "regular_open": "09:30",
     "regular_close": "16:00",
     "early_close": "13:00",
-    "after_close_minutes": 5,
+    "after_close_minutes": 240,
     "poll_seconds": 60
   },
   "bars": {
