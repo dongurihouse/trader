@@ -7,6 +7,7 @@ import csv
 import io
 import json
 import logging
+import math
 import os
 import re
 import signal
@@ -44,6 +45,28 @@ SCHEMA_PATH = ROOT.parent / "config" / "schema.sql"
 EASTERN = ZoneInfo("America/New_York")
 UTC = timezone.utc
 SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.-]{0,14}$")
+TECHNICAL_TOOL = "get_equity_technical_indicators"
+TECHNICAL_CHUNK_DAYS = 3
+TECHNICAL_DEFAULTS = {
+    "ema": {"period": 9},
+    "sma": {"period": 9},
+    "rsi": {"period": 14},
+    "momentum": {"period": 12},
+    "roc": {"period": 14},
+    "cci": {"period": 14},
+    "williams_r": {"period": 10},
+    "atr": {"period": 14},
+    "mfi": {"period": 14},
+    "adx": {"period": 10},
+    "donchian_channels": {"period": 20},
+    "bollinger_bands": {"period": 20, "num_std": 2},
+    "macd": {"fast_period": 12, "slow_period": 26, "signal_period": 9},
+    "keltner_channels": {"period": 20, "multiplier": 2},
+    "supertrend": {"period": 10, "multiplier": 3},
+    "vwap": {},
+    "obv": {},
+    "pivot_points": {"method": "classic"},
+}
 
 
 class ConfigError(ValueError):
@@ -56,6 +79,15 @@ class RelayError(RuntimeError):
 
 class RelayAuthRequired(RelayError):
     pass
+
+
+@dataclass(frozen=True)
+class TechnicalSpec:
+    name: str
+    params: str
+
+    def provider_params(self) -> dict:
+        return json.loads(self.params)
 
 
 @dataclass(frozen=True)
@@ -81,6 +113,7 @@ class Settings:
     oauth_callback_port: int
     timeout_seconds: int
     max_symbols_per_call: int
+    technical_specs: Tuple[TechnicalSpec, ...]
 
 
 def _positive_int(value, name: str, minimum: int = 1) -> int:
@@ -99,6 +132,67 @@ def _clock(value, name: str) -> time:
     if parsed.second or parsed.microsecond:
         raise ConfigError("%s must be precise to the minute" % name)
     return parsed
+
+
+def _technical_specs(raw: dict) -> Tuple[TechnicalSpec, ...]:
+    signals = raw.get("signals") or {}
+    if not isinstance(signals, dict):
+        raise ConfigError("signals must be a JSON object")
+    specs: List[TechnicalSpec] = []
+    seen = set()
+    for signal_name, node in signals.items():
+        if not isinstance(node, dict) or node.get("inputs") != ["bar_metadata"]:
+            continue
+        configured = node.get("params")
+        if not isinstance(configured, dict):
+            raise ConfigError("signals.%s.params must be a JSON object" % signal_name)
+        name = configured.get("name")
+        if name not in TECHNICAL_DEFAULTS:
+            raise ConfigError(
+                "signals.%s.params.name is not a supported provider indicator"
+                % signal_name
+            )
+        supplied = {key: value for key, value in configured.items() if key != "name"}
+        unknown = set(supplied) - set(TECHNICAL_DEFAULTS[name])
+        if unknown:
+            raise ConfigError(
+                "signals.%s has unsupported parameters: %s"
+                % (signal_name, ", ".join(sorted(unknown)))
+            )
+        parameters = dict(TECHNICAL_DEFAULTS[name])
+        parameters.update(supplied)
+        for key, value in parameters.items():
+            if key.endswith("period") or key == "period":
+                if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                    raise ConfigError(
+                        "signals.%s.params.%s must be a positive integer"
+                        % (signal_name, key)
+                    )
+            elif key in ("num_std", "multiplier"):
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                    or value <= 0
+                ):
+                    raise ConfigError(
+                        "signals.%s.params.%s must be a positive number"
+                        % (signal_name, key)
+                    )
+            elif key == "method" and value != "classic":
+                raise ConfigError(
+                    "signals.%s.params.method must be 'classic'" % signal_name
+                )
+        if name == "macd" and parameters["fast_period"] >= parameters["slow_period"]:
+            raise ConfigError(
+                "signals.%s fast_period must be less than slow_period" % signal_name
+            )
+        encoded = json.dumps(parameters, separators=(",", ":"), sort_keys=True)
+        key = (name, encoded)
+        if key not in seen:
+            seen.add(key)
+            specs.append(TechnicalSpec(name=name, params=encoded))
+    return tuple(specs)
 
 
 def load_settings(path: Path) -> Settings:
@@ -220,6 +314,7 @@ def load_settings(path: Path) -> Settings:
             provider.get("max_symbols_per_call", 3),
             "bars.provider.max_symbols_per_call",
         ),
+        technical_specs=_technical_specs(raw),
     )
 
 
@@ -263,6 +358,12 @@ class BarRow:
     interpolated: bool
 
 
+@dataclass(frozen=True)
+class MetadataPoint:
+    ts: int
+    value: str
+
+
 def _bar_row(ticker: str, raw: object) -> BarRow:
     if not isinstance(ticker, str) or not SYMBOL_RE.fullmatch(ticker):
         raise RelayError("Robinhood result has an invalid symbol")
@@ -284,6 +385,73 @@ def _bar_row(ticker: str, raw: object) -> BarRow:
         )
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         raise RelayError("Robinhood returned a malformed bar") from exc
+
+
+def _metadata_points(
+    payload: object,
+    ticker: str,
+    spec: TechnicalSpec,
+    start: datetime,
+    end: datetime,
+) -> List[MetadataPoint]:
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict) or data.get("symbol") != ticker:
+        raise RelayError("Robinhood indicator payload has the wrong symbol")
+    if data.get("interval") != "minute":
+        raise RelayError("Robinhood indicator payload has the wrong interval")
+    indicators = data.get("indicators")
+    if not isinstance(indicators, list) or len(indicators) != 1:
+        raise RelayError("Robinhood indicator payload must contain one indicator")
+    indicator = indicators[0]
+    if not isinstance(indicator, dict) or indicator.get("type") != spec.name:
+        raise RelayError("Robinhood indicator payload has the wrong type")
+    series = indicator.get("series")
+    if not isinstance(series, list):
+        raise RelayError("Robinhood indicator payload is missing its series")
+
+    points: List[MetadataPoint] = []
+    for raw in series:
+        if not isinstance(raw, dict):
+            raise RelayError("Robinhood returned a malformed indicator point")
+        try:
+            timestamp = _parse_iso(raw["begins_at"])
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise RelayError("Robinhood returned a malformed indicator point") from exc
+        if timestamp < start or timestamp > end:
+            raise RelayError(
+                "%s %s point %s is outside [%s, %s]"
+                % (
+                    ticker,
+                    spec.name,
+                    _iso_utc(timestamp),
+                    _iso_utc(start),
+                    _iso_utc(end),
+                )
+            )
+        values = {}
+        for name, value in raw.items():
+            if name == "begins_at" or value is None:
+                continue
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+            ):
+                raise RelayError("Robinhood returned a non-numeric indicator value")
+            values[name] = value
+        if values:
+            points.append(
+                MetadataPoint(
+                    ts=_epoch(timestamp),
+                    value=json.dumps(
+                        values,
+                        allow_nan=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                )
+            )
+    return points
 
 
 class FileTokenStorage(TokenStorage):
@@ -556,8 +724,10 @@ class RobinhoodClient:
         except Exception as exc:
             raise self._relay_error(exc, action) from exc
 
-    def _session_call(self, name: str, arguments: dict):
-        return self._request("historicals request", name, arguments)
+    def _session_call(
+        self, name: str, arguments: dict, action: str = "historicals request"
+    ):
+        return self._request(action, name, arguments)
 
     def authorize(self) -> List[str]:
         with self.connection(interactive=True):
@@ -601,6 +771,35 @@ class RobinhoodClient:
     ) -> dict:
         with self.connection():
             return self._fetch(symbols, start_iso, end_iso)
+
+    def fetch_technical(
+        self,
+        ticker: str,
+        spec: TechnicalSpec,
+        start_iso: str,
+        end_iso: str,
+    ) -> dict:
+        start = _parse_iso(start_iso)
+        end = _parse_iso(end_iso)
+        arguments = {
+            "symbol": ticker,
+            "type": spec.name,
+            "interval": "minute",
+            "start_time": start_iso,
+            "end_time": end_iso,
+            "bounds": self.settings.bounds,
+            "output": "series",
+        }
+        arguments.update(spec.provider_params())
+        with self.connection():
+            result = self._session_call(
+                TECHNICAL_TOOL,
+                arguments,
+                action="technical indicator request",
+            )
+        payload = self._payload(result)
+        _metadata_points(payload, ticker, spec, start, end)
+        return payload
 
     def _fetch(
         self,
@@ -785,6 +984,54 @@ class BarStore:
                 )
         stats["written"] = len(rows)
         return stats
+
+    def store_metadata(
+        self,
+        payload: dict,
+        ticker: str,
+        spec: TechnicalSpec,
+        start: datetime,
+        end: datetime,
+    ) -> Dict[str, int]:
+        points = _metadata_points(payload, ticker, spec, start, end)
+        allowed = {
+            row["ts"]
+            for row in self.connection.execute(
+                "SELECT ts FROM bars WHERE ticker=? AND ts BETWEEN ? AND ?",
+                (ticker, _epoch(start), _epoch(end)),
+            ).fetchall()
+        }
+        fetched_at = _epoch(datetime.now(UTC))
+        rows = [
+            (ticker, point.ts, spec.name, spec.params, point.value, fetched_at)
+            for point in points
+            if point.ts in allowed
+        ]
+        with self.transaction() as connection:
+            connection.executemany(
+                """
+                INSERT INTO bar_metadata (
+                    ticker, ts, name, params, value, fetched_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(ticker, ts, name, params) DO UPDATE SET
+                    value=excluded.value,
+                    fetched_at=excluded.fetched_at
+                """,
+                rows,
+            )
+        return {"received": len(points), "written": len(rows)}
+
+    def latest_metadata(
+        self, ticker: str, spec: TechnicalSpec, refreshed_after: int
+    ) -> Optional[int]:
+        row = self.connection.execute(
+            """
+            SELECT MAX(ts) AS ts FROM bar_metadata
+            WHERE ticker=? AND name=? AND params=? AND fetched_at>=?
+            """,
+            (ticker, spec.name, spec.params, refreshed_after),
+        ).fetchone()
+        return row["ts"]
 
     def ensure_jobs(
         self,
@@ -1003,6 +1250,57 @@ class Collector:
                 day += timedelta(days=1)
         return total
 
+    def fetch_metadata_range(
+        self, start: datetime, end: datetime, refreshed_after: int
+    ) -> Dict[str, int]:
+        total = {"requests": 0, "received": 0, "written": 0}
+        start = start.astimezone(UTC)
+        end = end.astimezone(UTC)
+        if not self.settings.technical_specs:
+            return total
+        with self.provider.connection():
+            for spec in self.settings.technical_specs:
+                for ticker in self.settings.tickers:
+                    latest = self.store.latest_metadata(
+                        ticker, spec, refreshed_after
+                    )
+                    cursor = start
+                    if latest is not None:
+                        cursor = max(
+                            cursor,
+                            datetime.fromtimestamp(latest + 60, UTC),
+                        )
+                    while cursor < end:
+                        chunk_end = min(
+                            end,
+                            cursor + timedelta(days=TECHNICAL_CHUNK_DAYS),
+                        )
+                        logging.info(
+                            "fetching %s %s from %s through %s",
+                            ticker,
+                            spec.name,
+                            _iso_utc(cursor),
+                            _iso_utc(chunk_end),
+                        )
+                        payload = self.provider.fetch_technical(
+                            ticker,
+                            spec,
+                            _iso_utc(cursor),
+                            _iso_utc(chunk_end),
+                        )
+                        stats = self.store.store_metadata(
+                            payload,
+                            ticker,
+                            spec,
+                            cursor,
+                            chunk_end,
+                        )
+                        total["requests"] += 1
+                        total["received"] += stats["received"]
+                        total["written"] += stats["written"]
+                        cursor = chunk_end
+        return total
+
     def _run_jobs(
         self, kind: str, target: str, jobs: Sequence[JobState]
     ) -> Dict[str, int]:
@@ -1059,10 +1357,16 @@ class Collector:
         scheduled_day: Optional[date] = None,
     ) -> Dict[str, int]:
         current = (now or datetime.now(UTC)).astimezone(UTC)
+        metadata_refreshed_after = _epoch(
+            datetime.combine(datetime.now(UTC).date(), time(0), tzinfo=UTC)
+        )
         self.backfill_pending(current)
         start = current - timedelta(days=self.settings.sweep_days)
-        if scheduled_day is None:
+        scheduled = scheduled_day is not None
+        if not scheduled:
             stats = self.fetch_range(self.settings.tickers, start, current)
+            metadata_start = start
+            metadata_end = current
         else:
             target = scheduled_day.isoformat()
             self.store.ensure_jobs(
@@ -1091,11 +1395,20 @@ class Collector:
                 )
             else:
                 stats = self._empty_stats()
+            metadata_start = datetime.fromtimestamp(sweep_job.window_start, UTC)
+            metadata_end = datetime.fromtimestamp(sweep_job.window_end, UTC)
+        metadata_stats = self.fetch_metadata_range(
+            metadata_start,
+            metadata_end,
+            metadata_refreshed_after,
+        )
+        if scheduled:
             self.store.complete_jobs("sweep", ("all",), target)
         prefix = "sweep complete"
         if scheduled_day is not None:
             prefix += " day=%s" % scheduled_day.isoformat()
         self._record(prefix, stats)
+        self._record_metadata(metadata_stats)
         return stats
 
     def backfill(
@@ -1162,6 +1475,14 @@ class Collector:
                 stats["written"],
                 stats["interpolated"],
             )
+        )
+        self.store.append_log("info", message)
+        logging.info(message)
+
+    def _record_metadata(self, stats: Dict[str, int]) -> None:
+        message = (
+            "metadata sweep complete requests=%d received=%d written=%d"
+            % (stats["requests"], stats["received"], stats["written"])
         )
         self.store.append_log("info", message)
         logging.info(message)

@@ -14,6 +14,16 @@ CREATE TABLE IF NOT EXISTS bars (
     CHECK (interpolated IN (0, 1))
 );
 
+CREATE TABLE IF NOT EXISTS bar_metadata (
+    ticker     TEXT    NOT NULL,
+    ts         INTEGER NOT NULL,
+    name       TEXT    NOT NULL,
+    params     TEXT    NOT NULL,
+    value      TEXT    NOT NULL,
+    fetched_at INTEGER NOT NULL,
+    PRIMARY KEY (ticker, ts, name, params)
+);
+
 CREATE TABLE IF NOT EXISTS bar_jobs (
     kind         TEXT    NOT NULL,
     scope        TEXT    NOT NULL,

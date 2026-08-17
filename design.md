@@ -70,15 +70,16 @@ Nightly sweep:
 
 Bar metadata:
 
-- The provider also computes per-bar values over the same bars, such as rsi
-  and macd. Bars pulls the values that config declares and writes them to
-  `bar_metadata`.
+- The provider also computes per-bar values over the same bars, such as RSI,
+  MACD, Bollinger Bands, ATR, VWAP, ADX, and channels. Bars pulls the values
+  that config declares and writes them to `bar_metadata`.
 - A row is one value for one bar. The key is ticker, timestamp, name, and
   params, so two periods of the same name live side by side.
-- Bars fetches a range and stores the series, the same way it fetches and
-  stores bars. The cadence is the sweep, not the minute poll.
+- Bars fetches a range and stores the series during the sweep, not the minute
+  poll. Every sweep refreshes the trailing sweep window. A failed sweep resumes
+  after its last metadata chunk from that run.
 - Bars is the only process that holds the provider token. No other service
-  calls the provider, and no service calls bars.
+  calls the provider, and no service calls Bars.
 
 ## 2. events (service)
 

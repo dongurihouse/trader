@@ -36,12 +36,17 @@ warnings, and errors in `logs`. It does not write heartbeat or idle-cycle rows.
 }
 ```
 
-`inputs` is a list. A signal can read `bars`, `events`, and signals. An algo can
-read signals and algos. Presence in the map means enabled. Remove a node and
-bump the version to disable it. `function` defaults to the node name, so only a
-node whose name differs from its code function needs that field. Dependency
-cycles, unknown functions, missing nodes, and duplicate signal/algo names are
-rejected before evaluation.
+`inputs` is a list. A signal can read `bars`, `bar_metadata`, `events`, and
+signals. An algo can read signals and algos. Presence in the map means enabled.
+Remove a node and bump the version to disable it. `function` defaults to the
+node name, so only a node whose name differs from its code function needs that
+field. Dependency cycles, unknown functions, missing nodes, and duplicate
+signal/algo names are rejected before evaluation.
+
+A signal with `"inputs": ["bar_metadata"]` reads the exact provider value for
+its ticker and timestamp. Its `params.name` selects the indicator and the other
+params select its parameter set. Single-output and multi-output indicators both
+return JSON objects.
 
 The first service slice has one signal function:
 

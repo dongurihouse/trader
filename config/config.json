@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "database": "../data/trader.sqlite3",
   "tickers": ["SNDK", "SNXX", "SNDQ", "MU", "SPY", "QQQ", "SOXX"],
   "early_closes": ["2026-11-27", "2026-12-24"],
@@ -32,6 +32,84 @@
     "evaluation_days": 60,
     "poll_seconds": 30
   },
-  "signals": {},
+  "signals": {
+    "ema9": {
+      "inputs": ["bar_metadata"],
+      "params": {"name": "ema", "period": 9}
+    },
+    "sma9": {
+      "inputs": ["bar_metadata"],
+      "params": {"name": "sma", "period": 9}
+    },
+    "rsi14": {
+      "inputs": ["bar_metadata"],
+      "params": {"name": "rsi", "period": 14}
+    },
+    "momentum12": {
+      "inputs": ["bar_metadata"],
+      "params": {"name": "momentum", "period": 12}
+    },
+    "roc14": {
+      "inputs": ["bar_metadata"],
+      "params": {"name": "roc", "period": 14}
+    },
+    "cci14": {
+      "inputs": ["bar_metadata"],
+      "params": {"name": "cci", "period": 14}
+    },
+    "williams_r10": {
+      "inputs": ["bar_metadata"],
+      "params": {"name": "williams_r", "period": 10}
+    },
+    "atr14": {
+      "inputs": ["bar_metadata"],
+      "params": {"name": "atr", "period": 14}
+    },
+    "mfi14": {
+      "inputs": ["bar_metadata"],
+      "params": {"name": "mfi", "period": 14}
+    },
+    "adx10": {
+      "inputs": ["bar_metadata"],
+      "params": {"name": "adx", "period": 10}
+    },
+    "donchian20": {
+      "inputs": ["bar_metadata"],
+      "params": {"name": "donchian_channels", "period": 20}
+    },
+    "bollinger20_2": {
+      "inputs": ["bar_metadata"],
+      "params": {"name": "bollinger_bands", "period": 20, "num_std": 2}
+    },
+    "macd12_26_9": {
+      "inputs": ["bar_metadata"],
+      "params": {
+        "name": "macd",
+        "fast_period": 12,
+        "slow_period": 26,
+        "signal_period": 9
+      }
+    },
+    "keltner20_2": {
+      "inputs": ["bar_metadata"],
+      "params": {"name": "keltner_channels", "period": 20, "multiplier": 2}
+    },
+    "supertrend10_3": {
+      "inputs": ["bar_metadata"],
+      "params": {"name": "supertrend", "period": 10, "multiplier": 3}
+    },
+    "vwap": {
+      "inputs": ["bar_metadata"],
+      "params": {"name": "vwap"}
+    },
+    "obv": {
+      "inputs": ["bar_metadata"],
+      "params": {"name": "obv"}
+    },
+    "pivot_classic": {
+      "inputs": ["bar_metadata"],
+      "params": {"name": "pivot_points", "method": "classic"}
+    }
+  },
   "algos": {}
 }

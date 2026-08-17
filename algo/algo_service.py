@@ -27,6 +27,26 @@ SCHEMA = ROOT.parent / "config" / "schema.sql"
 UTC = timezone.utc
 SYMBOL = re.compile(r"^[A-Z][A-Z0-9.-]{0,14}$")
 BAR_FIELDS = {"open", "high", "low", "close", "volume"}
+METADATA_DEFAULTS = {
+    "ema": {"period": 9},
+    "sma": {"period": 9},
+    "rsi": {"period": 14},
+    "momentum": {"period": 12},
+    "roc": {"period": 14},
+    "cci": {"period": 14},
+    "williams_r": {"period": 10},
+    "atr": {"period": 14},
+    "mfi": {"period": 14},
+    "adx": {"period": 10},
+    "donchian_channels": {"period": 20},
+    "bollinger_bands": {"period": 20, "num_std": 2},
+    "macd": {"fast_period": 12, "slow_period": 26, "signal_period": 9},
+    "keltner_channels": {"period": 20, "multiplier": 2},
+    "supertrend": {"period": 10, "multiplier": 3},
+    "vwap": {},
+    "obv": {},
+    "pivot_points": {"method": "classic"},
+}
 
 
 class ConfigError(ValueError):
@@ -115,7 +135,7 @@ def _check_dependencies(settings: Settings) -> None:
         node = nodes[name]
         visiting.add(key)
         for target in node["inputs"]:
-            if layer == "signal" and target in ("bars", "events"):
+            if layer == "signal" and target in ("bars", "bar_metadata", "events"):
                 continue
             if target in settings.signals:
                 visit("signal", target)
@@ -187,7 +207,9 @@ def load_settings(
     if set(settings.signals) & set(settings.algos):
         raise ConfigError("signal and algo names must be unique")
     unknown_signals = {
-        node["function"] for node in settings.signals.values()
+        node["function"]
+        for node in settings.signals.values()
+        if node["inputs"] != ["bar_metadata"]
     } - set(SIGNAL_FUNCTIONS)
     unknown_algos = {
         node["function"] for node in settings.algos.values()
@@ -268,6 +290,30 @@ def _signal_sma(connection, ticker, ts, parameters, inputs) -> Optional[float]:
     if len(rows) < period:
         return None
     return sum(float(row[field]) for row in rows) / period
+
+
+def _signal_metadata(connection, ticker, ts, parameters, inputs) -> Any:
+    if list(inputs) != ["bar_metadata"]:
+        raise EvaluationError("provider metadata input must be ['bar_metadata']")
+    name = parameters.get("name")
+    if name not in METADATA_DEFAULTS:
+        raise EvaluationError("name must be a supported provider indicator")
+    supplied = {key: value for key, value in parameters.items() if key != "name"}
+    unknown = set(supplied) - set(METADATA_DEFAULTS[name])
+    if unknown:
+        raise EvaluationError(
+            "unsupported provider parameters: %s" % ", ".join(sorted(unknown))
+        )
+    normalized = dict(METADATA_DEFAULTS[name])
+    normalized.update(supplied)
+    row = connection.execute(
+        """
+        SELECT value FROM bar_metadata
+        WHERE ticker=? AND ts=? AND name=? AND params=?
+        """,
+        (ticker, ts, name, _json(normalized)),
+    ).fetchone()
+    return json.loads(row["value"]) if row else None
 
 
 SIGNAL_FUNCTIONS: dict[str, Callable[..., Any]] = {
@@ -360,13 +406,18 @@ def run_core(
         node = settings.signals[name]
         visiting.add(name)
         inputs = {
-            target: None if target in ("bars", "events") else evaluate_signal(target)
+            target: None
+            if target in ("bars", "bar_metadata", "events")
+            else evaluate_signal(target)
             for target in node["inputs"]
         }
         try:
-            value = SIGNAL_FUNCTIONS[node["function"]](
-                connection, ticker, ts, node["params"], inputs
+            function = (
+                _signal_metadata
+                if node["inputs"] == ["bar_metadata"]
+                else SIGNAL_FUNCTIONS[node["function"]]
             )
+            value = function(connection, ticker, ts, node["params"], inputs)
             _json(value)
         except Exception as exc:
             raise EvaluationError("signal %s failed: %s" % (name, exc)) from exc
