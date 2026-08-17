@@ -4,16 +4,33 @@ This is a local, read-only market chart for the shared trading database. It read
 the database path and ticker list from `config/config.json`. It does not write to
 SQLite and does not call any service.
 
-## Run
+## Install as a service
+
+Install the dashboard as a macOS LaunchAgent:
+
+```sh
+make -C dash install
+```
+
+The service starts at login, restarts after a crash, binds to `0.0.0.0:8790`,
+and does not depend on a terminal staying open. Manage it with:
+
+```sh
+make -C dash status
+make -C dash restart
+make -C dash uninstall
+```
+
+Open <http://127.0.0.1:8790> from this computer, or use the computer's network
+address from another device.
+
+## Run in a terminal
 
 From the repository root:
 
 ```sh
 python3 dash/server.py --host 0.0.0.0
 ```
-
-Then open <http://127.0.0.1:8790> from this computer, or use the computer's
-network address from another device.
 
 Use another config file or port when needed:
 
@@ -27,7 +44,8 @@ and refreshes the live view every 30 seconds.
 
 ## Chart
 
-- Minute OHLCV chart for one day, five sessions, one month, or all stored data.
+- Opens with all stored minute data across past and current sessions.
+- Optional one-day, five-session, and one-month ranges.
 - Ticker switching from the configured ticker list.
 - Current price, session change, open, high, low, and volume.
 - Automatic refresh every 30 seconds.

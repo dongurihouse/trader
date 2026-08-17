@@ -3,7 +3,7 @@ const $ = (selector) => document.querySelector(selector);
 const state = {
   overview: null,
   ticker: null,
-  range: "1D",
+  range: "ALL",
   bars: null,
   chartRequest: 0,
 };
