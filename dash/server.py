@@ -135,8 +135,8 @@ class DashboardData:
     def bars(self, ticker: str, span: str) -> dict[str, Any]:
         ticker = self._valid_symbol(ticker)
         span = span.upper()
-        if span not in {"1D", "5D", "1M", "ALL"}:
-            raise DashboardError("Range must be 1D, 5D, 1M, or ALL")
+        if span not in {"1D", "5D", "1M", "3M", "120D", "ALL"}:
+            raise DashboardError("Range must be 1D, 5D, 1M, 3M, 120D, or ALL")
 
         with self.connection() as connection:
             latest = connection.execute(
@@ -163,11 +163,9 @@ class DashboardData:
                 """,
                 (ticker, start),
             ).fetchall()
-            # The All view is the literal stored history: one returned point for
-            # every minute row. Shorter ranges retain the render cap so they stay
-            # responsive if the configured collection window grows later.
-            render_limit = len(rows) if span == "ALL" else 1400
-            compacted = self._compact_bars(rows, limit=render_limit)
+            # Every range returns the literal stored minute history. The chart's
+            # client-side viewport handles display density, zoom, and panning.
+            chart_bars = self._compact_bars(rows, limit=max(1, len(rows)))
             trades = [
                 dict(row)
                 for row in connection.execute(
@@ -200,7 +198,7 @@ class DashboardData:
             "end": int(rows[-1]["ts"]) if rows else None,
             "source_count": len(rows),
             "interpolated_count": sum(int(row["interpolated"]) for row in rows),
-            "bars": compacted,
+            "bars": chart_bars,
             "trades": trades,
             "events": events,
         }
@@ -610,8 +608,9 @@ class DashboardData:
     ) -> int:
         if span == "ALL":
             return 0
-        if span == "1M":
-            return latest - (30 * 86_400)
+        if span in {"1M", "3M", "120D"}:
+            days = {"1M": 30, "3M": 90, "120D": 120}[span]
+            return latest - (days * 86_400)
         session_count = 1 if span == "1D" else 5
         row = connection.execute(
             """

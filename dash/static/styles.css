@@ -753,6 +753,8 @@ h1 em {
 .chart-controls {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -1756,6 +1758,15 @@ pre {
   .style-control button,
   .zoom-control button {
     flex: 1;
+  }
+
+  .range-control {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .range-control button {
+    min-width: 0;
   }
 
   .chart-summary {

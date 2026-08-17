@@ -30,6 +30,12 @@ const easternClock = new Intl.DateTimeFormat("en-US", {
   minute: "2-digit",
 });
 
+const easternDay = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  month: "short",
+  day: "numeric",
+});
+
 const localUpdated = new Intl.DateTimeFormat("en-US", {
   hour: "numeric",
   minute: "2-digit",
@@ -72,6 +78,16 @@ function formatSigned(value, suffix = "") {
 
 function dateFromEpoch(epoch) {
   return new Date(Number(epoch) * 1000);
+}
+
+function formatCoverage(payload) {
+  if (!payload?.start || !payload?.end) return "—";
+  const days = Math.max(1, Math.ceil((Number(payload.end) - Number(payload.start)) / 86_400));
+  const start = easternDay.format(dateFromEpoch(payload.start));
+  const end = easternDay.format(dateFromEpoch(payload.end));
+  return start === end
+    ? `${integerFormat.format(days)}d · ${start}`
+    : `${integerFormat.format(days)}d · ${start}–${end}`;
 }
 
 function showToast(message) {
@@ -614,6 +630,7 @@ async function loadBars({ quiet = false } = {}) {
     state.bars = payload;
     chart.setData(payload);
     $("#chart-empty").hidden = payload.bars.length > 0;
+    $("#stat-coverage").textContent = formatCoverage(payload);
   } catch (error) {
     if (request === state.chartRequest) showToast(error.message);
   } finally {

@@ -46,7 +46,8 @@ loopback port configured by `bars.api_port`.
 ## Chart
 
 - Opens with all stored minute data across past and current sessions.
-- Optional one-day, five-session, and one-month ranges.
+- One-day, five-session, one-month, three-month, 120-day, and all-history ranges.
+- Minute-level bars remain available in every range for zooming and panning.
 - Switchable line and candlestick chart styles.
 - Time zoom with the `+`, `−`, and Reset controls or the mouse wheel.
 - Horizontal wheel, trackpad, Shift+wheel, and drag panning across the loaded minute history.
