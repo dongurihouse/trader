@@ -37,9 +37,8 @@ from mcp.shared.auth import (
 from pydantic import AnyUrl
 
 ROOT = Path(__file__).resolve().parent
-REPO_ROOT = ROOT.parent
-DEFAULT_CONFIG_PATH = REPO_ROOT / "config.json"
-SCHEMA_PATH = REPO_ROOT / "schema.sql"
+DEFAULT_CONFIG_PATH = ROOT / "config.json"
+SCHEMA_PATH = ROOT / "schema.sql"
 EASTERN = ZoneInfo("America/New_York")
 UTC = timezone.utc
 SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.-]{0,14}$")
@@ -151,7 +150,7 @@ def load_settings(path: Path) -> Settings:
     if not database.is_absolute():
         database = path.parent / database
     oauth_store_value = provider.get(
-        "oauth_store", "bars/data/robinhood_oauth.json"
+        "oauth_store", "data/robinhood_oauth.json"
     )
     oauth_store = Path(oauth_store_value).expanduser()
     if not oauth_store.is_absolute():
@@ -369,6 +368,7 @@ def _contains_exception(error: BaseException, wanted_type) -> bool:
 
 class RobinhoodClient:
     TOOL = "get_equity_historicals"
+    MAX_RANGE = timedelta(days=1) - timedelta(seconds=1)
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -478,24 +478,39 @@ class RobinhoodClient:
         end_iso: str,
         allow_missing: bool = False,
     ) -> dict:
+        start = _parse_iso(start_iso)
+        end = _parse_iso(end_iso)
+        if end - start > self.MAX_RANGE:
+            raise RelayError("minute request exceeds the one-day provider limit")
         combined = {"data": {"results": []}}
         size = self.settings.max_symbols_per_call
         for offset in range(0, len(symbols), size):
             batch = symbols[offset : offset + size]
-            result = self._run(
-                self._session_call(
-                    self.TOOL,
-                    {
-                        "symbols": list(batch),
-                        "start_time": start_iso,
-                        "end_time": end_iso,
-                        "interval": "minute",
-                        "bounds": self.settings.bounds,
-                    },
-                    interactive=False,
-                ),
-                "historicals request",
-            )
+            for attempt in range(1, 4):
+                try:
+                    result = self._run(
+                        self._session_call(
+                            self.TOOL,
+                            {
+                                "symbols": list(batch),
+                                "start_time": start_iso,
+                                "end_time": end_iso,
+                                "interval": "minute",
+                                "bounds": self.settings.bounds,
+                            },
+                            interactive=False,
+                        ),
+                        "historicals request",
+                    )
+                    break
+                except RelayError:
+                    if attempt == 3:
+                        raise
+                    logging.warning(
+                        "historicals request failed for %s; retrying",
+                        ",".join(batch),
+                    )
+                    system_time.sleep(1)
             payload = self._payload(result)
             self._validate(payload, batch, start_iso, end_iso, allow_missing)
             combined["data"]["results"].extend(payload["data"]["results"])
@@ -806,18 +821,25 @@ class Collector:
         end: datetime,
         allow_missing: bool = False,
     ) -> Dict[str, int]:
-        start_iso = _iso_utc(start)
-        end_iso = _iso_utc(end)
-        logging.info(
-            "fetching %s from %s through %s",
-            ",".join(symbols),
-            start_iso,
-            end_iso,
-        )
-        payload = self.provider.fetch(
-            symbols, start_iso, end_iso, allow_missing=allow_missing
-        )
-        return self.store.store_payload(payload)
+        total = self._empty_stats()
+        cursor = start.astimezone(UTC)
+        end = end.astimezone(UTC)
+        while cursor <= end:
+            chunk_end = min(cursor + self.provider.MAX_RANGE, end)
+            start_iso = _iso_utc(cursor)
+            end_iso = _iso_utc(chunk_end)
+            logging.info(
+                "fetching %s from %s through %s",
+                ",".join(symbols),
+                start_iso,
+                end_iso,
+            )
+            payload = self.provider.fetch(
+                symbols, start_iso, end_iso, allow_missing=allow_missing
+            )
+            self._add_stats(total, self.store.store_payload(payload))
+            cursor = chunk_end + timedelta(seconds=1)
+        return total
 
     def poll(self, now: Optional[datetime] = None) -> Dict[str, int]:
         current = (now or datetime.now(UTC)).astimezone(UTC)
@@ -996,6 +1018,7 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     arguments = _parser().parse_args(argv)
     _configure_logging(arguments.verbose)
+    store = None
     try:
         settings = load_settings(arguments.config.resolve())
         store = BarStore(settings.database)
@@ -1057,6 +1080,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
     except (ConfigError, RelayError, ValueError) as exc:
         logging.error("%s", exc)
+        if store is not None:
+            try:
+                store.append_log("error", "%s failed: %s" % (arguments.command, exc))
+            except sqlite3.Error:
+                logging.exception("could not write failure to logs table")
         return 1
 
 

@@ -17,7 +17,7 @@
     "provider": {
       "url": "https://agent.robinhood.com/mcp/trading",
       "bounds": "extended",
-      "oauth_store": "bars/data/robinhood_oauth.json",
+      "oauth_store": "data/robinhood_oauth.json",
       "oauth_callback_port": 8765,
       "timeout_seconds": 300,
       "max_symbols_per_call": 3
