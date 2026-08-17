@@ -1031,38 +1031,17 @@ h1 em {
   white-space: nowrap;
 }
 
-.chart-summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 22px;
-  margin-top: 27px;
-  padding-bottom: 18px;
-  border-bottom: 1px solid var(--line);
-}
-
-.chart-summary span,
 .detail-meta span {
   display: flex;
   align-items: baseline;
   gap: 7px;
 }
 
-.chart-summary small,
 .detail-meta small {
   color: var(--subtle);
   font-family: var(--mono);
   font-size: 0.57rem;
   letter-spacing: 0.1em;
-}
-
-.chart-summary b {
-  font-family: var(--mono);
-  font-size: 0.69rem;
-  font-weight: 580;
-}
-
-.chart-density {
-  margin-left: auto;
 }
 
 .chart-stage {
@@ -2092,15 +2071,6 @@ pre {
 
   .zoom-control {
     width: auto;
-  }
-
-  .chart-summary {
-    gap: 11px 17px;
-    margin-top: 19px;
-  }
-
-  .chart-density {
-    display: none !important;
   }
 
   .chart-stage {

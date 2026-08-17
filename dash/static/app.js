@@ -33,12 +33,6 @@ const easternClock = new Intl.DateTimeFormat("en-US", {
   minute: "2-digit",
 });
 
-const easternDay = new Intl.DateTimeFormat("en-US", {
-  timeZone: "America/New_York",
-  month: "short",
-  day: "numeric",
-});
-
 const easternDateKeyFormat = new Intl.DateTimeFormat("en-US", {
   timeZone: "America/New_York",
   year: "numeric",
@@ -143,16 +137,6 @@ function sessionDateRanges(bars) {
     }
   });
   return sessions;
-}
-
-function formatCoverage(payload) {
-  if (!payload?.start || !payload?.end) return "—";
-  const days = Math.max(1, Math.ceil((Number(payload.end) - Number(payload.start)) / 86_400));
-  const start = easternDay.format(dateFromEpoch(payload.start));
-  const end = easternDay.format(dateFromEpoch(payload.end));
-  return start === end
-    ? `${integerFormat.format(days)}d · ${start}`
-    : `${integerFormat.format(days)}d · ${start}–${end}`;
 }
 
 function showToast(message) {
@@ -811,21 +795,9 @@ class PriceChart {
   }
 }
 
-function renderViewport({ visible, total, canZoomIn, canZoomOut, firstDate, lastDate }) {
-  const payload = state.bars;
-  const isFullView = visible === total;
-  if (payload?.source_count === payload?.bars?.length) {
-    $("#stat-density").textContent = isFullView
-      ? `${integerFormat.format(total)} × 1 min`
-      : `${integerFormat.format(visible)} of ${integerFormat.format(total)} min`;
-  } else {
-    $("#stat-density").textContent = isFullView
-      ? `${integerFormat.format(payload?.source_count || 0)} min → ${integerFormat.format(total)} points`
-      : `${integerFormat.format(visible)} of ${integerFormat.format(total)} points`;
-  }
+function renderViewport({ canZoomIn, canZoomOut, firstDate, lastDate }) {
   $("#zoom-in").disabled = !canZoomIn;
   $("#zoom-out").disabled = !canZoomOut;
-  $("#zoom-reset").disabled = !canZoomOut;
   renderDateSelection(firstDate && firstDate === lastDate ? firstDate : null);
 }
 
@@ -987,10 +959,6 @@ function renderQuote() {
     ? `${formatSigned(quote.change)}  ${formatSigned(quote.change_pct, "%")}`
     : "No bars";
   change.classList.toggle("down", Number(quote?.change) < 0);
-  $("#stat-open").textContent = quote?.available ? formatPrice(quote.open) : "—";
-  $("#stat-high").textContent = quote?.available ? formatPrice(quote.high) : "—";
-  $("#stat-low").textContent = quote?.available ? formatPrice(quote.low) : "—";
-  $("#stat-volume").textContent = quote?.available ? compactFormat.format(quote.volume) : "—";
 }
 
 async function selectTicker(ticker) {
@@ -1018,7 +986,6 @@ async function loadBars({ quiet = false } = {}) {
       focusDate(state.sessions.at(-1).date);
     }
     $("#chart-empty").hidden = payload.bars.length > 0;
-    $("#stat-coverage").textContent = formatCoverage(payload);
   } catch (error) {
     if (request === state.chartRequest) showToast(error.message);
   } finally {
@@ -1098,7 +1065,6 @@ document.addEventListener("keydown", (event) => {
 
 $("#zoom-in").addEventListener("click", () => chart.zoom(0.5));
 $("#zoom-out").addEventListener("click", () => chart.zoom(2));
-$("#zoom-reset").addEventListener("click", () => chart.resetView());
 
 $("#refresh-button").addEventListener("click", () => loadOverview());
 
