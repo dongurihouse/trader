@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS trades (
     ts     INTEGER NOT NULL,
     action TEXT    NOT NULL,
     PRIMARY KEY (ticker, algo, ts, action),
-    CHECK (action IN ('entry', 'exit', 'exit_all'))
+    CHECK (action IN ('entry', 'exit_all'))
 );
 
 CREATE TABLE IF NOT EXISTS outputs (

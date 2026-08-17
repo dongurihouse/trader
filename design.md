@@ -87,16 +87,16 @@ separate task.
 One service runs the algos and contains the algo logic: a core plus a
 loop. Input: the ticker list and the signal and algo definitions; the
 bar timestamps supply `t`. One call carries all work:
-`core(ticker, t, algos=None)` returns the signal values at `t` and the entry
-and exit points per algo.
+`core(ticker, t, algos=None)` returns the signal values at `t` and one
+`(is_entry, is_close_all)` pair per algo.
 
 ### The core
 
 - No clock, no side effects. Data input: the bars and events tables,
   read-only.
 - Two layers with a strict rule: a signal (vwap, sma, and so on) queries
-  bars, the events table, and other signals; an algo queries signal outputs
-  and the outputs of other algos.
+  bars, the events table, and other signals; an algo queries signal
+  outputs, the outputs of other algos, and its own prior outputs.
 - Algos are independent. Nothing combines them; to combine behavior,
   compose an algo from other algos. Every entry and exit belongs to
   exactly one algo. An algo that another algo reads evaluates like a
@@ -108,6 +108,28 @@ and exit points per algo.
 - Each algo's config declares the signals it reads. A new signal or algo is
   a config entry, not an engine change.
 - Bulk and real time are the same core with different timestamps.
+
+### The algo output contract
+
+- An algo's output at `t` is one pair of booleans: `(is_entry,
+  is_close_all)`. `is_entry` opens one unit at `t`. `is_close_all` closes
+  every open unit of the algo at `t`. When both are true, the close wins
+  and no entry occurs.
+- The flags are independent, so an algo can produce only entries or only
+  exits. An exit-only algo, such as a trail stop, never sets `is_entry`.
+- An algo can take an exit from another algo: its `is_close_all` reads the
+  other algo's pair. An exit-only algo anchors on the entries it reads; a
+  trail stop reads the entry algo's `is_entry` stream to know where a
+  position starts.
+- An exit-only algo holds no units of its own, so it never trades; it acts
+  through the algo that reads it.
+- Position state lives in the database only. Open units at `t` are the
+  entries since the last close in the algo's own output rows under the
+  same version, before `t`. The same query serves live and bulk work; the
+  loop keeps no position in memory. Work under one ticker therefore runs
+  oldest first.
+- The pair is the one fixed shape in outputs, because the loop and the
+  dashboard both read it. A signal's output stays opaque JSON.
 
 ### Config defines every signal and every algo
 
@@ -168,15 +190,14 @@ number.
   keyed and the core is deterministic. Only the newest bar of a ticker
   also trades: the loop writes trade rows for its points, and older work
   never writes a trade.
-- A trade row is ticker, algo, exact timestamp, action. An entry opens one
-  unit. An exit closes one unit or all of the algo's open units; the
-  algo's point says which. An exit for one unit closes the oldest open
-  entry.
+- A trade row is ticker, algo, exact timestamp, action. `is_entry` writes
+  an entry row and opens one unit. `is_close_all` writes an `exit_all` row
+  and closes every open unit of the algo.
 - An algo exits only while it has open units for the ticker. This is
   enforced in code; a CHECK cannot span rows.
 - A trade has no size: the unit is the size. Performance is the percent
-  result per unit, priced from bars, and the account result is the sum
-  over units.
+  result per unit, and the account result is the sum over units. The price
+  of a point at `t` is the close of bar `t`.
 
 ## 4. dashboard (webserver)
 
@@ -241,7 +262,7 @@ CREATE TABLE trades (
     ts     INTEGER NOT NULL,  -- exact entry or exit time, epoch seconds, UTC
     action TEXT    NOT NULL,
     PRIMARY KEY (ticker, algo, ts, action),
-    CHECK (action IN ('entry', 'exit', 'exit_all'))
+    CHECK (action IN ('entry', 'exit_all'))
 );
 
 CREATE TABLE outputs (
