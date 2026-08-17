@@ -968,6 +968,60 @@ h1 em {
   color: var(--amber);
 }
 
+.chart-tooltip .shape-forecast {
+  min-width: 210px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.chart-tooltip .shape-forecast-title {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--subtle);
+  font-size: 0.53rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.chart-tooltip .shape-row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  gap: 7px;
+  align-items: baseline;
+}
+
+.chart-tooltip .shape-rank {
+  color: var(--subtle);
+}
+
+.chart-tooltip .shape-name {
+  color: var(--text);
+}
+
+.chart-tooltip .shape-probability {
+  color: var(--muted);
+  font-size: inherit;
+  font-weight: 700;
+}
+
+.chart-tooltip .rank-1 .shape-probability {
+  color: var(--acid);
+}
+
+.chart-tooltip .rank-2 .shape-probability {
+  color: var(--cyan);
+}
+
+.chart-tooltip .rank-3 .shape-probability {
+  color: var(--amber);
+}
+
+.chart-tooltip .shape-unavailable {
+  color: var(--subtle);
+}
+
 .chart-loading,
 .chart-empty {
   position: absolute;

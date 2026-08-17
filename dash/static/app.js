@@ -77,6 +77,18 @@ function formatSigned(value, suffix = "") {
   return `${number >= 0 ? "+" : ""}${number.toFixed(2)}${suffix}`;
 }
 
+function formatShapeName(value) {
+  return String(value || "")
+    .replaceAll("_", " ")
+    .replace(/^./, (letter) => letter.toUpperCase());
+}
+
+function formatProbability(value) {
+  const probability = Number(value);
+  if (!Number.isFinite(probability)) return "—";
+  return `${(probability * 100).toFixed(1)}%`;
+}
+
 function dateFromEpoch(epoch) {
   return new Date(Number(epoch) * 1000);
 }
@@ -217,6 +229,24 @@ class PriceChart {
       if (startIndex >= bars.length || endIndex < startIndex) return [];
       return [{ ...range, startIndex, endIndex }];
     });
+  }
+
+  shapeAt(timestamp) {
+    const forecast = this.payload?.shape_forecast;
+    const snapshots = forecast?.snapshots || [];
+    if (!snapshots.length) return null;
+    const target = Number(timestamp);
+    let low = 0;
+    let high = snapshots.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (Number(snapshots[middle].ts) <= target) low = middle + 1;
+      else high = middle;
+    }
+    const snapshot = snapshots[low - 1];
+    if (!snapshot) return null;
+    const maximumAge = Math.max(1, Number(forecast.stride_minutes) || 5) * 60;
+    return target - Number(snapshot.ts) <= maximumAge ? snapshot : null;
   }
 
   updateLabel() {
@@ -609,6 +639,33 @@ class PriceChart {
         ),
       );
     });
+    if (this.payload?.shape_forecast) {
+      const shape = this.shapeAt(bar.ts);
+      const section = createElement("div", "shape-forecast");
+      section.append(
+        createElement(
+          "small",
+          "shape-forecast-title",
+          shape
+            ? `Shape forecast · ${easternClock.format(dateFromEpoch(shape.ts))}`
+            : "Shape forecast",
+        ),
+      );
+      if (shape) {
+        shape.top_shapes.slice(0, 3).forEach((item, index) => {
+          const row = createElement("div", `shape-row rank-${index + 1}`);
+          row.append(
+            createElement("span", "shape-rank", String(index + 1)),
+            createElement("span", "shape-name", formatShapeName(item.shape)),
+            createElement("strong", "shape-probability", formatProbability(item.probability)),
+          );
+          section.append(row);
+        });
+      } else {
+        section.append(createElement("span", "shape-unavailable", "No evaluation at this point"));
+      }
+      contents.push(section);
+    }
     this.tooltip.replaceChildren(...contents);
     this.tooltip.hidden = false;
     const tooltipWidth = this.tooltip.offsetWidth || 150;

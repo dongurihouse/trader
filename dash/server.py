@@ -150,6 +150,9 @@ class DashboardData:
                     "bars": [],
                     "trades": [],
                     "events": [],
+                    "shape_forecast": self._shape_forecast(
+                        connection, config, ticker, 0, 0
+                    ),
                     "algo_overlays": self._algo_overlays([], config),
                     "source_count": 0,
                     "interpolated_count": 0,
@@ -198,6 +201,9 @@ class DashboardData:
                     (ticker, start, latest),
                 )
             ]
+            shape_forecast = self._shape_forecast(
+                connection, config, ticker, start, int(latest)
+            )
 
         return {
             "ticker": ticker,
@@ -209,6 +215,7 @@ class DashboardData:
             "bars": chart_bars,
             "trades": trades,
             "events": events,
+            "shape_forecast": shape_forecast,
             "algo_overlays": self._algo_overlays(rows, config),
         }
 
@@ -723,6 +730,76 @@ class DashboardData:
                 }
             )
         return overlays
+
+    def _shape_forecast(
+        self,
+        connection: sqlite3.Connection,
+        config: dict[str, Any],
+        ticker: str,
+        start: int,
+        end: int,
+    ) -> dict[str, Any] | None:
+        shape_entry = next(
+            (
+                (name, definition)
+                for name, definition in self._mapping(config.get("signals")).items()
+                if isinstance(definition, dict)
+                and definition.get("function", name) == "shape_v1"
+            ),
+            None,
+        )
+        if shape_entry is None:
+            return None
+
+        kind, definition = shape_entry
+        params = self._mapping(definition.get("params"))
+        stride_minutes = params.get("stride_minutes", 5)
+        if (
+            isinstance(stride_minutes, bool)
+            or not isinstance(stride_minutes, int)
+            or stride_minutes < 1
+        ):
+            stride_minutes = 5
+
+        snapshots = []
+        for row in connection.execute(
+            """
+            SELECT ts, output
+            FROM outputs
+            WHERE ticker = ? AND kind = ? AND config = ?
+              AND ts >= ? AND ts <= ? AND output != 'null'
+            ORDER BY ts
+            """,
+            (ticker, kind, str(config.get("version", "")), start, end),
+        ):
+            output = self._json_value(row["output"])
+            if not isinstance(output, dict):
+                continue
+            top_shapes = output.get("top_shapes")
+            if not isinstance(top_shapes, list):
+                continue
+            valid_shapes = []
+            for item in top_shapes[:3]:
+                if not isinstance(item, dict) or not isinstance(item.get("shape"), str):
+                    continue
+                probability = item.get("probability")
+                if (
+                    isinstance(probability, bool)
+                    or not isinstance(probability, (int, float))
+                    or not math.isfinite(probability)
+                ):
+                    continue
+                valid_shapes.append(
+                    {"shape": item["shape"], "probability": float(probability)}
+                )
+            if valid_shapes:
+                snapshots.append({"ts": int(row["ts"]), "top_shapes": valid_shapes})
+
+        return {
+            "kind": kind,
+            "stride_minutes": stride_minutes,
+            "snapshots": snapshots,
+        }
 
     def _compact_bars(self, rows: list[sqlite3.Row], limit: int = 1400) -> list[dict[str, Any]]:
         if not rows:
