@@ -368,7 +368,7 @@ def _contains_exception(error: BaseException, wanted_type) -> bool:
 
 class RobinhoodClient:
     TOOL = "get_equity_historicals"
-    MAX_RANGE = timedelta(days=3) - timedelta(seconds=1)
+    MAX_RANGE = timedelta(days=1) - timedelta(seconds=1)
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -481,7 +481,7 @@ class RobinhoodClient:
         start = _parse_iso(start_iso)
         end = _parse_iso(end_iso)
         if end - start > self.MAX_RANGE:
-            raise RelayError("minute request exceeds the three-day provider limit")
+            raise RelayError("minute request exceeds the one-day provider limit")
         combined = {"data": {"results": []}}
         size = self.settings.max_symbols_per_call
         for offset in range(0, len(symbols), size):
