@@ -30,13 +30,6 @@ const easternClock = new Intl.DateTimeFormat("en-US", {
   minute: "2-digit",
 });
 
-const easternDate = new Intl.DateTimeFormat("en-US", {
-  timeZone: "America/New_York",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-});
-
 const localUpdated = new Intl.DateTimeFormat("en-US", {
   hour: "numeric",
   minute: "2-digit",
@@ -81,18 +74,6 @@ function dateFromEpoch(epoch) {
   return new Date(Number(epoch) * 1000);
 }
 
-function easternDateKey(epoch) {
-  return easternDate.format(dateFromEpoch(epoch));
-}
-
-function interpolatedCount(bar) {
-  return Math.max(0, Number(bar?.interpolated_count ?? bar?.interpolated ?? 0));
-}
-
-function sourceSamples(bar) {
-  return Math.max(1, Number(bar?.samples) || 1);
-}
-
 function showToast(message) {
   const toast = $("#toast");
   toast.textContent = message;
@@ -115,7 +96,6 @@ class PriceChart {
     this.bounds = null;
     this.viewStart = 0;
     this.viewEnd = -1;
-    this.visibleAttentionWindows = [];
     this.drag = null;
     this.wheelPanRemainder = 0;
     this.minimumViewPoints = 10;
@@ -166,15 +146,15 @@ class PriceChart {
     this.draw();
   }
 
-  updateLabel(visible = this.visibleBars(), flaggedMinutes = null) {
+  updateLabel() {
     const label = this.style === "candles" ? "candlestick" : "line";
+    const visible = this.visibleBars();
     const first = visible[0];
     const last = visible.at(-1);
-    const flagged = flaggedMinutes ?? visible.reduce((total, bar) => total + interpolatedCount(bar), 0);
     this.canvas.setAttribute(
       "aria-label",
       visible.length
-        ? `${this.payload.ticker} ${label} chart, ${visible.length.toLocaleString()} visible points from ${easternDateTime.format(dateFromEpoch(first.ts))} to ${easternDateTime.format(dateFromEpoch(last.ts))}${flagged ? `, with ${flagged.toLocaleString()} interpolated source minutes marked for attention` : ""}`
+        ? `${this.payload.ticker} ${label} chart, ${visible.length.toLocaleString()} visible points from ${easternDateTime.format(dateFromEpoch(first.ts))} to ${easternDateTime.format(dateFromEpoch(last.ts))}`
         : `${this.payload?.ticker || "Ticker"} ${label} chart with no available bars`,
     );
   }
@@ -189,37 +169,6 @@ class PriceChart {
 
   visibleBars() {
     return this.payload?.bars?.slice(this.viewStart, this.viewEnd + 1) || [];
-  }
-
-  attentionWindows(bars = this.visibleBars()) {
-    const windows = [];
-    let current = null;
-    bars.forEach((bar, index) => {
-      const flaggedMinutes = interpolatedCount(bar);
-      if (!flaggedMinutes) {
-        current = null;
-        return;
-      }
-      const samples = sourceSamples(bar);
-      const endTs = Number(bar.ts) + (samples - 1) * 60;
-      if (current && current.endIndex === index - 1 && Number(bar.ts) - current.endTs <= 60) {
-        current.endIndex = index;
-        current.endTs = endTs;
-        current.flaggedMinutes += flaggedMinutes;
-        current.sourceMinutes += samples;
-        return;
-      }
-      current = {
-        startIndex: index,
-        endIndex: index,
-        startTs: Number(bar.ts),
-        endTs,
-        flaggedMinutes,
-        sourceMinutes: samples,
-      };
-      windows.push(current);
-    });
-    return windows;
   }
 
   setView(start, end, { notify = true, redraw = true } = {}) {
@@ -263,25 +212,13 @@ class PriceChart {
     this.setView(start, start + length - 1);
   }
 
-  focusAttentionWindow(window) {
-    const start = this.viewStart + window.startIndex;
-    const end = this.viewStart + window.endIndex;
-    const padding = Math.max(15, Math.ceil((end - start + 1) * 1.5));
-    this.setView(start - padding, end + padding);
-  }
-
   notifyViewChange() {
-    const visibleBars = this.visibleBars();
-    this.visibleAttentionWindows = this.attentionWindows(visibleBars);
-    const flaggedMinutes = this.visibleAttentionWindows.reduce((total, window) => total + window.flaggedMinutes, 0);
-    this.updateLabel(visibleBars, flaggedMinutes);
+    this.updateLabel();
     this.onViewChange?.({
       visible: this.viewLength(),
       total: this.totalBars(),
       canZoomIn: this.viewLength() > Math.min(this.minimumViewPoints, this.totalBars()),
       canZoomOut: this.viewLength() < this.totalBars(),
-      attentionWindows: this.visibleAttentionWindows,
-      flaggedMinutes,
     });
   }
 
@@ -323,17 +260,6 @@ class PriceChart {
     const y = (price) => margin.top + ((maximum - Number(price)) / adjustedSpan) * plotHeight;
 
     this.bounds = { margin, plotWidth, priceBottom, x, y, width, height };
-
-    this.visibleAttentionWindows.forEach((window) => {
-      const halfStep = step / 2;
-      const left = Math.max(margin.left, x(window.startIndex) - halfStep);
-      const naturalRight = Math.min(margin.left + plotWidth, x(window.endIndex) + halfStep);
-      const bandWidth = Math.max(1.5, naturalRight - left);
-      ctx.fillStyle = "rgba(244, 197, 106, 0.11)";
-      ctx.fillRect(left, margin.top, bandWidth, height - margin.bottom - margin.top);
-      ctx.fillStyle = "rgba(244, 197, 106, 0.82)";
-      ctx.fillRect(left, margin.top, bandWidth, 2.5);
-    });
 
     ctx.font = "10px ui-monospace, SFMono-Regular, monospace";
     ctx.textAlign = "right";
@@ -490,24 +416,15 @@ class PriceChart {
     this.hoverIndex = Math.round(ratio * (bars.length - 1));
     this.hoverIndex = Math.max(0, Math.min(bars.length - 1, this.hoverIndex));
     const bar = bars[this.hoverIndex];
-    const tooltipRows = [
+    this.tooltip.replaceChildren(
       createElement("strong", "", easternDateTime.format(dateFromEpoch(bar.ts))),
       createElement("span", "", `O ${formatPrice(bar.open)} · H ${formatPrice(bar.high)}`),
       createElement("span", "", `L ${formatPrice(bar.low)} · C ${formatPrice(bar.close)}`),
       createElement("span", "", `Vol ${compactFormat.format(bar.volume)}`),
-    ];
-    const flaggedMinutes = interpolatedCount(bar);
-    if (flaggedMinutes) {
-      const samples = sourceSamples(bar);
-      const label = samples > 1
-        ? `${flaggedMinutes} of ${samples} source min interpolated · review`
-        : "Interpolated source minute · review";
-      tooltipRows.push(createElement("span", "tooltip-quality", label));
-    }
-    this.tooltip.replaceChildren(...tooltipRows);
+    );
     this.tooltip.hidden = false;
     const tooltipWidth = this.tooltip.offsetWidth || 150;
-    const tooltipHeight = this.tooltip.offsetHeight || (flaggedMinutes ? 118 : 94);
+    const tooltipHeight = this.tooltip.offsetHeight || 94;
     const left = Math.max(6, Math.min(rectangle.width - tooltipWidth - 6, localX + 14));
     const top = Math.max(6, Math.min(rectangle.height - tooltipHeight - 6, event.clientY - rectangle.top - 42));
     this.tooltip.style.left = `${left}px`;
@@ -592,7 +509,7 @@ class PriceChart {
   }
 }
 
-function renderViewport({ visible, total, canZoomIn, canZoomOut, attentionWindows, flaggedMinutes }) {
+function renderViewport({ visible, total, canZoomIn, canZoomOut }) {
   const payload = state.bars;
   const isFullView = visible === total;
   if (payload?.source_count === payload?.bars?.length) {
@@ -607,45 +524,6 @@ function renderViewport({ visible, total, canZoomIn, canZoomOut, attentionWindow
   $("#zoom-in").disabled = !canZoomIn;
   $("#zoom-out").disabled = !canZoomOut;
   $("#zoom-reset").disabled = !canZoomOut;
-  renderQuality(attentionWindows, flaggedMinutes);
-}
-
-function formatAttentionWindow(window) {
-  const start = easternDateTime.format(dateFromEpoch(window.startTs));
-  if (window.startTs === window.endTs) return `${start} ET`;
-  const end = easternDateKey(window.startTs) === easternDateKey(window.endTs)
-    ? easternClock.format(dateFromEpoch(window.endTs))
-    : easternDateTime.format(dateFromEpoch(window.endTs));
-  return `${start}–${end} ET`;
-}
-
-function renderQuality(windows, flaggedMinutes) {
-  const notice = $("#quality-notice");
-  const windowList = $("#quality-windows");
-  if (!flaggedMinutes) {
-    notice.classList.add("is-clear");
-    $("#quality-title").textContent = "No interpolated bars in this view";
-    $("#quality-detail").textContent = "No source-quality attention flags are visible.";
-    windowList.replaceChildren();
-    return;
-  }
-
-  notice.classList.remove("is-clear");
-  $("#quality-title").textContent = `${integerFormat.format(flaggedMinutes)} interpolated minutes · ${integerFormat.format(windows.length)} ${windows.length === 1 ? "window" : "windows"}`;
-  $("#quality-detail").textContent = "Amber bands mark synthetic gap-fill data. Review before relying on these prices.";
-  const fragment = document.createDocumentFragment();
-  windows.slice(-4).reverse().forEach((window) => {
-    const button = createElement("button", "quality-window", formatAttentionWindow(window));
-    button.type = "button";
-    button.title = "Focus this timeframe";
-    button.setAttribute("aria-label", `${formatAttentionWindow(window)}, ${window.flaggedMinutes} interpolated ${window.flaggedMinutes === 1 ? "minute" : "minutes"}. Focus this timeframe.`);
-    button.addEventListener("click", () => chart.focusAttentionWindow(window));
-    fragment.append(button);
-  });
-  if (windows.length > 4) {
-    fragment.append(createElement("span", "quality-more", `+${integerFormat.format(windows.length - 4)} more`));
-  }
-  windowList.replaceChildren(fragment);
 }
 
 const chart = new PriceChart($("#price-chart"), $("#chart-tooltip"), renderViewport);

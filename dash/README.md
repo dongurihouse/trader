@@ -50,7 +50,6 @@ loopback port configured by `bars.api_port`.
 - Switchable line and candlestick chart styles.
 - Time zoom with the `+`, `−`, and Reset controls or the mouse wheel.
 - Horizontal wheel, trackpad, Shift+wheel, and drag panning across the loaded minute history.
-- Amber attention bands and clickable timeframes for Robinhood interpolated bars.
 - Ticker switching from the configured ticker list.
 - Current price, session change, open, high, low, and volume.
 - Automatic refresh every 30 seconds.
