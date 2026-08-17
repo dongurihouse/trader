@@ -117,6 +117,7 @@ class PriceChart {
     this.viewEnd = -1;
     this.visibleAttentionWindows = [];
     this.drag = null;
+    this.wheelPanRemainder = 0;
     this.minimumViewPoints = 10;
     this.resizeObserver = new ResizeObserver(() => this.draw());
     this.resizeObserver.observe(canvas.parentElement);
@@ -139,6 +140,7 @@ class PriceChart {
     const wasAtLatest = this.viewEnd >= previousBars.length - 1;
     const previousStartTime = previousBars[this.viewStart]?.ts;
     this.payload = payload;
+    this.wheelPanRemainder = 0;
     this.hoverIndex = null;
     this.tooltip.hidden = true;
     if (sameSeries && wasZoomed && payload.bars.length) {
@@ -252,6 +254,7 @@ class PriceChart {
     const safeAnchor = Math.max(0, Math.min(1, anchor));
     const anchorIndex = this.viewStart + (currentLength - 1) * safeAnchor;
     const nextStart = Math.round(anchorIndex - (nextLength - 1) * safeAnchor);
+    this.wheelPanRemainder = 0;
     this.setView(nextStart, nextStart + nextLength - 1);
   }
 
@@ -554,10 +557,32 @@ class PriceChart {
   onWheel(event) {
     if (!this.totalBars() || !this.bounds) return;
     event.preventDefault();
+    const horizontal = event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY);
+    const deltaScale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? this.bounds.plotWidth : 1;
+    if (horizontal) {
+      if (this.viewLength() === this.totalBars()) return;
+      const rawDelta = event.shiftKey && Math.abs(event.deltaY) > Math.abs(event.deltaX)
+        ? event.deltaY
+        : event.deltaX;
+      if (this.wheelPanRemainder && Math.sign(rawDelta) !== Math.sign(this.wheelPanRemainder)) {
+        this.wheelPanRemainder = 0;
+      }
+      const exactBars = (rawDelta * deltaScale / this.bounds.plotWidth) * this.viewLength()
+        + this.wheelPanRemainder;
+      const barsMoved = exactBars < 0 ? Math.ceil(exactBars) : Math.floor(exactBars);
+      this.wheelPanRemainder = exactBars - barsMoved;
+      if (barsMoved) {
+        const previousStart = this.viewStart;
+        this.panTo(this.viewStart + barsMoved);
+        if (this.viewStart === previousStart) this.wheelPanRemainder = 0;
+      }
+      return;
+    }
+    this.wheelPanRemainder = 0;
     const rectangle = this.canvas.getBoundingClientRect();
     const localX = event.clientX - rectangle.left;
     const anchor = (localX - this.bounds.margin.left) / this.bounds.plotWidth;
-    this.zoom(Math.exp(event.deltaY * 0.0025), anchor);
+    this.zoom(Math.exp(event.deltaY * deltaScale * 0.0025), anchor);
   }
 
   clearPointer() {

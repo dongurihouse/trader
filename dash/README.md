@@ -48,7 +48,7 @@ and refreshes the live view every 30 seconds.
 - Optional one-day, five-session, and one-month ranges.
 - Switchable line and candlestick chart styles.
 - Time zoom with the `+`, `−`, and Reset controls or the mouse wheel.
-- Horizontal drag-to-pan across the loaded minute history.
+- Horizontal wheel, trackpad, Shift+wheel, and drag panning across the loaded minute history.
 - Amber attention bands and clickable timeframes for Robinhood interpolated bars.
 - Ticker switching from the configured ticker list.
 - Current price, session change, open, high, low, and volume.
