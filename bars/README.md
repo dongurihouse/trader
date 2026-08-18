@@ -27,7 +27,10 @@ token.
 - Keep backfill and scheduled-sweep progress in `bar_jobs`, not log text.
 - During each sweep, fetch configured provider indicators and upsert them into
   `bar_metadata`. The minute poll does not fetch indicators.
-- Serve process health at `http://127.0.0.1:8789/health` for Dash.
+- Serve process health and current operation at
+  `http://127.0.0.1:8789/health` for Dash.
+- Accept named `POST /poll`, `POST /backfill`, and `POST /sweep` work on the
+  loopback API. Operational commands submit to this one writer.
 - Append run summaries and problems to the shared `logs` table. Do not write
   heartbeat rows.
 - Keep no filesystem log; `make logs` reads the shared table.
@@ -61,11 +64,15 @@ make install                 # install and start the LaunchAgent
 make status                  # process state plus stored coverage
 make logs                    # show the latest database logs
 make restart                 # reload after a config edit
-make once                    # run one live poll now
-make backfill                # force the configured history backfill for every ticker
-make sweep                   # run the trailing 30-day sweep now
+make once                    # ask the running service for one live poll
+make backfill                # ask it to force the configured history backfill
+make sweep                   # ask it to run the trailing 30-day sweep
 make uninstall               # stop it; keep the database
 ```
+
+The three collection commands return after the service accepts the operation.
+Use `make status`, `make logs`, or the health endpoint to monitor it. Do not
+open the SQLite database or run collection writes from a second process.
 
 ## Query stored bars
 

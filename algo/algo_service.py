@@ -19,7 +19,9 @@ from datetime import date, datetime, time as clock_time, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 from broker import send_broker_orders
@@ -2969,6 +2971,20 @@ def _seed_evaluation_state(
     )
 
 
+def _empty_evaluation_state(
+    settings: Settings, ticker: str, ts: int
+) -> _EvaluationState:
+    """Start a recalculation without inheriting the rows it will replace."""
+    _, session_open, _ = _session_window(settings, ts)
+    return _EvaluationState(
+        ticker=ticker,
+        session_open=session_open,
+        previous={},
+        open_entries={name: [] for name in settings.enabled_algos()},
+        session_outputs={name: [] for name in settings.enabled_algos()},
+    )
+
+
 def _context_bars(
     connection: sqlite3.Connection,
     ticker: str,
@@ -3222,13 +3238,6 @@ def _sync_live_definitions(
             )
             changed_algos.append(name)
 
-    if signals_changed or changed_algos:
-        connection.execute("DELETE FROM outputs")
-    if changed_algos:
-        placeholders = ",".join("?" for _ in changed_algos)
-        connection.execute(
-            f"DELETE FROM trades WHERE algo IN ({placeholders})", changed_algos
-        )
     return {
         "signals_changed": signals_changed,
         "changed_algos": changed_algos,
@@ -3278,6 +3287,43 @@ def _pending(
         if len(pending) == limit:
             break
     return pending
+
+
+def _recalculation_pairs(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    limit: int = CYCLE_PAIR_LIMIT,
+    stop_event: Optional[threading.Event] = None,
+) -> list[tuple[str, int]]:
+    """Return a fresh bounded evaluation window without reading live outputs."""
+    if not settings.output_kinds() or limit < 1:
+        return []
+    pairs: list[tuple[str, int]] = []
+    for ticker in settings.tickers:
+        if stop_event is not None and stop_event.is_set():
+            break
+        latest = connection.execute(
+            "SELECT MAX(ts) FROM bars WHERE ticker=?", (ticker,)
+        ).fetchone()[0]
+        if latest is None:
+            continue
+        remaining = limit - len(pairs)
+        rows = connection.execute(
+            """
+            SELECT ts FROM bars
+            WHERE ticker=? AND ts>=?
+            ORDER BY ts LIMIT ?
+            """,
+            (
+                ticker,
+                int(latest) - settings.evaluation_days * 86_400,
+                remaining,
+            ),
+        ).fetchall()
+        pairs.extend((ticker, int(row["ts"])) for row in rows)
+        if len(pairs) == limit:
+            break
+    return pairs
 
 
 def _warm_primary_shape(
@@ -3548,6 +3594,7 @@ def _write_result(
     connection: sqlite3.Connection,
     settings: Settings,
     result: Mapping[str, Any],
+    replace_algos: Optional[Sequence[str]] = None,
 ) -> tuple[dict[str, int], list[dict[str, Any]]]:
     computed_at = int(time.time())
     rows = []
@@ -3572,10 +3619,29 @@ def _write_result(
             )
         )
 
+    trade_rows: list[tuple[str, str, int, str, int]] = []
+    for name, output in result["algos"].items():
+        is_entry, is_close, direction = _algo_output(output)
+        action = "exit_all" if is_close else "entry" if is_entry else None
+        if action is None:
+            continue
+        if action == "exit_all":
+            open_entries = result["_open_entries"][name]
+            if not open_entries:
+                raise EvaluationError("algo %s closed without an open entry" % name)
+            if direction != int(open_entries[0]["direction"]):
+                raise EvaluationError("algo %s closed in the wrong direction" % name)
+        trade_rows.append(
+            (result["ticker"], name, result["ts"], action, direction)
+        )
+
     stats = {"pairs": 1, "outputs": len(rows), "entries": 0, "exits": 0}
     alerts: list[dict[str, Any]] = []
-    connection.execute("BEGIN IMMEDIATE")
+    if not connection.in_transaction:
+        connection.execute("BEGIN IMMEDIATE")
     try:
+        if replace_algos is not None:
+            connection.execute("DELETE FROM outputs")
         connection.executemany(
             """
             INSERT INTO outputs(ticker,ts,kind,output,computed_at)
@@ -3585,45 +3651,48 @@ def _write_result(
             """,
             rows,
         )
-        for name, output in result["algos"].items():
-            is_entry, is_close, direction = _algo_output(output)
-            action = "exit_all" if is_close else "entry" if is_entry else None
-            if action is None:
-                continue
-            if action == "exit_all":
-                open_entries = result["_open_entries"][name]
-                if not open_entries:
-                    raise EvaluationError("algo %s closed without an open entry" % name)
-                if direction != int(open_entries[0]["direction"]):
-                    raise EvaluationError("algo %s closed in the wrong direction" % name)
-            existing = connection.execute(
-                "SELECT action,direction FROM trades WHERE ticker=? AND algo=? AND ts=?",
-                (result["ticker"], name, result["ts"]),
-            ).fetchall()
-            if existing:
-                if (
-                    len(existing) == 1
-                    and existing[0]["action"] == action
-                    and int(existing[0]["direction"]) == direction
-                ):
-                    continue
-                raise EvaluationError(
-                    "stored trade conflicts with algo output: %s %s %s"
-                    % (result["ticker"], name, result["ts"])
-                )
+        replaced_names = set(replace_algos or ())
+        if replace_algos is not None and replaced_names:
+            placeholders = ",".join("?" for _ in replaced_names)
             connection.execute(
-                "INSERT INTO trades(ticker,algo,ts,action,direction) VALUES (?,?,?,?,?)",
-                (result["ticker"], name, result["ts"], action, direction),
+                f"DELETE FROM trades WHERE algo IN ({placeholders})",
+                tuple(sorted(replaced_names)),
             )
+            connection.executemany(
+                "INSERT INTO trades(ticker,algo,ts,action,direction) VALUES (?,?,?,?,?)",
+                [row for row in trade_rows if row[1] in replaced_names],
+            )
+        for ticker, name, ts, action, direction in trade_rows:
+            if name not in replaced_names:
+                existing = connection.execute(
+                    "SELECT action,direction FROM trades WHERE ticker=? AND algo=? AND ts=?",
+                    (ticker, name, ts),
+                ).fetchall()
+                if existing:
+                    if (
+                        len(existing) == 1
+                        and existing[0]["action"] == action
+                        and int(existing[0]["direction"]) == direction
+                    ):
+                        continue
+                    raise EvaluationError(
+                        "stored trade conflicts with algo output: %s %s %s"
+                        % (ticker, name, ts)
+                    )
+                else:
+                    connection.execute(
+                        "INSERT INTO trades(ticker,algo,ts,action,direction) VALUES (?,?,?,?,?)",
+                        (ticker, name, ts, action, direction),
+                    )
             price = connection.execute(
                 "SELECT close FROM bars WHERE ticker=? AND ts=?",
-                (result["ticker"], result["ts"]),
+                (ticker, ts),
             ).fetchone()
             alerts.append(
                 {
-                    "ticker": result["ticker"],
+                    "ticker": ticker,
                     "algo": name,
-                    "ts": result["ts"],
+                    "ts": ts,
                     "action": action,
                     "direction": direction,
                     "price": None if price is None else price["close"],
@@ -3635,6 +3704,26 @@ def _write_result(
         connection.rollback()
         raise
     return stats, alerts
+
+
+def _replace_empty_calculation(
+    connection: sqlite3.Connection, replace_algos: Sequence[str]
+) -> None:
+    """Finish a recalculation when its source window contains no bars."""
+    if not connection.in_transaction:
+        connection.execute("BEGIN IMMEDIATE")
+    try:
+        connection.execute("DELETE FROM outputs")
+        if replace_algos:
+            placeholders = ",".join("?" for _ in replace_algos)
+            connection.execute(
+                f"DELETE FROM trades WHERE algo IN ({placeholders})",
+                tuple(replace_algos),
+            )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
 
 
 def _live_trade_alerts(
@@ -3685,6 +3774,7 @@ def cycle(
     config_path: Path,
     stop_event: Optional[threading.Event] = None,
     alert_resume_after: Optional[int] = None,
+    force_recalculate: bool = False,
 ) -> tuple[dict[str, int], Settings]:
     _RVOL_BASELINES.clear()
     _PULLBACK_BASELINES.clear()
@@ -3713,49 +3803,81 @@ def cycle(
                 ),
                 now,
             )
-        connection.commit()
-
-        shape_ticker, shape_rows = _warm_primary_shape(connection, settings)
-        warm_ticker, warm_rows = _warm_primary_relative_momentum(
-            connection, settings
+        recalculating = bool(
+            force_recalculate
+            or definition_sync["signals_changed"]
+            or definition_sync["changed_algos"]
         )
-        repaired_rows = _repair_relative_momentum_gaps(connection, settings)
-        if shape_rows:
-            message = "priority shape warmup ticker=%s rows=%d" % (
-                shape_ticker,
-                shape_rows,
+        replace_algos = (
+            settings.enabled_algos()
+            if force_recalculate
+            else tuple(definition_sync["changed_algos"])
+        )
+        if force_recalculate:
+            _log(
+                connection,
+                "info",
+                "explicit algorithm recalculation requested",
+                now,
             )
-            _log(connection, "info", message)
-            logging.info(message)
-        if warm_rows:
-            message = "priority momentum warmup ticker=%s rows=%d" % (
-                warm_ticker,
-                warm_rows,
-            )
-            _log(connection, "info", message)
-            logging.info(message)
-        if repaired_rows:
-            message = "continuous momentum repair rows=%d" % repaired_rows
-            _log(connection, "info", message)
-            logging.info(message)
-        if shape_rows or warm_rows or repaired_rows:
+        if not recalculating:
             connection.commit()
+
+            shape_ticker, shape_rows = _warm_primary_shape(connection, settings)
+            warm_ticker, warm_rows = _warm_primary_relative_momentum(
+                connection, settings
+            )
+            repaired_rows = _repair_relative_momentum_gaps(connection, settings)
+            if shape_rows:
+                message = "priority shape warmup ticker=%s rows=%d" % (
+                    shape_ticker,
+                    shape_rows,
+                )
+                _log(connection, "info", message)
+                logging.info(message)
+            if warm_rows:
+                message = "priority momentum warmup ticker=%s rows=%d" % (
+                    warm_ticker,
+                    warm_rows,
+                )
+                _log(connection, "info", message)
+                logging.info(message)
+            if repaired_rows:
+                message = "continuous momentum repair rows=%d" % repaired_rows
+                _log(connection, "info", message)
+                logging.info(message)
+            if shape_rows or warm_rows or repaired_rows:
+                connection.commit()
 
         stats = {"pairs": 0, "outputs": 0, "entries": 0, "exits": 0}
         states: dict[str, _EvaluationState] = {}
-        for ticker, ts in _pending(connection, settings, stop_event=stop_event):
+        pairs = (
+            _recalculation_pairs(connection, settings, stop_event=stop_event)
+            if recalculating
+            else _pending(connection, settings, stop_event=stop_event)
+        )
+        replacement_pending = recalculating
+        for ticker, ts in pairs:
             if stop_event is not None and stop_event.is_set():
                 break
             state = states.get(ticker)
             if state is None or not state.accepts(settings, ticker, ts):
-                state = _seed_evaluation_state(
-                    connection, settings, ticker, ts
+                state = (
+                    _empty_evaluation_state(settings, ticker, ts)
+                    if replacement_pending
+                    else _seed_evaluation_state(connection, settings, ticker, ts)
                 )
                 states[ticker] = state
             result = run_core(
                 connection, settings, ticker, ts, state=state
             )
-            part, trade_alerts = _write_result(connection, settings, result)
+            part, trade_alerts = _write_result(
+                connection,
+                settings,
+                result,
+                replace_algos=replace_algos if replacement_pending else None,
+            )
+            replacement_pending = False
             state.advance(result)
             for key in stats:
                 stats[key] += part[key]
@@ -3790,6 +3912,8 @@ def cycle(
                 _log(connection, "info", progress)
                 connection.commit()
                 logging.info(progress)
+        if replacement_pending and not pairs:
+            _replace_empty_calculation(connection, replace_algos)
         label = (
             "cycle stopped"
             if stop_event is not None and stop_event.is_set()
@@ -3860,15 +3984,78 @@ def status(settings: Settings) -> str:
     return "\n".join(lines)
 
 
+def recent_logs(settings: Settings, limit: int = 50) -> str:
+    """Return recent algo logs through the service-owned read function."""
+    connection = _connect(settings.database, read_only=True)
+    try:
+        rows = connection.execute(
+            """
+            SELECT ts,level,message FROM logs
+            WHERE service='algo'
+            ORDER BY rowid DESC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    finally:
+        connection.close()
+    lines = ["utc                  level  message"]
+    for row in rows:
+        timestamp = datetime.fromtimestamp(int(row["ts"]), UTC).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        lines.append("%-20s %-6s %s" % (timestamp, row["level"], row["message"]))
+    return "\n".join(lines)
+
+
+def request_operation(settings: Settings, operation: str) -> dict[str, Any]:
+    """Submit work to the one running algo writer."""
+    if operation not in ("cycle", "recalculate"):
+        raise ConfigError("unknown algo operation: %s" % operation)
+    request = Request(
+        "http://127.0.0.1:%d/%s" % (settings.api_port, operation),
+        data=b"{}",
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=5) as response:
+            payload = json.load(response)
+    except HTTPError as exc:
+        try:
+            detail = json.load(exc)
+        except (json.JSONDecodeError, OSError):
+            detail = {"error": exc.reason}
+        raise ConfigError(
+            "algo %s request failed: %s"
+            % (operation, detail.get("error", exc.reason))
+        ) from exc
+    except (URLError, OSError) as exc:
+        raise ConfigError(
+            "algo service is unavailable; start it with: make algo-install"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ConfigError("algo service returned an invalid response")
+    return payload
+
+
 class Service:
     def __init__(self, config_path: Path):
         self.config_path = config_path.resolve()
         self.settings = load_settings(self.config_path)
         self.stop_event = threading.Event()
+        self.wake_event = threading.Event()
+        self.operation_lock = threading.Lock()
+        self.recalculation_requested = False
+        self.recalculation_status: dict[str, Any] = {
+            "name": "recalculate",
+            "status": "idle",
+        }
         self.started_at = int(time.time())
         self.alert_resume_after = self.started_at
 
     def health(self) -> dict[str, Any]:
+        with self.operation_lock:
+            recalculation = dict(self.recalculation_status)
         return {
             "ok": True,
             "service": "algo",
@@ -3876,10 +4063,50 @@ class Service:
             "ts": int(time.time()),
             "started_at": self.started_at,
             "pid": os.getpid(),
+            "operation": recalculation,
         }
+
+    def request_recalculation(self) -> bool:
+        with self.operation_lock:
+            if self.recalculation_status["status"] in ("queued", "running"):
+                return False
+            self.recalculation_requested = True
+            self.recalculation_status = {
+                "name": "recalculate",
+                "status": "queued",
+                "requested_at": int(time.time()),
+            }
+        self.wake_event.set()
+        return True
+
+    def request_cycle(self) -> None:
+        self.alert_resume_after = int(time.time())
+        self.wake_event.set()
+
+    def _take_recalculation(self) -> bool:
+        with self.operation_lock:
+            if not self.recalculation_requested:
+                return False
+            self.recalculation_requested = False
+            self.recalculation_status["status"] = "running"
+            self.recalculation_status["started_at"] = int(time.time())
+        self.alert_resume_after = int(time.time())
+        return True
+
+    def _finish_recalculation(self, error: Optional[Exception] = None) -> None:
+        with self.operation_lock:
+            if error is None:
+                self.recalculation_status["status"] = "complete"
+                self.recalculation_status["completed_at"] = int(time.time())
+                self.recalculation_status.pop("error", None)
+            else:
+                self.recalculation_status["status"] = "failed"
+                self.recalculation_status["failed_at"] = int(time.time())
+                self.recalculation_status["error"] = str(error)
 
     def stop(self, signum=None, frame=None) -> None:
         self.stop_event.set()
+        self.wake_event.set()
 
     def run(self) -> None:
         signal.signal(signal.SIGINT, self.stop)
@@ -3899,7 +4126,11 @@ class Service:
         try:
             logging.info("service started api=127.0.0.1:%d", self.settings.api_port)
             _best_effort_log(self.config_path, "info", "service started")
+            recalculation_running = False
             while not self.stop_event.is_set():
+                force_recalculate = self._take_recalculation()
+                if force_recalculate:
+                    recalculation_running = True
                 try:
                     observed = load_settings(self.config_path)
                     if observed.content != self.settings.content:
@@ -3908,14 +4139,24 @@ class Service:
                         self.config_path,
                         self.stop_event,
                         alert_resume_after=self.alert_resume_after,
+                        force_recalculate=force_recalculate,
                     )
                     self.settings = settings
+                    if (
+                        recalculation_running
+                        and stats["pairs"] < CYCLE_PAIR_LIMIT
+                    ):
+                        self._finish_recalculation()
+                        recalculation_running = False
                     delay = (
                         0
                         if stats["pairs"] == CYCLE_PAIR_LIMIT
                         else settings.poll_seconds
                     )
                 except ConfigError as exc:
+                    if recalculation_running:
+                        self._finish_recalculation(exc)
+                        recalculation_running = False
                     logging.exception("configuration reload failed")
                     _best_effort_log(
                         self.config_path,
@@ -3925,10 +4166,14 @@ class Service:
                     )
                     raise
                 except Exception as exc:
+                    if recalculation_running:
+                        self._finish_recalculation(exc)
+                        recalculation_running = False
                     delay = 30
                     logging.exception("cycle failed")
                     _best_effort_log(self.config_path, "error", "cycle failed: %s" % exc)
-                self.stop_event.wait(delay)
+                self.wake_event.wait(delay)
+                self.wake_event.clear()
             _best_effort_log(self.config_path, "info", "service stopped")
         finally:
             health_server.shutdown()
@@ -3947,6 +4192,30 @@ class _HealthHandler(BaseHTTPRequestHandler):
             self.server.service.health(), separators=(",", ":")
         ).encode("utf-8")
         self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self) -> None:  # noqa: N802
+        operation = urlparse(self.path).path.lstrip("/")
+        if operation == "cycle":
+            self.server.service.request_cycle()
+            payload = {"ok": True, "operation": "cycle", "status": "queued"}
+            status = 202
+        elif operation == "recalculate":
+            accepted = self.server.service.request_recalculation()
+            payload = {
+                "ok": accepted,
+                "operation": "recalculate",
+                "status": "queued" if accepted else "already_running",
+            }
+            status = 202 if accepted else 409
+        else:
+            self.send_error(404)
+            return
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -3977,6 +4246,8 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("serve")
     commands.add_parser("once")
     commands.add_parser("status")
+    commands.add_parser("logs")
+    commands.add_parser("recalculate")
     commands.add_parser("validate")
     evaluate = commands.add_parser("core")
     evaluate.add_argument("ticker")
@@ -3996,14 +4267,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if arguments.command == "serve":
             Service(config_path).run()
         elif arguments.command == "once":
-            stats, settings = cycle(config_path)
             print(
-                "processed pairs=%d outputs=%d entries=%d exits=%d"
-                % (stats["pairs"], stats["outputs"], stats["entries"], stats["exits"])
+                json.dumps(
+                    request_operation(load_settings(config_path), "cycle"),
+                    sort_keys=True,
+                )
             )
-            print(status(settings))
         elif arguments.command == "status":
             print(status(load_settings(config_path)))
+        elif arguments.command == "logs":
+            print(recent_logs(load_settings(config_path)))
+        elif arguments.command == "recalculate":
+            print(
+                json.dumps(
+                    request_operation(load_settings(config_path), "recalculate"),
+                    sort_keys=True,
+                )
+            )
         elif arguments.command == "validate":
             settings = load_settings(config_path)
             print(
@@ -4026,8 +4306,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
     except (ConfigError, EvaluationError, sqlite3.Error) as exc:
         logging.error("%s", exc)
-        if arguments.command == "once":
-            _best_effort_log(config_path, "error", "once failed: %s" % exc)
         return 1
 
 

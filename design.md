@@ -195,9 +195,13 @@ Add a signal, add an algo, or change a parameter by editing the config file.
 The algo service reacts on its own:
 
 1. It validates and applies the new live definitions immediately.
-2. The service clears derived live outputs and affected trades, then refills
-   the evaluation window. The rows are keyed, so the run is resumable.
-3. The dashboard shows the current algorithm definition and rebuilt results.
+2. The service starts its standard recalculation. In one transaction, it
+   deletes derived live outputs immediately before the first replacement
+   output insert, and deletes affected trades immediately before their first
+   replacement inserts. A delete that matches no rows is successful.
+3. The service refills the rest of the evaluation window. The rows are keyed,
+   so the run is resumable.
+4. The dashboard shows the current algorithm definition and rebuilt results.
 
 Easy: one file edit, no deploy. Fast: the work is bounded by the
 evaluation window, never by the full history. 
@@ -257,11 +261,14 @@ Ad-hoc views may call the core directly; the call writes nothing.
 ## Service status and logs
 
 Bars and Algo each expose `GET /health` on a loopback-only port. Dash calls
-them to check process liveness; the calls write nothing. Each service appends
-only completed work summaries and problems to the logs table, not periodic
-heartbeats or idle-cycle rows. The dashboard reads logs for history, warnings,
-and errors. The table remains safe because it is append-only and each service
-writes only rows tagged with its own name.
+them to check process liveness; the calls write nothing. Bars also accepts
+named poll, backfill, and sweep operations. Algo accepts a named cycle and full
+recalculation. Repository commands call these APIs; there is no operational
+custom-SQL interface. Each service appends only completed work summaries and
+problems to the logs table, not periodic heartbeats or idle-cycle rows. The
+dashboard reads logs for history, warnings, and errors. The table remains safe
+because it is append-only and each service writes only rows tagged with its own
+name.
 
 ## Database schema
 

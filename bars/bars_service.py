@@ -24,7 +24,9 @@ from datetime import date, datetime, time as clock_time, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Sequence, Tuple
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
+from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 import httpx2
@@ -966,8 +968,16 @@ class JobState:
 
 
 class BarStore:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, read_only: bool = False):
         self.path = path
+        self.read_only = read_only
+        if read_only:
+            uri = "file:%s?mode=ro" % self.path.resolve()
+            self.connection = sqlite3.connect(uri, uri=True, timeout=30)
+            self.connection.row_factory = sqlite3.Row
+            self.connection.execute("PRAGMA busy_timeout=30000")
+            return
+
         self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
             schema = SCHEMA_PATH.read_text()
@@ -1191,6 +1201,15 @@ class BarStore:
                 "INSERT INTO logs(ts, service, level, message) VALUES (?, ?, ?, ?)",
                 (_epoch(datetime.now(UTC)), "bars", level, message),
             )
+
+    def recent_logs(self, limit: int = 50) -> List[sqlite3.Row]:
+        return self.connection.execute(
+            """
+            SELECT ts,service,level,message FROM logs
+            ORDER BY rowid DESC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
 
     def sweep_complete(self, day: date) -> bool:
         row = self.connection.execute(
@@ -1502,15 +1521,65 @@ class Collector:
         lines.append("database %s" % self.store.path)
         return "\n".join(lines)
 
+    def logs_text(self, limit: int = 50) -> str:
+        rows = self.store.recent_logs(limit)
+        lines = ["utc                  service  level  message"]
+        for row in rows:
+            timestamp = datetime.fromtimestamp(int(row["ts"]), UTC).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            lines.append(
+                "%-20s %-8s %-6s %s"
+                % (timestamp, row["service"], row["level"], row["message"])
+            )
+        return "\n".join(lines)
+
+
+def request_operation(settings: Settings, operation: str) -> dict:
+    """Submit collection work to the one running bars writer."""
+    if operation not in ("poll", "backfill", "sweep"):
+        raise ConfigError("unknown bars operation: %s" % operation)
+    request = Request(
+        "http://127.0.0.1:%d/%s" % (settings.api_port, operation),
+        data=b"{}",
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=5) as response:
+            payload = json.load(response)
+    except HTTPError as exc:
+        try:
+            detail = json.load(exc)
+        except (json.JSONDecodeError, OSError):
+            detail = {"error": exc.reason}
+        raise ConfigError(
+            "bars %s request failed: %s"
+            % (operation, detail.get("error", exc.reason))
+        ) from exc
+    except (URLError, OSError) as exc:
+        raise ConfigError(
+            "bars service is unavailable; start it with: make install"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ConfigError("bars service returned an invalid response")
+    return payload
+
 
 class Service:
     def __init__(self, collector: Collector):
         self.collector = collector
         self.settings = collector.settings
         self.stop_event = threading.Event()
+        self.wake_event = threading.Event()
+        self.operation_lock = threading.Lock()
+        self.requested_operation: Optional[str] = None
+        self.operation_status: dict = {"name": None, "status": "idle"}
         self.started_at = _epoch(datetime.now(UTC))
 
     def health(self) -> dict:
+        with self.operation_lock:
+            operation = dict(self.operation_status)
         return {
             "ok": True,
             "service": "bars",
@@ -1518,11 +1587,49 @@ class Service:
             "ts": _epoch(datetime.now(UTC)),
             "started_at": self.started_at,
             "pid": os.getpid(),
+            "operation": operation,
         }
+
+    def request_operation(self, name: str) -> bool:
+        if name not in ("poll", "backfill", "sweep"):
+            return False
+        with self.operation_lock:
+            if self.operation_status["status"] in ("queued", "running"):
+                return False
+            self.requested_operation = name
+            self.operation_status = {
+                "name": name,
+                "status": "queued",
+                "requested_at": _epoch(datetime.now(UTC)),
+            }
+        self.wake_event.set()
+        return True
+
+    def _take_operation(self) -> Optional[str]:
+        with self.operation_lock:
+            name = self.requested_operation
+            if name is None:
+                return None
+            self.requested_operation = None
+            self.operation_status["status"] = "running"
+            self.operation_status["started_at"] = _epoch(datetime.now(UTC))
+            return name
+
+    def _finish_operation(self, error: Optional[Exception] = None) -> None:
+        with self.operation_lock:
+            if error is None:
+                self.operation_status["status"] = "complete"
+                self.operation_status["completed_at"] = _epoch(datetime.now(UTC))
+                self.operation_status.pop("error", None)
+            else:
+                self.operation_status["status"] = "failed"
+                self.operation_status["failed_at"] = _epoch(datetime.now(UTC))
+                self.operation_status["error"] = str(error)
 
     def stop(self, signum=None, frame=None) -> None:
         logging.info("stopping service")
         self.stop_event.set()
+        self.wake_event.set()
 
     async def _cycle(self) -> int:
         now = datetime.now(UTC)
@@ -1537,6 +1644,16 @@ class Service:
         if now >= final_at and not self.collector.store.sweep_complete(day):
             await self.collector.sweep(now, scheduled_day=day)
         return self.settings.idle_seconds
+
+    async def _run_operation(self, name: str) -> None:
+        if name == "poll":
+            await self.collector.poll()
+        elif name == "backfill":
+            await self.collector.backfill(force=True)
+        elif name == "sweep":
+            await self.collector.sweep()
+        else:
+            raise ConfigError("unknown bars operation: %s" % name)
 
     def run(self) -> None:
         signal.signal(signal.SIGTERM, self.stop)
@@ -1560,18 +1677,28 @@ class Service:
             self.collector.store.append_log("info", "service started")
             delay = self.settings.retry_seconds
             while not self.stop_event.is_set():
+                requested = self._take_operation()
                 try:
-                    wait_seconds = asyncio.run(self._cycle())
+                    if requested is None:
+                        wait_seconds = asyncio.run(self._cycle())
+                    else:
+                        asyncio.run(self._run_operation(requested))
+                        self._finish_operation()
+                        wait_seconds = 0
                     delay = self.settings.retry_seconds
-                    self.stop_event.wait(wait_seconds)
+                    self.wake_event.wait(wait_seconds)
+                    self.wake_event.clear()
                 except Exception as exc:
+                    if requested is not None:
+                        self._finish_operation(exc)
                     message = "cycle failed: %s" % exc
                     logging.exception("%s; retrying in %d seconds", message, delay)
                     try:
                         self.collector.store.append_log("error", message)
                     except sqlite3.Error:
                         logging.exception("could not write failure to logs table")
-                    self.stop_event.wait(delay)
+                    self.wake_event.wait(delay)
+                    self.wake_event.clear()
                     delay = min(delay * 2, self.settings.retry_max_seconds)
             self.collector.store.append_log("info", "service stopped")
             logging.info("service stopped")
@@ -1591,6 +1718,24 @@ class _HealthHandler(BaseHTTPRequestHandler):
         payload = self.server.service.health()
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self) -> None:  # noqa: N802
+        operation = urlparse(self.path).path.lstrip("/")
+        if operation not in ("poll", "backfill", "sweep"):
+            self.send_error(404)
+            return
+        accepted = self.server.service.request_operation(operation)
+        payload = {
+            "ok": accepted,
+            "operation": operation,
+            "status": "queued" if accepted else "already_running",
+        }
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        self.send_response(202 if accepted else 409)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -1617,10 +1762,11 @@ def _parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("auth", help="authorize the direct Robinhood connection")
     subparsers.add_parser("serve", help="run the always-on collector")
-    subparsers.add_parser("once", help="run one live poll from the last stored bars")
-    subparsers.add_parser("backfill", help="fetch the configured initial window")
-    subparsers.add_parser("sweep", help="fetch the configured trailing window")
+    subparsers.add_parser("once", help="request one live poll from the bars service")
+    subparsers.add_parser("backfill", help="request the configured initial backfill")
+    subparsers.add_parser("sweep", help="request the configured trailing sweep")
     subparsers.add_parser("status", help="show local bar coverage")
+    subparsers.add_parser("logs", help="show recent service logs")
 
     query = subparsers.add_parser("query", help="read stored bars")
     query.add_argument("symbol")
@@ -1637,7 +1783,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     store = None
     try:
         settings = load_settings(arguments.config.resolve())
-        store = BarStore(settings.database)
+        submitted_operation = {
+            "once": "poll",
+            "backfill": "backfill",
+            "sweep": "sweep",
+        }.get(arguments.command)
+        if submitted_operation is not None:
+            print(
+                json.dumps(
+                    request_operation(settings, submitted_operation),
+                    sort_keys=True,
+                )
+            )
+            return 0
+
+        store = BarStore(
+            settings.database,
+            read_only=arguments.command in ("status", "logs", "query"),
+        )
         collector = Collector(settings, store)
 
         if arguments.command == "auth":
@@ -1647,17 +1810,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print("Available tools: %d" % len(tools))
         elif arguments.command == "serve":
             Service(collector).run()
-        elif arguments.command == "once":
-            asyncio.run(collector.poll())
-            print(collector.status_text())
-        elif arguments.command == "backfill":
-            asyncio.run(collector.backfill(force=True))
-            print(collector.status_text())
-        elif arguments.command == "sweep":
-            asyncio.run(collector.sweep())
-            print(collector.status_text())
         elif arguments.command == "status":
             print(collector.status_text())
+        elif arguments.command == "logs":
+            print(collector.logs_text())
         elif arguments.command == "query":
             ticker = arguments.symbol.strip().upper()
             if ticker not in settings.tickers:
@@ -1694,7 +1850,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
     except (ConfigError, RelayError, sqlite3.Error, OSError) as exc:
         logging.error("%s", exc)
-        if store is not None:
+        if store is not None and not store.read_only:
             try:
                 store.append_log("error", "%s failed: %s" % (arguments.command, exc))
             except sqlite3.Error:

@@ -36,10 +36,12 @@ SNDK to SNXX/SNDQ and keeps quantity at zero.
 The default config enables `orb5`, `sentiment_pullback`, and four migrations
 from the DT roster. The `shape` path forecast remains read-only.
 
-The service exposes read-only process health at
-`http://127.0.0.1:8791/health` for Dash. A non-empty cycle logs progress every
-1,000 pairs and a batch summary. It also stores warnings and errors in `logs`.
-It does not write heartbeat or idle-cycle rows.
+The service exposes process health and the current operation at
+`http://127.0.0.1:8791/health` for Dash. Its loopback API accepts
+`POST /cycle` and `POST /recalculate`; the named commands below call those
+endpoints. A non-empty cycle logs progress every 1,000 pairs and a batch
+summary. It also stores warnings and errors in `logs`. It does not write
+heartbeat or idle-cycle rows.
 
 ## Config
 
@@ -224,9 +226,14 @@ When an effective algorithm definition changes or is removed, the corresponding
 live row changes or is deleted. Git and `config/config.json` are the definition
 history; the database holds current state only.
 
-Any signal or algorithm definition change clears the derived live output cache.
-Trades for affected algorithms are also cleared before their current results
-are rebuilt.
+Any signal or effective algorithm definition change starts the standard
+recalculation path. In one transaction, that path deletes the derived live
+outputs immediately before it inserts the first recalculated outputs. It also
+deletes each affected algorithm's trades immediately before inserting that
+algorithm's first recalculated trade rows. Either delete can affect zero rows.
+The rest of the bounded recalculation is resumable. Git and
+`config/config.json` remain the definition history; the database stores only
+the current definition and results.
 
 ## Operate
 
@@ -234,13 +241,18 @@ Run from the repository root:
 
 ```sh
 make algo-validate
-make algo-once
+make algo-once                 # ask the running service for one cycle
+make algo-recalculate          # replace all calculated algo results
 make algo-status
 make algo-install
 make algo-restart
 make algo-logs
 make algo-uninstall
 ```
+
+Do not open the SQLite database or delete rows by hand. Use
+`make algo-recalculate` for an explicit rebuild. Editing an effective signal or
+algorithm definition invokes the same recalculation automatically.
 
 Run one read-only core call without writing output, trades, definitions, or logs:
 

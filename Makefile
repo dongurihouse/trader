@@ -8,7 +8,8 @@ ALGO_LABEL := com.xup.algo
 ALGO_PLIST := $(HOME)/Library/LaunchAgents/$(ALGO_LABEL).plist
 
 .PHONY: sync auth install uninstall restart status logs once backfill sweep query \
-	algo-validate algo-install algo-uninstall algo-restart algo-status algo-logs algo-once
+	algo-validate algo-install algo-uninstall algo-restart algo-status algo-logs algo-once \
+	algo-recalculate
 
 sync:
 	@$(UV) sync --project bars --frozen
@@ -36,8 +37,7 @@ status:
 	@$(PYTHON) bars/bars_service.py status
 
 logs:
-	@sqlite3 -header -column data/trader.sqlite3 \
-		"SELECT datetime(ts, 'unixepoch') AS utc, service, level, message FROM logs ORDER BY rowid DESC LIMIT 50"
+	@$(PYTHON) bars/bars_service.py logs
 
 once:
 	@$(PYTHON) bars/bars_service.py once
@@ -74,8 +74,10 @@ algo-status:
 	@$(ALGO_PYTHON) algo/algo_service.py status
 
 algo-logs:
-	@sqlite3 -header -column data/trader.sqlite3 \
-		"SELECT datetime(ts, 'unixepoch') AS utc, level, message FROM logs WHERE service='algo' ORDER BY rowid DESC LIMIT 50"
+	@$(ALGO_PYTHON) algo/algo_service.py logs
 
 algo-once:
 	@$(ALGO_PYTHON) algo/algo_service.py once
+
+algo-recalculate:
+	@$(ALGO_PYTHON) algo/algo_service.py recalculate
