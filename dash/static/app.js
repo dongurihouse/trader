@@ -5,6 +5,11 @@ const initialParameters = new URLSearchParams(window.location.search);
 const requestedDate = initialParameters.get("date");
 const requestedTicker = initialParameters.get("ticker");
 
+function algorithmUrl(name) {
+  const parameters = new URLSearchParams({ algo: name });
+  return `/algos?${parameters}`;
+}
+
 const state = {
   overview: null,
   ticker: requestedTicker?.toUpperCase() || null,
@@ -317,6 +322,7 @@ class PriceChart {
     this.indicators = { rsi: [], macd: [], roc: [] };
     this.barIndexByTimestamp = new Map();
     this.tradePresentationCache = null;
+    this.tradeMarkerHitAreas = [];
     this.payload = null;
     this.momentumByTimestamp = new Map();
     this.hoverIndex = null;
@@ -423,6 +429,15 @@ class PriceChart {
 
   tradeKey(trade) {
     return `${trade.algo}|${Number(trade.ts)}`;
+  }
+
+  tradeMarkerAt(event) {
+    const rectangle = this.canvas.getBoundingClientRect();
+    const x = event.clientX - rectangle.left;
+    const y = event.clientY - rectangle.top;
+    return [...this.tradeMarkerHitAreas].reverse().find((area) => (
+      x >= area.left && x <= area.right && y >= area.top && y <= area.bottom
+    ))?.trade || null;
   }
 
   tradePresentation() {
@@ -768,6 +783,13 @@ class PriceChart {
         top: badgeTop,
         bottom: badgeTop + badgeHeight,
       });
+      this.tradeMarkerHitAreas.push({
+        trade,
+        left: actionLeft,
+        right: actionLeft + actionWidth,
+        top: badgeTop,
+        bottom: badgeTop + badgeHeight,
+      });
       const actionCenterX = actionLeft + actionWidth / 2;
       const leaderEndY = badgeBelowPrice ? badgeTop : badgeTop + badgeHeight;
 
@@ -1052,6 +1074,7 @@ class PriceChart {
     const { width, height } = this.size();
     const ctx = this.context;
     ctx.clearRect(0, 0, width, height);
+    this.tradeMarkerHitAreas = [];
     const bars = this.visibleBars();
     if (!bars.length) return;
 
@@ -1420,6 +1443,7 @@ class PriceChart {
   }
 
   onPointerMove(event) {
+    this.canvas.classList.toggle("is-trade-link", Boolean(this.tradeMarkerAt(event)));
     if (event.pointerType === "touch" && this.touchPointers.has(event.pointerId)) {
       this.touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
     }
@@ -1470,6 +1494,11 @@ class PriceChart {
       this.suppressClick = false;
       return;
     }
+    const trade = this.tradeMarkerAt(event);
+    if (trade) {
+      window.location.assign(algorithmUrl(trade.algo));
+      return;
+    }
     const index = this.pointerIndex(event);
     const bar = index === null ? null : this.visibleBars()[index];
     if (!bar) return;
@@ -1515,6 +1544,7 @@ class PriceChart {
 
   clearPointer() {
     this.hoverIndex = null;
+    this.canvas.classList.remove("is-trade-link");
     this.tooltip.hidden = true;
     this.notifyInspection();
     this.draw();

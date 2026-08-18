@@ -51,6 +51,7 @@ the loopback ports configured by `bars.api_port` and `algo.api_port`.
 - Minute-level bars remain available for zooming and panning.
 - Switchable line and candlestick chart styles.
 - Paired `IN` and `OUT` markers for every stored trading algorithm, read from `trades`.
+- Select an `IN` or `OUT` marker to open its algorithm summary.
 - Per-algorithm holding-span connectors and realized returns calculated from exact bar-close prices.
 - Marker placement for long and short actions, with action details on hover.
 - Hover inspection and click-locked bar focus update price, change, time, and shape probabilities.

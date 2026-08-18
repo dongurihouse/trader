@@ -23,7 +23,8 @@ const pacificDateKeyFormat = new Intl.DateTimeFormat("en-US", {
   day: "2-digit",
 });
 let algorithms = [];
-let selectedAlgorithmName = null;
+let selectedAlgorithmName = new URLSearchParams(window.location.search).get("algo");
+let revealSelectedAlgorithm = Boolean(selectedAlgorithmName);
 
 function createElement(tag, className, text) {
   const element = document.createElement(tag);
@@ -398,6 +399,12 @@ function render(payload) {
   }
   renderAlgorithmSwitcher();
   renderSelectedAlgorithm();
+  if (revealSelectedAlgorithm) {
+    revealSelectedAlgorithm = false;
+    requestAnimationFrame(() => {
+      $("#algo-strip .algo-tab.active")?.scrollIntoView({ block: "nearest", inline: "center" });
+    });
+  }
 }
 
 $("#algo-strip").addEventListener("click", (event) => {

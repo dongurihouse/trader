@@ -1207,6 +1207,10 @@ h1 em {
   user-select: none;
 }
 
+#price-chart.is-trade-link {
+  cursor: pointer;
+}
+
 #price-chart.is-dragging {
   cursor: grabbing;
 }
