@@ -2449,20 +2449,19 @@ a.algo-trade-row:focus-visible {
   }
 
   .chart-only-main {
-    height: calc(100dvh - 64px);
-    min-height: 0;
-    overflow: hidden;
+    min-height: calc(100dvh - 64px);
     padding-block: 11px;
   }
 
-  .chart-only-main .chart-card {
-    min-height: 0;
+  .chart-only-main .chart-stage {
+    min-height: 340px;
   }
 
-  .chart-only-main .chart-stage {
-    min-height: 0;
-    flex: 1 1 0;
-    height: auto;
+  .chart-only-main #price-chart {
+    position: absolute;
+    inset: 0;
+    display: block;
+    min-height: 340px;
   }
 
   .market-heading {
