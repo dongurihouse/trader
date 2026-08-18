@@ -24,9 +24,14 @@ a background thread and cannot stop evaluation. Set `TRADER_SMS_TO` in the
 environment or the repository `.env`; when it is absent, Trader reuses the
 existing `DT_SMS_TO` setting from the sibling `dt` checkout.
 
-This service does not submit broker orders. The removed SNDK-specific adapter
-could not express universal long and short execution safely. Trade rows and
-live Messages alerts continue for every configured ticker.
+The same live-only gate submits a Robinhood equity order only when
+`broker.enabled` is true and the signal ticker has an `execution_tickers`
+mapping. A long entry buys that mapping's `long` symbol; a short entry buys its
+`short` symbol; the matching exit sells it. Tickers without both configured
+symbols remain paper-and-alert only. Orders use market, regular-hours,
+good-for-day terms and a deterministic idempotency key. The account comes from
+the environment variable named by `broker.account_env`. The initial config maps
+SNDK to SNXX/SNDQ and keeps quantity at zero.
 
 The default config enables `orb5`, `sentiment_pullback`, and four migrations
 from the DT roster. The `shape` path forecast remains read-only.
@@ -155,8 +160,8 @@ bar within `confirmation_bars` closes in the reversal direction beyond the
 extreme bar's close. Its threshold uses only complete prior sessions. It enters
 at most once per session, never adds to an open unit, and exits on its configured
 close-based profit, close-based loss, time, market-pattern, or end-of-session
-rule. One unit maps to at most 50% of capital; this signal service does not place
-or size brokerage orders.
+rule. One unit maps to at most 50% of capital for performance reporting; broker
+submission uses its separately configured fixed quantity.
 
 The four migrated algorithms run on every configured ticker and enter at most
 once per regular session. `lateday_momentum` follows a large first-half-hour

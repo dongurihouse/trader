@@ -13,7 +13,7 @@ token.
 
 ## Behavior
 
-- Backfill the configured 120-day window once for each ticker. A ticker added
+- Backfill from the configured fixed history start once for each ticker. A ticker added
   later gets the same backfill before its next poll or sweep. Failed work
   resumes after its last committed provider session.
 - During the configured live window, poll once per minute from each ticker's
@@ -39,7 +39,7 @@ timestamps. The shared schema is in `../config/schema.sql`.
 ## Configure
 
 Edit `../config/config.json`. It contains the ticker list, early-close dates,
-live polling window, 120-day initial backfill, 30-day sweep, and provider
+live polling window, fixed initial history start, 30-day sweep, and provider
 settings. The default live window is 04:00 Eastern through four hours after
 the regular or configured early close. `bars.api_port` sets the loopback health
 API port. `bars.poll_catchup_days` bounds one live catch-up cycle.
@@ -62,7 +62,7 @@ make status                  # process state plus stored coverage
 make logs                    # show the latest database logs
 make restart                 # reload after a config edit
 make once                    # run one live poll now
-make backfill                # force the 120-day backfill for every ticker
+make backfill                # force the configured history backfill for every ticker
 make sweep                   # run the trailing 30-day sweep now
 make uninstall               # stop it; keep the database
 ```

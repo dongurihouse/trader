@@ -1,7 +1,7 @@
 {
-  "version": 18,
+  "version": 19,
   "database": "../data/trader.sqlite3",
-  "tickers": ["SNDK", "MU", "WDC", "SPY", "QQQ"],
+  "tickers": ["SNDK", "MU", "WDC", "SPY", "QQQ", "SPCX"],
   "early_closes": ["2026-11-27", "2026-12-24"],
   "live_polling": {
     "start": "04:00",
@@ -13,7 +13,7 @@
   },
   "bars": {
     "api_port": 8789,
-    "backfill_days": 120,
+    "history_start": "2026-07-06",
     "sweep_days": 30,
     "poll_catchup_days": 7,
     "idle_seconds": 300,
@@ -26,6 +26,17 @@
       "oauth_callback_port": 8765,
       "timeout_seconds": 300,
       "max_symbols_per_call": 3
+    }
+  },
+  "broker": {
+    "enabled": true,
+    "quantity": "0",
+    "account_env": "TRADER_ROBINHOOD_ACCOUNT",
+    "execution_tickers": {
+      "SNDK": {
+        "long": "SNXX",
+        "short": "SNDQ"
+      }
     }
   },
   "algo": {

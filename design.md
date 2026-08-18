@@ -40,11 +40,11 @@ when.
 
 Initial backfill:
 
-- Fetch 120 days of minute bars once for each ticker.
+- Fetch minute bars from the configured fixed history start once for each ticker.
 - Record the fixed window, per-session progress, and completion in `bar_jobs`.
   A failed backfill resumes after its last committed session, while a completed
   ticker does not repeat the initial fetch.
-- A ticker added to config gets the same backfill before its next poll or
+- A ticker added to config gets the same fixed-start backfill before its next poll or
   sweep.
 
 Live poll:
@@ -293,7 +293,7 @@ CREATE TABLE bars (
 CREATE TABLE bar_jobs (
     kind         TEXT    NOT NULL,  -- backfill or sweep
     scope        TEXT    NOT NULL,  -- ticker, or all for a sweep
-    target       TEXT    NOT NULL,  -- day count, or scheduled sweep date
+    target       TEXT    NOT NULL,  -- history start, or scheduled sweep date
     window_start INTEGER NOT NULL,
     window_end   INTEGER NOT NULL,
     progress_ts  INTEGER,           -- last committed provider session

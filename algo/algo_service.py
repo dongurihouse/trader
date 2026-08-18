@@ -22,6 +22,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
+from broker import send_broker_orders
 from notify import send_trade_alerts
 from shape_signal import clear_shape_cache, normalize_shape_parameters, shape_v1
 from validation import require_float, require_int
@@ -92,6 +93,14 @@ class EvaluationError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class BrokerSettings:
+    enabled: bool
+    quantity: str
+    account_env: str
+    execution_tickers: Mapping[str, Mapping[str, str]]
+
+
+@dataclass(frozen=True)
 class Settings:
     version: str
     database: Path
@@ -108,6 +117,7 @@ class Settings:
     signal_order: tuple[str, ...]
     algo_order: tuple[str, ...]
     algo_requirements: Mapping[str, frozenset[str]]
+    broker: BrokerSettings
     content: str
 
     def enabled_signals(self) -> tuple[str, ...]:
@@ -194,6 +204,74 @@ def _nodes(document: Mapping[str, Any], key: str) -> dict[str, Mapping[str, Any]
             "inputs": inputs,
         }
     return nodes
+
+
+def _broker_settings(
+    document: Mapping[str, Any], tickers: tuple[str, ...]
+) -> BrokerSettings:
+    raw = document.get("broker", {})
+    if not isinstance(raw, dict):
+        raise ConfigError("broker must be an object")
+    unknown = set(raw) - {
+        "enabled",
+        "quantity",
+        "account_env",
+        "execution_tickers",
+    }
+    if unknown:
+        raise ConfigError("unknown broker settings: %s" % ", ".join(sorted(unknown)))
+    enabled = raw.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ConfigError("broker.enabled must be boolean")
+    quantity = raw.get("quantity", "0")
+    if not isinstance(quantity, str) or not re.fullmatch(
+        r"\d+(?:\.\d{1,6})?", quantity
+    ):
+        raise ConfigError("broker.quantity must be a non-negative decimal string")
+    account_env = raw.get("account_env", "TRADER_ROBINHOOD_ACCOUNT")
+    if not isinstance(account_env, str) or not re.fullmatch(
+        r"[A-Z_][A-Z0-9_]*", account_env
+    ):
+        raise ConfigError("broker.account_env must be an environment variable name")
+
+    configured = raw.get("execution_tickers", {})
+    if not isinstance(configured, dict):
+        raise ConfigError("broker.execution_tickers must be an object")
+    execution_tickers: dict[str, Mapping[str, str]] = {}
+    for raw_ticker, raw_mapping in configured.items():
+        ticker = raw_ticker.strip().upper() if isinstance(raw_ticker, str) else ""
+        if ticker not in tickers:
+            raise ConfigError(
+                "broker.execution_tickers contains an unconfigured ticker: %r"
+                % raw_ticker
+            )
+        if ticker in execution_tickers:
+            raise ConfigError("duplicate broker execution ticker: %s" % ticker)
+        if not isinstance(raw_mapping, dict) or set(raw_mapping) != {"long", "short"}:
+            raise ConfigError(
+                "broker.execution_tickers.%s must contain long and short" % ticker
+            )
+        mapping: dict[str, str] = {}
+        for direction in ("long", "short"):
+            value = raw_mapping[direction]
+            symbol = value.strip().upper() if isinstance(value, str) else ""
+            if not SYMBOL.fullmatch(symbol):
+                raise ConfigError(
+                    "broker.execution_tickers.%s.%s must be a ticker"
+                    % (ticker, direction)
+                )
+            mapping[direction] = symbol
+        if mapping["long"] == mapping["short"]:
+            raise ConfigError(
+                "broker.execution_tickers.%s long and short must differ" % ticker
+            )
+        execution_tickers[ticker] = mapping
+    return BrokerSettings(
+        enabled=enabled,
+        quantity=quantity,
+        account_env=account_env,
+        execution_tickers=execution_tickers,
+    )
 
 
 def _compile_dependencies(
@@ -377,6 +455,7 @@ def load_settings(
         signal_order=signal_order,
         algo_order=algo_order,
         algo_requirements=algo_requirements,
+        broker=_broker_settings(document, tuple(normalized)),
         content=_json(document),
     )
     return settings
@@ -3253,6 +3332,11 @@ def _report_alert_failure(config_path: Path, reason: str) -> None:
     _best_effort_log(config_path, "error", message)
 
 
+def _report_broker_result(config_path: Path, level: str, message: str) -> None:
+    getattr(logging, level)(message)
+    _best_effort_log(config_path, level, message)
+
+
 def cycle(
     config_path: Path,
     stop_event: Optional[threading.Event] = None,
@@ -3343,6 +3427,17 @@ def cycle(
                         config_path, reason
                     ),
                 )
+                if settings.broker.enabled:
+                    send_broker_orders(
+                        live_records,
+                        config_path=config_path,
+                        account_env=settings.broker.account_env,
+                        quantity=settings.broker.quantity,
+                        execution_tickers=settings.broker.execution_tickers,
+                        on_result=lambda level, message: _report_broker_result(
+                            config_path, level, message
+                        ),
+                    )
             if stats["pairs"] % CYCLE_PROGRESS_INTERVAL == 0:
                 progress = "cycle progress pairs=%d outputs=%d entries=%d exits=%d" % (
                     stats["pairs"], stats["outputs"], stats["entries"], stats["exits"]

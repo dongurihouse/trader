@@ -73,7 +73,6 @@ LIVE_INT_FIELDS = (
 )
 BARS_INT_FIELDS = (
     ("api_port", 8789, 1024),
-    ("backfill_days", 120, 1),
     ("sweep_days", 30, 1),
     ("poll_catchup_days", 7, 1),
     ("idle_seconds", 300, 30),
@@ -128,7 +127,7 @@ class Settings:
     after_close_minutes: int
     poll_seconds: int
     api_port: int
-    backfill_days: int
+    history_start: date
     sweep_days: int
     poll_catchup_days: int
     idle_seconds: int
@@ -270,6 +269,12 @@ def load_settings(path: Path) -> Settings:
     if bounds not in ("regular", "extended"):
         raise ConfigError("bars.provider.bounds must be 'regular' or 'extended'")
 
+    history_start_raw = bars.get("history_start")
+    try:
+        history_start = date.fromisoformat(history_start_raw)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("bars.history_start must be YYYY-MM-DD") from exc
+
     early_closes_raw = raw.get("early_closes") or []
     if not isinstance(early_closes_raw, list):
         raise ConfigError("early_closes must be a JSON list")
@@ -312,7 +317,7 @@ def load_settings(path: Path) -> Settings:
         after_close_minutes=live_ints["after_close_minutes"],
         poll_seconds=live_ints["poll_seconds"],
         api_port=bars_ints["api_port"],
-        backfill_days=bars_ints["backfill_days"],
+        history_start=history_start,
         sweep_days=bars_ints["sweep_days"],
         poll_catchup_days=bars_ints["poll_catchup_days"],
         idle_seconds=bars_ints["idle_seconds"],
@@ -1444,8 +1449,12 @@ class Collector:
     ) -> Optional[Dict[str, int]]:
         current = (now or datetime.now(UTC)).astimezone(UTC)
         selected = self.settings.tickers
-        start = current - timedelta(days=self.settings.backfill_days)
-        target = str(self.settings.backfill_days)
+        start = datetime.combine(
+            self.settings.history_start,
+            self.settings.live_start,
+            tzinfo=EASTERN,
+        ).astimezone(UTC)
+        target = self.settings.history_start.isoformat()
         self.store.ensure_jobs(
             "backfill",
             selected,
@@ -1459,10 +1468,10 @@ class Collector:
             return None
         stats = await self._run_jobs("backfill", target, jobs)
         self._record(
-            "backfill run complete tickers=%s days=%d"
+            "backfill run complete tickers=%s history_start=%s"
             % (
                 ",".join(job.scope for job in jobs),
-                self.settings.backfill_days,
+                self.settings.history_start.isoformat(),
             ),
             stats,
         )
