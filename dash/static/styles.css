@@ -1959,7 +1959,7 @@ pre {
 
 .algo-tab {
   display: grid;
-  flex: 0 0 clamp(360px, 30vw, 400px);
+  flex: 0 0 clamp(315px, calc(30vw - 45px), 355px);
   align-self: stretch;
   min-width: 0;
   padding: 0;
@@ -2624,6 +2624,10 @@ a.algo-trade-row:focus-visible {
 }
 
 @media (max-width: 900px) {
+  .algo-tab {
+    flex-basis: 330px;
+  }
+
   .algo-tab-metric-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -2715,7 +2719,7 @@ a.algo-trade-row:focus-visible {
   }
 
   .algo-tab {
-    flex-basis: min(82vw, 360px);
+    flex-basis: min(calc(82vw - 30px), 330px);
   }
 
   .algo-tab-summary {
