@@ -98,6 +98,23 @@ function formatSigned(value, suffix = "") {
   return `${number >= 0 ? "+" : ""}${number.toFixed(2)}${suffix}`;
 }
 
+function formatTradeReturn(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  return `${number >= 0 ? "+" : ""}${number.toFixed(Math.abs(number) >= 10 ? 0 : 1)}%`;
+}
+
+function roundedRectPath(ctx, x, y, width, height, radius) {
+  const corner = Math.max(0, Math.min(radius, width / 2, height / 2));
+  ctx.beginPath();
+  ctx.moveTo(x + corner, y);
+  ctx.arcTo(x + width, y, x + width, y + height, corner);
+  ctx.arcTo(x + width, y + height, x, y + height, corner);
+  ctx.arcTo(x, y + height, x, y, corner);
+  ctx.arcTo(x, y, x + width, y, corner);
+  ctx.closePath();
+}
+
 function formatShapeName(value) {
   return String(value || "")
     .replaceAll("_", " ")
@@ -296,6 +313,7 @@ class PriceChart {
     this.indicator = "rsi";
     this.indicators = { rsi: [], macd: [], roc: [] };
     this.barIndexByTimestamp = new Map();
+    this.tradePresentationCache = null;
     this.algo = null;
     this.payload = null;
     this.momentumByTimestamp = new Map();
@@ -339,6 +357,7 @@ class PriceChart {
     const wasAtLatest = this.viewEnd >= previousBars.length - 1;
     const previousStartTime = previousBars[this.viewStart]?.ts;
     this.payload = payload;
+    this.tradePresentationCache = null;
     this.indicators = commonMomentumIndicators(payload?.bars || []);
     this.barIndexByTimestamp = new Map(
       (payload?.bars || []).map((bar, index) => [Number(bar.ts), index]),
@@ -390,6 +409,7 @@ class PriceChart {
     const next = algo || null;
     if (next === this.algo) return;
     this.algo = next;
+    this.tradePresentationCache = null;
     this.updateLabel();
     this.draw();
   }
@@ -406,6 +426,52 @@ class PriceChart {
     return (this.payload?.trades || []).filter(
       (trade) => trade.algo === this.algo && Number(trade.ts) === Number(timestamp),
     );
+  }
+
+  tradePresentation() {
+    if (!this.algo) return { pairs: [], exitSummaries: new Map() };
+    if (this.tradePresentationCache) return this.tradePresentationCache;
+    const barByTimestamp = new Map(
+      (this.payload?.bars || []).map((bar) => [Number(bar.ts), bar]),
+    );
+    const trades = (this.payload?.trades || [])
+      .filter((trade) => trade.algo === this.algo)
+      .sort((left, right) => Number(left.ts) - Number(right.ts));
+    const openEntries = [];
+    const pairs = [];
+    const exitSummaries = new Map();
+
+    trades.forEach((trade) => {
+      if (trade.action === "entry") {
+        openEntries.push(trade);
+        return;
+      }
+      if (trade.action !== "exit_all") return;
+
+      const exitBar = barByTimestamp.get(Number(trade.ts));
+      const closed = openEntries.splice(0);
+      const returns = [];
+      closed.forEach((entry) => {
+        const entryBar = barByTimestamp.get(Number(entry.ts));
+        const entryPrice = Number(entryBar?.close);
+        const exitPrice = Number(exitBar?.close);
+        const direction = Number(entry.direction) < 0 ? -1 : 1;
+        const returnPct = Number.isFinite(entryPrice) && entryPrice > 0 && Number.isFinite(exitPrice)
+          ? ((exitPrice / entryPrice) - 1) * 100 * direction
+          : null;
+        if (Number.isFinite(returnPct)) returns.push(returnPct);
+        pairs.push({ entry, exit: trade, returnPct });
+      });
+      if (returns.length) {
+        exitSummaries.set(Number(trade.ts), {
+          entryCount: returns.length,
+          averageReturnPct: returns.reduce((total, value) => total + value, 0) / returns.length,
+        });
+      }
+    });
+
+    this.tradePresentationCache = { pairs, exitSummaries };
+    return this.tradePresentationCache;
   }
 
   shapeAt(timestamp) {
@@ -604,41 +670,142 @@ class PriceChart {
     const trades = this.visibleTrades(bars);
     if (!trades.length) return;
     const indexByTimestamp = new Map(bars.map((bar, index) => [Number(bar.ts), index]));
-    const markerSize = 5.5;
+    const barByTimestamp = new Map(bars.map((bar) => [Number(bar.ts), bar]));
+    const { pairs, exitSummaries } = this.tradePresentation();
+    const plotRight = (this.bounds?.width || this.canvas.clientWidth) - margin.right;
+    const badgeHeight = 18;
+    const placedBadges = [];
+
     ctx.save();
     ctx.lineJoin = "round";
+
+    pairs.forEach((pair) => {
+      const entryIndex = indexByTimestamp.get(Number(pair.entry.ts));
+      const exitIndex = indexByTimestamp.get(Number(pair.exit.ts));
+      if (entryIndex === undefined || exitIndex === undefined) return;
+      const entryBar = barByTimestamp.get(Number(pair.entry.ts));
+      const exitBar = barByTimestamp.get(Number(pair.exit.ts));
+      const resultColor = Number(pair.returnPct) >= 0 ? "216, 255, 114" : "255, 123, 115";
+
+      ctx.beginPath();
+      ctx.moveTo(x(entryIndex), y(entryBar.close));
+      ctx.lineTo(x(exitIndex), y(exitBar.close));
+      ctx.strokeStyle = `rgba(${resultColor}, 0.12)`;
+      ctx.lineWidth = 5;
+      ctx.setLineDash([]);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(x(entryIndex), y(entryBar.close));
+      ctx.lineTo(x(exitIndex), y(exitBar.close));
+      ctx.strokeStyle = `rgba(${resultColor}, 0.58)`;
+      ctx.lineWidth = 1.25;
+      ctx.setLineDash([5, 4]);
+      ctx.stroke();
+    });
+    ctx.setLineDash([]);
+
     trades.forEach((trade) => {
       const index = indexByTimestamp.get(Number(trade.ts));
       if (index === undefined) return;
       const bar = bars[index];
       const isEntry = trade.action === "entry";
       const isLong = Number(trade.direction) >= 0;
-      const pointsUp = isEntry ? isLong : !isLong;
+      const badgeBelowPrice = isEntry ? isLong : !isLong;
       const pointX = x(index);
-      const priceY = y(pointsUp ? bar.low : bar.high);
-      const markerY = pointsUp
-        ? Math.min(priceBottom - markerSize, priceY + 13)
-        : Math.max(margin.top + markerSize, priceY - 13);
-      const tipY = markerY + (pointsUp ? -markerSize : markerSize);
+      const priceY = y(bar.close);
       const color = isEntry ? "#70d8dc" : "#ff7b73";
+      const actionText = isEntry ? "IN" : "OUT";
+      const actionWidth = isEntry ? 28 : 34;
+      const summary = isEntry ? null : exitSummaries.get(Number(trade.ts));
+      const formattedReturn = formatTradeReturn(summary?.averageReturnPct);
+      const returnText = formattedReturn
+        ? `${summary.entryCount > 1 ? "AVG " : ""}${formattedReturn}`
+        : null;
+
+      ctx.font = "700 9px ui-monospace, SFMono-Regular, monospace";
+      const returnWidth = returnText ? Math.ceil(ctx.measureText(returnText).width) + 12 : 0;
+      const badgeGap = returnText ? 4 : 0;
+      const actionLeft = Math.max(
+        margin.left,
+        Math.min(plotRight - actionWidth, pointX - actionWidth / 2),
+      );
+      const returnLeft = !returnText
+        ? null
+        : actionLeft + actionWidth + badgeGap + returnWidth <= plotRight
+          ? actionLeft + actionWidth + badgeGap
+          : actionLeft - badgeGap - returnWidth;
+      const groupLeft = returnLeft === null ? actionLeft : Math.min(actionLeft, returnLeft);
+      const groupRight = returnLeft === null
+        ? actionLeft + actionWidth
+        : Math.max(actionLeft + actionWidth, returnLeft + returnWidth);
+      const boundedCenterY = (value) => Math.max(
+        margin.top + badgeHeight / 2,
+        Math.min(priceBottom - badgeHeight / 2, value),
+      );
+      let badgeCenterY = boundedCenterY(priceY + (badgeBelowPrice ? 28 : -28));
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const badgeTop = badgeCenterY - badgeHeight / 2;
+        const overlaps = placedBadges.some((placed) => (
+          groupLeft < placed.right + 3
+          && groupRight > placed.left - 3
+          && badgeTop < placed.bottom + 3
+          && badgeTop + badgeHeight > placed.top - 3
+        ));
+        if (!overlaps) break;
+        const shifted = boundedCenterY(
+          badgeCenterY + (badgeBelowPrice ? badgeHeight + 4 : -badgeHeight - 4),
+        );
+        if (shifted === badgeCenterY) break;
+        badgeCenterY = shifted;
+      }
+      const badgeTop = badgeCenterY - badgeHeight / 2;
+      placedBadges.push({
+        left: groupLeft,
+        right: groupRight,
+        top: badgeTop,
+        bottom: badgeTop + badgeHeight,
+      });
+      const actionCenterX = actionLeft + actionWidth / 2;
+      const leaderEndY = badgeBelowPrice ? badgeTop : badgeTop + badgeHeight;
 
       ctx.beginPath();
-      ctx.moveTo(pointX, priceY + (pointsUp ? 2 : -2));
-      ctx.lineTo(pointX, tipY);
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1;
-      ctx.stroke();
-
-      ctx.beginPath();
-      ctx.moveTo(pointX, tipY);
-      ctx.lineTo(pointX + markerSize, markerY + (pointsUp ? markerSize * 0.7 : -markerSize * 0.7));
-      ctx.lineTo(pointX - markerSize, markerY + (pointsUp ? markerSize * 0.7 : -markerSize * 0.7));
-      ctx.closePath();
-      ctx.fillStyle = color;
-      ctx.fill();
-      ctx.strokeStyle = "#101721";
+      ctx.moveTo(pointX, priceY + (badgeBelowPrice ? 4 : -4));
+      ctx.lineTo(actionCenterX, leaderEndY);
+      ctx.strokeStyle = isEntry ? "rgba(112, 216, 220, 0.82)" : "rgba(255, 123, 115, 0.82)";
       ctx.lineWidth = 1.4;
       ctx.stroke();
+
+      ctx.beginPath();
+      ctx.fillStyle = color;
+      ctx.arc(pointX, priceY, 3.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "#101721";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      roundedRectPath(ctx, actionLeft, badgeTop, actionWidth, badgeHeight, isEntry ? 9 : 3);
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.strokeStyle = "rgba(7, 16, 20, 0.9)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.fillStyle = "#071014";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(actionText, actionCenterX, badgeCenterY + 0.5);
+
+      if (returnText && returnLeft !== null) {
+        const resultColor = Number(summary.averageReturnPct) >= 0 ? "#d8ff72" : "#ff7b73";
+        roundedRectPath(ctx, returnLeft, badgeTop, returnWidth, badgeHeight, 3);
+        ctx.fillStyle = "rgba(10, 15, 21, 0.96)";
+        ctx.fill();
+        ctx.strokeStyle = resultColor;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.fillStyle = resultColor;
+        ctx.fillText(returnText, returnLeft + returnWidth / 2, badgeCenterY + 0.5);
+      }
     });
     ctx.restore();
   }
@@ -1193,11 +1360,18 @@ class PriceChart {
     this.tradesAt(bar.ts).forEach((trade) => {
       const action = trade.action === "exit_all" ? "exit" : "entry";
       const direction = Number(trade.direction) < 0 ? "Short" : "Long";
+      const summary = action === "exit"
+        ? this.tradePresentation().exitSummaries.get(Number(trade.ts))
+        : null;
+      const result = formatTradeReturn(summary?.averageReturnPct);
+      const resultDetail = result
+        ? ` · ${result}${summary.entryCount > 1 ? ` average across ${summary.entryCount} entries` : ""}`
+        : "";
       contents.push(
         createElement(
           "span",
           `algo-action ${action}`,
-          `${trade.algo.toUpperCase()} · ${direction} ${action}`,
+          `${trade.algo.toUpperCase()} · ${direction} ${action}${resultDetail}`,
         ),
       );
     });

@@ -50,8 +50,9 @@ the loopback ports configured by `bars.api_port` and `algo.api_port`.
   history chunks with up to three requests in flight.
 - Minute-level bars remain available for zooming and panning.
 - Switchable line and candlestick chart styles.
-- Automatic entry and exit markers for the configured trading algo, read from `trades`.
-- Up/down marker direction for long and short actions, with action details on hover.
+- Paired `IN` and `OUT` markers for the configured trading algo, read from `trades`.
+- Holding-span connectors and realized returns calculated from exact bar-close prices.
+- Marker placement for long and short actions, with action details on hover.
 - Hover inspection and click-locked bar focus update price, change, time, and shape probabilities.
 - Time zoom with the mouse wheel or a two-finger pinch on touch screens.
 - Horizontal wheel, trackpad, Shift+wheel, and drag panning across the loaded minute history.
