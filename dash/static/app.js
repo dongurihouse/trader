@@ -1379,6 +1379,42 @@ function renderShapeForest(shape) {
   list.replaceChildren(fragment);
 }
 
+function renderDayTrades(date) {
+  const title = $("#day-trades-title");
+  const list = $("#day-trades-list");
+  const algoName = state.algo ? formatShapeName(state.algo) : "Trade";
+  const session = state.sessions.find((candidate) => candidate.date === date);
+  title.textContent = session
+    ? `${algoName} entry / exit · ${pacificDateButton.format(dateFromEpoch(session.ts))}`
+    : `${algoName} entry / exit`;
+
+  if (!date) {
+    list.replaceChildren(createElement("span", "day-trades-unavailable", "Select a trading date"));
+    return;
+  }
+
+  const trades = (state.bars?.trades || [])
+    .filter((trade) => trade.algo === state.algo && pacificDateKey(trade.ts) === date)
+    .sort((left, right) => Number(left.ts) - Number(right.ts));
+  if (!trades.length) {
+    list.replaceChildren(createElement("span", "day-trades-unavailable", "No entries or exits"));
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  trades.forEach((trade) => {
+    const action = trade.action === "entry" ? "entry" : "exit";
+    const row = createElement("div", `day-trade-row ${action}`);
+    row.append(
+      createElement("time", "day-trade-time", pacificClock.format(dateFromEpoch(trade.ts))),
+      createElement("strong", "day-trade-action", action),
+      createElement("span", "day-trade-direction", Number(trade.direction) < 0 ? "Short" : "Long"),
+    );
+    fragment.append(row);
+  });
+  list.replaceChildren(fragment);
+}
+
 function renderInspection(inspection) {
   if (!inspection?.bar) return;
   $("#quote-price").textContent = `$${formatPrice(inspection.bar.close)}`;
@@ -1449,6 +1485,7 @@ function renderDateSelection(date) {
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", String(active));
   });
+  renderDayTrades(date);
 }
 
 function focusDate(date) {
@@ -1468,6 +1505,7 @@ function renderAlgoOverlay() {
   if (!configured.includes(state.algo)) state.algo = configured[0] || null;
 
   chart.setAlgo(state.algo);
+  renderDayTrades(state.selectedDate);
 }
 
 async function loadOverview({ quiet = false } = {}) {
@@ -1547,6 +1585,7 @@ function renderQuote() {
     : "Waiting for bars";
   $(".chart-header").dataset.mode = "latest";
   renderShapeForest(null);
+  renderDayTrades(null);
 }
 
 async function selectTicker(ticker) {

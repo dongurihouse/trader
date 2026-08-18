@@ -900,14 +900,14 @@ h1 em {
 
 .chart-header {
   display: grid;
-  grid-template-columns: 230px 170px 280px;
+  grid-template-columns: minmax(190px, 230px) minmax(145px, 170px) minmax(220px, 280px) minmax(220px, 1fr);
   align-items: start;
   gap: 24px;
 }
 
 .quote-block {
-  width: 230px;
-  min-width: 230px;
+  width: 100%;
+  min-width: 0;
 }
 
 .quote-block strong {
@@ -915,12 +915,13 @@ h1 em {
   font-weight: 520;
   letter-spacing: -0.045em;
   line-height: 1;
+  white-space: nowrap;
 }
 
 .quote-details {
   display: grid;
-  width: 170px;
-  min-width: 170px;
+  width: 100%;
+  min-width: 0;
   gap: 3px;
   padding-top: 5px;
 }
@@ -949,8 +950,8 @@ h1 em {
 }
 
 .shape-forest {
-  width: 280px;
-  min-width: 280px;
+  width: 100%;
+  min-width: 0;
   padding-left: 20px;
   border-left: 1px solid var(--line);
   font-family: var(--mono);
@@ -1010,6 +1011,68 @@ h1 em {
 }
 
 .shape-forest .shape-unavailable {
+  color: var(--subtle);
+  font-size: 0.6rem;
+}
+
+.day-trades {
+  min-width: 0;
+  padding-left: 20px;
+  border-left: 1px solid var(--line);
+  font-family: var(--mono);
+}
+
+.day-trades-title {
+  display: block;
+  margin-bottom: 4px;
+  overflow: hidden;
+  color: var(--subtle);
+  font-size: 0.52rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.day-trades-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 1px 14px;
+}
+
+.day-trade-row {
+  display: grid;
+  grid-template-columns: 54px auto 1fr;
+  gap: 7px;
+  align-items: baseline;
+  min-width: 0;
+  font-size: 0.6rem;
+}
+
+.day-trade-time {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.day-trade-action {
+  color: var(--cyan);
+  font-size: inherit;
+  text-transform: uppercase;
+}
+
+.day-trade-row.exit .day-trade-action {
+  color: var(--red);
+}
+
+.day-trade-direction {
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.day-trades-unavailable {
   color: var(--subtle);
   font-size: 0.6rem;
 }
@@ -2527,6 +2590,15 @@ pre {
     width: 100%;
     min-width: 0;
     padding-left: 14px;
+  }
+
+  .day-trades {
+    grid-column: 1 / -1;
+    width: 100%;
+    padding-top: 8px;
+    padding-left: 0;
+    border-top: 1px solid var(--line);
+    border-left: 0;
   }
 
   .chart-stage {
