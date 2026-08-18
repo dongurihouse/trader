@@ -109,6 +109,19 @@ button.brand {
   position: relative;
 }
 
+.brand-status {
+  position: relative;
+  display: inline-flex;
+}
+
+.brand-market-status {
+  position: absolute;
+  z-index: 1;
+  top: -6px;
+  right: -8px;
+  pointer-events: none;
+}
+
 .brand-chevron {
   margin-left: -4px;
   color: var(--subtle);
