@@ -1893,33 +1893,6 @@ pre {
   padding-block: 18px 70px;
 }
 
-.algo-rollup {
-  display: grid;
-  flex: 0 0 157px;
-  align-self: stretch;
-  min-width: 0;
-  align-items: center;
-  padding: 0 10px 0 4px;
-  border-right: 1px solid var(--line);
-}
-
-.algo-rollup-metrics {
-  display: grid;
-  grid-template-rows: repeat(2, minmax(0, 1fr));
-}
-
-.algo-rollup-metrics span {
-  display: grid;
-  gap: 5px;
-  padding: 10px 8px;
-  border-bottom: 1px solid var(--line);
-}
-
-.algo-rollup-metrics span:last-child {
-  border-bottom: 0;
-}
-
-.algo-rollup-metrics small,
 .algo-inputs > small {
   color: var(--subtle);
   font-family: var(--mono);
@@ -1927,13 +1900,6 @@ pre {
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-}
-
-.algo-rollup-metrics strong {
-  color: var(--text);
-  font-size: 1rem;
-  font-weight: 580;
-  letter-spacing: -0.025em;
 }
 
 .algo-switcher {
@@ -1960,7 +1926,8 @@ pre {
   display: contents;
 }
 
-.algo-tab {
+.algo-tab,
+.algo-average-card {
   display: grid;
   flex: 0 0 clamp(275px, calc(30vw - 85px), 315px);
   align-self: stretch;
@@ -1972,6 +1939,9 @@ pre {
   background: rgba(16, 23, 33, 0.72);
   border: 1px solid var(--line);
   border-radius: 12px;
+}
+
+.algo-tab {
   cursor: pointer;
   transition: 150ms ease;
 }
@@ -2635,7 +2605,8 @@ a.algo-trade-row:focus-visible {
 }
 
 @media (max-width: 900px) {
-  .algo-tab {
+  .algo-tab,
+  .algo-average-card {
     flex-basis: 330px;
   }
 
@@ -2703,32 +2674,16 @@ a.algo-trade-row:focus-visible {
     padding-block: 11px 40px;
   }
 
-  .algo-rollup {
-    flex-basis: 115px;
-    padding: 0 8px 0 0;
-  }
-
   .algo-switcher {
     padding: 8px;
-  }
-
-  .algo-rollup-metrics span,
-  .algo-rollup-metrics span:first-child,
-  .algo-rollup-metrics span:last-child {
-    padding: 8px 6px;
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
-  }
-
-  .algo-rollup-metrics span:last-child {
-    border-bottom: 0;
   }
 
   .algo-card {
     padding: 18px;
   }
 
-  .algo-tab {
+  .algo-tab,
+  .algo-average-card {
     flex-basis: min(calc(82vw - 30px), 330px);
   }
 

@@ -2,6 +2,7 @@ const $ = (selector) => document.querySelector(selector);
 const CHART_TICKER = "SNDK";
 
 const numberFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
+const decimalNumberFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 });
 const pacificDateTime = new Intl.DateTimeFormat("en-US", {
   timeZone: "America/Los_Angeles",
   month: "short",
@@ -140,11 +141,21 @@ function renderRollup(payload) {
       .filter(Number.isFinite);
     return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
   };
-  const averageReturn = average("realized_return_pct");
-  const averageWinRate = average("win_rate");
-  $("#algo-return").textContent = returnPoints(averageReturn);
-  $("#algo-return").className = valueClass(averageReturn);
-  $("#algo-win-rate").textContent = rate(averageWinRate);
+  const stats = {
+    realized_return_pct: average("realized_return_pct"),
+    win_rate: average("win_rate"),
+    profit_factor: average("profit_factor"),
+    profit_factor_unbounded: algos.some((algo) => algo.stats.profit_factor_unbounded),
+    max_drawdown_pct: average("max_drawdown_pct"),
+    average_hold_minutes: average("average_hold_minutes"),
+    closed_units: average("closed_units"),
+  };
+  const summary = createElement("span", "algo-tab-summary");
+  summary.append(createElement("strong", "algo-tab-title", "AVERAGE"));
+  $("#algo-average-card").replaceChildren(
+    summary,
+    renderAlgoMetrics({ stats }, { closedUnitsFormat: decimalNumberFormat }),
+  );
 }
 
 function renderDefinition(algo) {
@@ -271,7 +282,7 @@ function renderOpenPositions(algo) {
   return section;
 }
 
-function renderAlgoMetrics(algo) {
+function renderAlgoMetrics(algo, { closedUnitsFormat = numberFormat } = {}) {
   const metrics = createElement("span", "algo-tab-metric-grid");
   metrics.append(
     metric("Realized return", returnPoints(algo.stats.realized_return_pct), valueClass(algo.stats.realized_return_pct)),
@@ -279,7 +290,7 @@ function renderAlgoMetrics(algo) {
     metric("Profit factor", factor(algo.stats)),
     metric("Max drawdown", returnPoints(algo.stats.max_drawdown_pct), valueClass(algo.stats.max_drawdown_pct)),
     metric("Average hold", duration(algo.stats.average_hold_minutes)),
-    metric("Closed units", numberFormat.format(algo.stats.closed_units)),
+    metric("Closed units", closedUnitsFormat.format(algo.stats.closed_units)),
   );
   return metrics;
 }
