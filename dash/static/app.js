@@ -1,14 +1,20 @@
 const $ = (selector) => document.querySelector(selector);
 const HISTORY_SESSIONS_PER_CHUNK = 5;
 const HISTORY_PARALLEL_REQUESTS = 3;
+const initialParameters = new URLSearchParams(window.location.search);
+const requestedDate = initialParameters.get("date");
+const requestedTicker = initialParameters.get("ticker");
+const requestedAlgo = initialParameters.get("algo");
 
 const state = {
   overview: null,
-  ticker: null,
+  ticker: requestedTicker?.toUpperCase() || null,
   range: "HISTORY",
   style: "line",
   indicator: "rsi",
-  algo: null,
+  algo: requestedAlgo || null,
+  requestedAlgo: requestedAlgo || null,
+  requestedDate: /^\d{4}-\d{2}-\d{2}$/.test(requestedDate || "") ? requestedDate : null,
   bars: null,
   chartRevision: null,
   sessions: [],
@@ -1502,7 +1508,11 @@ function renderAlgoOverlay() {
   const configured = Object.entries(state.overview?.config?.algos || {})
     .filter(([, definition]) => definition?.trades === true)
     .map(([name]) => name);
-  if (!configured.includes(state.algo)) state.algo = configured[0] || null;
+  if (state.requestedAlgo) {
+    state.algo = state.requestedAlgo;
+  } else if (!configured.includes(state.algo)) {
+    state.algo = configured[0] || null;
+  }
 
   chart.setAlgo(state.algo);
   renderDayTrades(state.selectedDate);
@@ -1601,7 +1611,12 @@ function applyBarsPayload(payload, { focusLatest = false } = {}) {
   renderAlgoOverlay();
   renderDateStrip(payload);
   chart.setData(payload);
-  if (focusLatest && state.sessions.length) focusDate(state.sessions[0].date);
+  if (state.requestedDate && state.sessions.some((session) => session.date === state.requestedDate)) {
+    focusDate(state.requestedDate);
+    state.requestedDate = null;
+  } else if (focusLatest && state.sessions.length) {
+    focusDate(state.sessions[0].date);
+  }
   $("#chart-empty").hidden = payload.bars.length > 0;
 }
 

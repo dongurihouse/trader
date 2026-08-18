@@ -66,7 +66,8 @@ unit return, win rate, profit factor, drawdown, holding time, per-ticker
 results, current marks, and recent closed units. Use the horizontal algorithm
 scorecards to compare summaries and switch the detail view. Returns do not include
 position sizing, fees, or slippage, and trade rows are grouped by algorithm
-name because they do not store a config version.
+name because they do not store a config version. Select a recent closed unit to
+open its ticker, algorithm overlay, and trading date on the chart.
 
 ## Logs
 

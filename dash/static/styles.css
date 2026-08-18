@@ -2259,6 +2259,23 @@ pre {
   border-bottom: 1px solid var(--line);
 }
 
+a.algo-trade-row {
+  color: inherit;
+  text-decoration: none;
+  transition: background 120ms ease, box-shadow 120ms ease;
+}
+
+a.algo-trade-row:hover {
+  background: rgba(112, 216, 220, 0.035);
+}
+
+a.algo-trade-row:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: none;
+  box-shadow: inset 0 0 0 1px rgba(112, 216, 220, 0.7);
+}
+
 .algo-trade-row:last-child {
   border-bottom: 0;
 }

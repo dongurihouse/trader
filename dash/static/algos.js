@@ -15,6 +15,12 @@ const pacificDate = new Intl.DateTimeFormat("en-US", {
   day: "numeric",
   year: "numeric",
 });
+const pacificDateKeyFormat = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Los_Angeles",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
 let algorithms = [];
 let selectedAlgorithmName = null;
 
@@ -44,6 +50,21 @@ function showToast(message) {
 
 function dateFromEpoch(epoch) {
   return new Date(Number(epoch) * 1000);
+}
+
+function pacificDateKey(epoch) {
+  const parts = pacificDateKeyFormat.formatToParts(dateFromEpoch(epoch));
+  const value = (type) => parts.find((part) => part.type === type)?.value || "";
+  return `${value("year")}-${value("month")}-${value("day")}`;
+}
+
+function chartUrl(algo, trade) {
+  const parameters = new URLSearchParams({
+    ticker: trade.ticker,
+    algo: algo.name,
+    date: pacificDateKey(trade.entry_ts),
+  });
+  return `/?${parameters}`;
 }
 
 function humanize(value) {
@@ -195,7 +216,9 @@ function renderRecentTrades(algo) {
   }
   const list = createElement("div", "algo-trade-list");
   algo.recent_trades.forEach((trade) => {
-    const row = createElement("article", "algo-trade-row");
+    const row = createElement("a", "algo-trade-row");
+    row.href = chartUrl(algo, trade);
+    row.title = `Show ${trade.ticker} on ${pacificDate.format(dateFromEpoch(trade.entry_ts))}`;
     const identity = createElement("div", "algo-trade-identity");
     identity.append(
       createElement("strong", "", trade.ticker),
