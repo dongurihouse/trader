@@ -255,6 +255,8 @@ function renderAlgo(algo, tabId) {
   card.id = "algo-panel";
   card.setAttribute("role", "tabpanel");
   card.setAttribute("aria-labelledby", tabId);
+  const scorecard = createElement("section", "algo-scorecard");
+  scorecard.setAttribute("aria-label", `${algo.name} scorecard`);
   const header = createElement("header", "algo-card-header");
   const heading = createElement("div", "algo-heading");
   const titleRow = createElement("div", "algo-title-row");
@@ -295,7 +297,8 @@ function renderAlgo(algo, tabId) {
     metric("Open units", numberFormat.format(algo.stats.open_units)),
   );
 
-  card.append(header, metrics, renderDefinition(algo), renderTickerTable(algo));
+  scorecard.append(header, metrics);
+  card.append(scorecard, renderDefinition(algo), renderTickerTable(algo));
   const open = renderOpenPositions(algo);
   if (open) card.append(open);
   card.append(renderRecentTrades(algo));

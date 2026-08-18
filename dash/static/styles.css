@@ -1925,12 +1925,19 @@ pre {
   padding: clamp(22px, 3vw, 34px);
 }
 
+.algo-scorecard {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
 .algo-card-header {
   display: flex;
   align-items: start;
   justify-content: space-between;
   gap: 24px;
-  padding-bottom: 20px;
+  padding: clamp(18px, 2vw, 24px);
   border-bottom: 1px solid var(--line);
 }
 
@@ -1994,10 +2001,7 @@ pre {
 .algo-metric-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  margin-top: 20px;
   overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 12px;
 }
 
 .algo-metric {
@@ -2662,6 +2666,7 @@ pre {
   .algo-card-header {
     display: grid;
     gap: 14px;
+    padding: 18px;
   }
 
   .algo-coverage {
