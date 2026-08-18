@@ -1895,6 +1895,8 @@ pre {
 
 .algo-rollup {
   display: grid;
+  flex: 0 0 157px;
+  align-self: stretch;
   min-width: 0;
   align-items: center;
   padding: 0 10px 0 4px;
@@ -1935,9 +1937,6 @@ pre {
 }
 
 .algo-switcher {
-  display: grid;
-  grid-template-columns: 157px minmax(0, 1fr);
-  gap: 10px;
   min-width: 0;
   padding: 10px;
   overflow: hidden;
@@ -1955,6 +1954,10 @@ pre {
 
 .algo-strip::-webkit-scrollbar {
   display: none;
+}
+
+.algo-tabs {
+  display: contents;
 }
 
 .algo-tab {
@@ -2701,12 +2704,11 @@ a.algo-trade-row:focus-visible {
   }
 
   .algo-rollup {
+    flex-basis: 115px;
     padding: 0 8px 0 0;
   }
 
   .algo-switcher {
-    grid-template-columns: 115px minmax(0, 1fr);
-    gap: 8px;
     padding: 8px;
   }
 

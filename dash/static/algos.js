@@ -132,18 +132,19 @@ function metric(label, value, className = "") {
 
 function renderRollup(payload) {
   const algos = payload.algorithms || [];
-  const totals = algos.reduce(
-    (result, algo) => {
-      result.closed += Number(algo.stats.closed_units) || 0;
-      result.wins += Number(algo.stats.wins) || 0;
-      result.return += Number(algo.stats.realized_return_pct) || 0;
-      return result;
-    },
-    { closed: 0, wins: 0, return: 0 },
-  );
-  $("#algo-return").textContent = returnPoints(totals.return);
-  $("#algo-return").className = valueClass(totals.return);
-  $("#algo-win-rate").textContent = totals.closed ? rate((totals.wins / totals.closed) * 100) : "—";
+  const average = (field) => {
+    const values = algos
+      .map((algo) => algo.stats[field])
+      .filter((value) => value !== null && value !== undefined && value !== "")
+      .map(Number)
+      .filter(Number.isFinite);
+    return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+  };
+  const averageReturn = average("realized_return_pct");
+  const averageWinRate = average("win_rate");
+  $("#algo-return").textContent = returnPoints(averageReturn);
+  $("#algo-return").className = valueClass(averageReturn);
+  $("#algo-win-rate").textContent = rate(averageWinRate);
 }
 
 function renderDefinition(algo) {
@@ -298,6 +299,7 @@ function renderAlgo(algo, tabId) {
 function renderAlgorithmSwitcher() {
   const switcher = $("#algo-switcher");
   const strip = $("#algo-strip");
+  const tabs = $("#algo-tabs");
   const previousScroll = strip.scrollLeft;
   const fragment = document.createDocumentFragment();
   algorithms.forEach((algo, index) => {
@@ -316,7 +318,7 @@ function renderAlgorithmSwitcher() {
     button.append(summary, renderAlgoMetrics(algo));
     fragment.append(button);
   });
-  strip.replaceChildren(fragment);
+  tabs.replaceChildren(fragment);
   strip.scrollLeft = previousScroll;
   switcher.hidden = algorithms.length === 0;
 }
