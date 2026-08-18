@@ -277,10 +277,8 @@ function renderAlgoMetrics(algo) {
     metric("Win rate", rate(algo.stats.win_rate)),
     metric("Profit factor", factor(algo.stats)),
     metric("Max drawdown", returnPoints(algo.stats.max_drawdown_pct), valueClass(algo.stats.max_drawdown_pct)),
-    metric("Average unit", unitReturn(algo.stats.average_return_pct), valueClass(algo.stats.average_return_pct)),
     metric("Average hold", duration(algo.stats.average_hold_minutes)),
     metric("Closed units", numberFormat.format(algo.stats.closed_units)),
-    metric("Open units", numberFormat.format(algo.stats.open_units)),
   );
   return metrics;
 }

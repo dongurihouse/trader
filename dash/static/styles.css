@@ -1959,7 +1959,7 @@ pre {
 
 .algo-tab {
   display: grid;
-  flex: 0 0 clamp(390px, 34vw, 430px);
+  flex: 0 0 clamp(360px, 30vw, 400px);
   align-self: stretch;
   min-width: 0;
   padding: 0;
@@ -2024,7 +2024,7 @@ pre {
 
 .algo-tab-metric-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   overflow: hidden;
 }
 
@@ -2038,11 +2038,11 @@ pre {
   border-bottom: 1px solid var(--line);
 }
 
-.algo-metric:nth-child(4n) {
+.algo-metric:nth-child(3n) {
   border-right: 0;
 }
 
-.algo-metric:nth-last-child(-n + 4) {
+.algo-metric:nth-last-child(-n + 3) {
   border-bottom: 0;
 }
 
@@ -2628,7 +2628,7 @@ a.algo-trade-row:focus-visible {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .algo-metric:nth-child(4n) {
+  .algo-metric:nth-child(3n) {
     border-right: 1px solid var(--line);
   }
 
@@ -2636,7 +2636,7 @@ a.algo-trade-row:focus-visible {
     border-right: 0;
   }
 
-  .algo-metric:nth-last-child(-n + 4) {
+  .algo-metric:nth-last-child(-n + 3) {
     border-bottom: 1px solid var(--line);
   }
 
