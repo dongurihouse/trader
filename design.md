@@ -140,8 +140,7 @@ algo; a list restricts the call to those algos.
 ### The algo output contract
 
 - Input: besides its signals, an algo receives its simulated open entries at
-  `t` from its own prior versioned outputs. Entry prices come from bars. The
-  trades table remains the live action record and is not historical state.
+  `t` from its own prior versioned outputs. Entry prices come from bars. 
 - Output at `t` is `(is_entry, is_close_all, direction)`. The first two values
   are booleans and direction is `1`, `-1`, or `0`. The
   algo decides among three moves from its open entries: `is_entry` opens
@@ -209,9 +208,7 @@ reacts on its own:
    land.
 
 Easy: one file edit, no deploy. Fast: the work is bounded by the
-evaluation window, never by the full history. Visible: history for the
-new version appears without a live bar. A new function is the one case
-that also needs a code change.
+evaluation window, never by the full history. 
 
 ### The output cache
 
@@ -235,9 +232,7 @@ number.
   rule covers a live bar and a config change; the loop does not tell the
   cases apart.
 - Work updates outputs; a rerun is a safe upsert because the rows are
-  keyed and the core is deterministic. Only the newest bar of a ticker
-  also trades: the loop writes trade rows for its points, and older work
-  never writes a trade.
+  keyed and the core is deterministic.
 - A trade row is ticker, algo, exact timestamp, action, and direction. `is_entry` writes
   an entry row and opens one unit. `is_close_all` writes an `exit_all` row
   and closes every open unit of the algo.
