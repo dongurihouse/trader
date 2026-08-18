@@ -2845,7 +2845,9 @@ def _pending(
         return []
     marker = kinds[-1]
     pending: list[tuple[str, int]] = []
-    for ticker in sorted(settings.tickers):
+    # Respect config priority so the primary chart ticker is not starved by a
+    # large historical backfill for alphabetically earlier symbols.
+    for ticker in settings.tickers:
         if stop_event is not None and stop_event.is_set():
             break
         latest = connection.execute(
