@@ -15,13 +15,11 @@
     <header class="topbar">
       <div class="trader-menu">
         <button class="brand" id="trader-menu-button" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="trader-menu-dropdown">
-          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="brand-mark market-status-mark" id="market-dot" aria-hidden="true"><i></i><i></i><i></i></span>
           <span>TRADER</span>
           <span class="brand-chevron" aria-hidden="true">⌄</span>
         </button>
-        <span class="header-market brand-market-status" id="market-status" role="status" aria-label="Checking market" title="Checking market">
-          <span class="status-dot" id="market-dot"></span>
-        </span>
+        <span class="market-status-copy" id="market-status" role="status" aria-label="Checking market"></span>
         <div class="trader-menu-dropdown" id="trader-menu-dropdown" role="menu" aria-label="Chart display" hidden>
           <small>Chart style</small>
           <button type="button" role="menuitemradio" data-style="line" aria-checked="true">

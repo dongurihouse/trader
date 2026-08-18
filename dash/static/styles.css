@@ -116,13 +116,16 @@ button.brand {
   display: inline-flex;
 }
 
-.brand-market-status {
+.market-status-copy {
   position: absolute;
-  z-index: 1;
-  top: 50%;
-  right: -16px;
-  pointer-events: none;
-  transform: translateY(-50%);
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  white-space: nowrap;
+  border: 0;
+  clip: rect(0, 0, 0, 0);
 }
 
 .brand-chevron {
@@ -256,6 +259,15 @@ button.brand {
   width: 5px;
   background: var(--acid);
   border-radius: 1px;
+}
+
+.market-status-mark i {
+  background: var(--subtle);
+  transition: background 140ms ease;
+}
+
+.market-status-mark.live i {
+  background: var(--acid);
 }
 
 .brand-mark i:nth-child(1) { height: 7px; }
@@ -785,17 +797,6 @@ h1 em {
   text-transform: uppercase;
 }
 
-.status-dot {
-  display: inline-block;
-  width: 9px;
-  height: 9px;
-  flex: 0 0 auto;
-  background: var(--subtle);
-  border-radius: 50%;
-  box-shadow: 0 0 0 5px rgba(95, 108, 119, 0.12);
-}
-
-.status-dot.live,
 .service-state.active {
   background: var(--acid);
   box-shadow: 0 0 0 5px var(--acid-soft);

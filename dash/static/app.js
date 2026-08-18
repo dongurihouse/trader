@@ -1709,7 +1709,6 @@ async function loadOverview({ quiet = false } = {}) {
 function renderOverview() {
   const overview = state.overview;
   $("#market-status").setAttribute("aria-label", overview.market.label);
-  $("#market-status").title = overview.market.label;
   $("#market-dot").classList.toggle("live", overview.market.state === "live");
   renderTickers(overview.quotes);
   renderQuote();

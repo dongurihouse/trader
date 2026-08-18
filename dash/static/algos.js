@@ -379,7 +379,6 @@ function selectAlgorithm(name, { focus = false } = {}) {
 function render(payload) {
   renderRollup(payload);
   $("#market-status").setAttribute("aria-label", payload.market.label);
-  $("#market-status").title = payload.market.label;
   $("#market-dot").classList.toggle("live", payload.market.state === "live");
   const book = $("#algo-book");
   algorithms = payload.algorithms || [];
