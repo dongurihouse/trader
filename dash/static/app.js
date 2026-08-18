@@ -1,14 +1,20 @@
 const $ = (selector) => document.querySelector(selector);
 const HISTORY_SESSIONS_PER_CHUNK = 5;
 const HISTORY_PARALLEL_REQUESTS = 3;
+const initialParameters = new URLSearchParams(window.location.search);
+const requestedDate = initialParameters.get("date");
+const requestedTicker = initialParameters.get("ticker");
+const requestedAlgo = initialParameters.get("algo");
 
 const state = {
   overview: null,
-  ticker: null,
+  ticker: requestedTicker?.toUpperCase() || null,
   range: "HISTORY",
   style: "line",
   indicator: "rsi",
-  algo: null,
+  algo: requestedAlgo || null,
+  requestedAlgo: requestedAlgo || null,
+  requestedDate: /^\d{4}-\d{2}-\d{2}$/.test(requestedDate || "") ? requestedDate : null,
   bars: null,
   chartRevision: null,
   sessions: [],
@@ -1553,6 +1559,42 @@ function renderShapeForest(shape) {
   list.replaceChildren(fragment);
 }
 
+function renderDayTrades(date) {
+  const title = $("#day-trades-title");
+  const list = $("#day-trades-list");
+  const algoName = state.algo ? formatShapeName(state.algo) : "Trade";
+  const session = state.sessions.find((candidate) => candidate.date === date);
+  title.textContent = session
+    ? `${algoName} entry / exit · ${pacificDateButton.format(dateFromEpoch(session.ts))}`
+    : `${algoName} entry / exit`;
+
+  if (!date) {
+    list.replaceChildren(createElement("span", "day-trades-unavailable", "Select a trading date"));
+    return;
+  }
+
+  const trades = (state.bars?.trades || [])
+    .filter((trade) => trade.algo === state.algo && pacificDateKey(trade.ts) === date)
+    .sort((left, right) => Number(left.ts) - Number(right.ts));
+  if (!trades.length) {
+    list.replaceChildren(createElement("span", "day-trades-unavailable", "No entries or exits"));
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  trades.forEach((trade) => {
+    const action = trade.action === "entry" ? "entry" : "exit";
+    const row = createElement("div", `day-trade-row ${action}`);
+    row.append(
+      createElement("time", "day-trade-time", pacificClock.format(dateFromEpoch(trade.ts))),
+      createElement("strong", "day-trade-action", action),
+      createElement("span", "day-trade-direction", Number(trade.direction) < 0 ? "Short" : "Long"),
+    );
+    fragment.append(row);
+  });
+  list.replaceChildren(fragment);
+}
+
 function renderInspection(inspection) {
   if (!inspection?.bar) return;
   $("#quote-price").textContent = `$${formatPrice(inspection.bar.close)}`;
@@ -1623,6 +1665,7 @@ function renderDateSelection(date) {
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", String(active));
   });
+  renderDayTrades(date);
 }
 
 function focusDate(date) {
@@ -1639,9 +1682,14 @@ function renderAlgoOverlay() {
   const configured = Object.entries(state.overview?.config?.algos || {})
     .filter(([, definition]) => definition?.trades === true)
     .map(([name]) => name);
-  if (!configured.includes(state.algo)) state.algo = configured[0] || null;
+  if (state.requestedAlgo) {
+    state.algo = state.requestedAlgo;
+  } else if (!configured.includes(state.algo)) {
+    state.algo = configured[0] || null;
+  }
 
   chart.setAlgo(state.algo);
+  renderDayTrades(state.selectedDate);
 }
 
 async function loadOverview({ quiet = false } = {}) {
@@ -1721,6 +1769,7 @@ function renderQuote() {
     : "Waiting for bars";
   $(".chart-header").dataset.mode = "latest";
   renderShapeForest(null);
+  renderDayTrades(null);
 }
 
 async function selectTicker(ticker) {
@@ -1736,7 +1785,12 @@ function applyBarsPayload(payload, { focusLatest = false } = {}) {
   renderAlgoOverlay();
   renderDateStrip(payload);
   chart.setData(payload);
-  if (focusLatest && state.sessions.length) focusDate(state.sessions[0].date);
+  if (state.requestedDate && state.sessions.some((session) => session.date === state.requestedDate)) {
+    focusDate(state.requestedDate);
+    state.requestedDate = null;
+  } else if (focusLatest && state.sessions.length) {
+    focusDate(state.sessions[0].date);
+  }
   $("#chart-empty").hidden = payload.bars.length > 0;
 }
 
