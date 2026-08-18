@@ -741,9 +741,9 @@ class DashboardData:
                     "active_from": definition_meta["active_from"],
                     "stats": stats,
                     "tickers": ticker_rows,
-                    "recent_trades": sorted(
+                    "trades": sorted(
                         group["closed"], key=lambda item: item["exit_ts"], reverse=True
-                    )[:12],
+                    ),
                     "open_positions": sorted(
                         positions, key=lambda item: item["entry_ts"], reverse=True
                     ),

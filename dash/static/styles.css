@@ -2128,7 +2128,7 @@ pre {
 
 .algo-table {
   width: 100%;
-  min-width: 850px;
+  min-width: 760px;
   border-collapse: collapse;
   font-family: var(--mono);
   font-size: 0.57rem;
@@ -2163,6 +2163,27 @@ pre {
 
 .algo-table tbody tr:hover {
   background: rgba(255, 255, 255, 0.018);
+}
+
+.algo-ticker-row {
+  cursor: pointer;
+  transition: background 120ms ease, box-shadow 120ms ease;
+}
+
+.algo-ticker-row:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: none;
+  box-shadow: inset 0 0 0 1px rgba(112, 216, 220, 0.7);
+}
+
+.algo-ticker-row.selected {
+  background: rgba(112, 216, 220, 0.06);
+  box-shadow: inset 3px 0 0 rgba(112, 216, 220, 0.75);
+}
+
+.algo-ticker-row.selected .algo-ticker {
+  color: var(--cyan);
 }
 
 .algo-ticker {
@@ -2206,6 +2227,11 @@ a.algo-trade-row:focus-visible {
   z-index: 1;
   outline: none;
   box-shadow: inset 0 0 0 1px rgba(112, 216, 220, 0.7);
+}
+
+a.algo-trade-row.ticker-match {
+  background: rgba(112, 216, 220, 0.055);
+  box-shadow: inset 3px 0 0 rgba(112, 216, 220, 0.75);
 }
 
 .algo-trade-row:last-child {

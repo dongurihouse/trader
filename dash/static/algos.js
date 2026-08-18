@@ -26,6 +26,7 @@ const pacificDateKeyFormat = new Intl.DateTimeFormat("en-US", {
 let algorithms = [];
 let selectedAlgorithmName = new URLSearchParams(window.location.search).get("algo");
 let revealSelectedAlgorithm = Boolean(selectedAlgorithmName);
+let selectedTicker = null;
 
 function createElement(tag, className, text) {
   const element = document.createElement(tag);
@@ -190,13 +191,21 @@ function renderTickerTable(algo) {
   const table = createElement("table", "algo-table");
   const head = document.createElement("thead");
   const header = document.createElement("tr");
-  ["Ticker", "Closed", "Win rate", "Return", "Average", "PF", "Best", "Worst", "Open"].forEach(
+  ["Ticker", "Closed", "Win rate", "Return", "Average", "PF", "Best", "Worst"].forEach(
     (label) => header.append(createElement("th", "", label)),
   );
   head.append(header);
   const body = document.createElement("tbody");
   algo.tickers.forEach((ticker) => {
     const row = document.createElement("tr");
+    const selected = ticker.ticker === selectedTicker;
+    row.className = `algo-ticker-row${selected ? " selected" : ""}`;
+    row.dataset.ticker = ticker.ticker;
+    row.tabIndex = 0;
+    row.setAttribute("aria-controls", "algo-trade-list");
+    row.setAttribute("aria-selected", String(selected));
+    row.setAttribute("aria-label", `Show ${ticker.ticker} trades below`);
+    row.title = `Show ${ticker.ticker} trades below`;
     row.append(createElement("th", "algo-ticker", ticker.ticker));
     row.append(createElement("td", "", numberFormat.format(ticker.closed_units)));
     row.append(createElement("td", "", rate(ticker.win_rate)));
@@ -207,7 +216,6 @@ function renderTickerTable(algo) {
     row.append(createElement("td", "", factor(ticker)));
     row.append(createElement("td", valueClass(ticker.best_return_pct), unitReturn(ticker.best_return_pct)));
     row.append(createElement("td", valueClass(ticker.worst_return_pct), unitReturn(ticker.worst_return_pct)));
-    row.append(createElement("td", "", numberFormat.format(ticker.open_units)));
     body.append(row);
   });
   table.append(head, body);
@@ -216,16 +224,20 @@ function renderTickerTable(algo) {
   return section;
 }
 
-function renderRecentTrades(algo) {
+function renderTrades(algo) {
   const section = createElement("section", "algo-section");
-  section.append(createElement("h3", "", "Recent closed units"));
-  if (!(algo.recent_trades || []).length) {
+  section.append(createElement("h3", "", "All closed trades"));
+  if (!(algo.trades || []).length) {
     section.append(createElement("p", "algo-muted", "No closed units yet."));
     return section;
   }
   const list = createElement("div", "algo-trade-list");
-  algo.recent_trades.forEach((trade) => {
-    const row = createElement("a", "algo-trade-row");
+  list.id = "algo-trade-list";
+  list.setAttribute("aria-label", "All closed trades");
+  algo.trades.forEach((trade) => {
+    const tickerMatch = trade.ticker === selectedTicker;
+    const row = createElement("a", `algo-trade-row${tickerMatch ? " ticker-match" : ""}`);
+    row.dataset.ticker = trade.ticker;
     row.href = chartUrl(trade);
     row.title = `Show all ${CHART_TICKER} trades on ${pacificDate.format(dateFromEpoch(trade.entry_ts))}`;
     const identity = createElement("div", "algo-trade-identity");
@@ -255,6 +267,25 @@ function renderRecentTrades(algo) {
   });
   section.append(list);
   return section;
+}
+
+function selectTickerTrades(ticker) {
+  selectedTicker = ticker;
+  $("#algo-panel")?.querySelectorAll(".algo-ticker-row").forEach((row) => {
+    const selected = row.dataset.ticker === ticker;
+    row.classList.toggle("selected", selected);
+    row.setAttribute("aria-selected", String(selected));
+  });
+  $("#algo-trade-list")?.querySelectorAll(".algo-trade-row").forEach((row) => {
+    row.classList.toggle("ticker-match", row.dataset.ticker === ticker);
+  });
+  const firstTrade = $("#algo-trade-list")?.querySelector(`.algo-trade-row[data-ticker="${CSS.escape(ticker)}"]`);
+  if (!firstTrade) {
+    showToast(`No closed ${ticker} trades.`);
+    return;
+  }
+  firstTrade.scrollIntoView({ block: "center" });
+  firstTrade.focus({ preventScroll: true });
 }
 
 function renderOpenPositions(algo) {
@@ -303,7 +334,7 @@ function renderAlgo(algo, tabId) {
   card.append(renderDefinition(algo), renderTickerTable(algo));
   const open = renderOpenPositions(algo);
   if (open) card.append(open);
-  card.append(renderRecentTrades(algo));
+  card.append(renderTrades(algo));
   return card;
 }
 
@@ -343,6 +374,7 @@ function renderSelectedAlgorithm() {
 
 function selectAlgorithm(name, { focus = false } = {}) {
   if (!algorithms.some((algo) => algo.name === name)) return;
+  if (selectedAlgorithmName !== name) selectedTicker = null;
   selectedAlgorithmName = name;
   $("#algo-strip").querySelectorAll("button[data-algo-name]").forEach((button) => {
     const selected = button.dataset.algoName === name;
@@ -391,6 +423,19 @@ $("#algo-strip").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-algo-name]");
   if (!button) return;
   selectAlgorithm(button.dataset.algoName);
+});
+
+$("#algo-book").addEventListener("click", (event) => {
+  const row = event.target.closest(".algo-ticker-row[data-ticker]");
+  if (!row) return;
+  selectTickerTrades(row.dataset.ticker);
+});
+
+$("#algo-book").addEventListener("keydown", (event) => {
+  const row = event.target.closest(".algo-ticker-row[data-ticker]");
+  if (!row || !["Enter", " "].includes(event.key)) return;
+  selectTickerTrades(row.dataset.ticker);
+  event.preventDefault();
 });
 
 $("#algo-strip").addEventListener("wheel", (event) => {
