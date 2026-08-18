@@ -7,6 +7,7 @@ const state = {
   ticker: null,
   range: "HISTORY",
   style: "line",
+  indicator: "rsi",
   algo: null,
   bars: null,
   chartRevision: null,
@@ -206,6 +207,74 @@ function mergeHistoryPayload(base, parts, { includeBaseInterpolation = true } = 
   };
 }
 
+function exponentialMovingAverage(values, period) {
+  if (!values.length) return [];
+  const multiplier = 2 / (period + 1);
+  const result = new Array(values.length);
+  result[0] = Number(values[0]);
+  for (let index = 1; index < values.length; index += 1) {
+    result[index] = (Number(values[index]) - result[index - 1]) * multiplier + result[index - 1];
+  }
+  return result;
+}
+
+function relativeStrengthIndex(values, period = 14) {
+  const result = new Array(values.length).fill(null);
+  if (values.length <= period) return result;
+  let gains = 0;
+  let losses = 0;
+  for (let index = 1; index <= period; index += 1) {
+    const change = Number(values[index]) - Number(values[index - 1]);
+    gains += Math.max(0, change);
+    losses += Math.max(0, -change);
+  }
+  let averageGain = gains / period;
+  let averageLoss = losses / period;
+  const value = () => {
+    if (!averageGain && !averageLoss) return 50;
+    if (!averageLoss) return 100;
+    if (!averageGain) return 0;
+    return 100 - 100 / (1 + averageGain / averageLoss);
+  };
+  result[period] = value();
+  for (let index = period + 1; index < values.length; index += 1) {
+    const change = Number(values[index]) - Number(values[index - 1]);
+    averageGain = (averageGain * (period - 1) + Math.max(0, change)) / period;
+    averageLoss = (averageLoss * (period - 1) + Math.max(0, -change)) / period;
+    result[index] = value();
+  }
+  return result;
+}
+
+function rateOfChange(values, period = 10) {
+  return values.map((price, index) => {
+    if (index < period) return null;
+    const reference = Number(values[index - period]);
+    return reference ? (Number(price) / reference - 1) * 100 : null;
+  });
+}
+
+function movingAverageConvergenceDivergence(values) {
+  const fast = exponentialMovingAverage(values, 12);
+  const slow = exponentialMovingAverage(values, 26);
+  const macd = values.map((_, index) => fast[index] - slow[index]);
+  const signal = exponentialMovingAverage(macd, 9);
+  return macd.map((value, index) => ({
+    value,
+    signal: signal[index],
+    histogram: value - signal[index],
+  }));
+}
+
+function commonMomentumIndicators(bars) {
+  const closes = bars.map((bar) => Number(bar.close));
+  return {
+    rsi: relativeStrengthIndex(closes, 14),
+    macd: movingAverageConvergenceDivergence(closes),
+    roc: rateOfChange(closes, 10),
+  };
+}
+
 function showToast(message) {
   const toast = $("#toast");
   toast.textContent = message;
@@ -224,6 +293,9 @@ class PriceChart {
     this.onInspect = onInspect;
     this.context = canvas.getContext("2d");
     this.style = "line";
+    this.indicator = "rsi";
+    this.indicators = { rsi: [], macd: [], roc: [] };
+    this.barIndexByTimestamp = new Map();
     this.algo = null;
     this.payload = null;
     this.momentumByTimestamp = new Map();
@@ -267,6 +339,10 @@ class PriceChart {
     const wasAtLatest = this.viewEnd >= previousBars.length - 1;
     const previousStartTime = previousBars[this.viewStart]?.ts;
     this.payload = payload;
+    this.indicators = commonMomentumIndicators(payload?.bars || []);
+    this.barIndexByTimestamp = new Map(
+      (payload?.bars || []).map((bar, index) => [Number(bar.ts), index]),
+    );
     this.momentumByTimestamp = new Map(
       (payload?.relative_momentum?.snapshots || []).map((snapshot) => [
         Number(snapshot.ts),
@@ -298,6 +374,15 @@ class PriceChart {
     if (!['line', 'candles'].includes(style)) return;
     this.style = style;
     this.updateLabel();
+    this.draw();
+  }
+
+  setIndicator(indicator) {
+    if (!["rsi", "macd", "roc", "none"].includes(indicator)) return;
+    if (indicator === this.indicator) return;
+    this.indicator = indicator;
+    this.updateLabel();
+    this.notifyInspection();
     this.draw();
   }
 
@@ -342,6 +427,14 @@ class PriceChart {
 
   momentumAt(timestamp) {
     return this.momentumByTimestamp.get(Number(timestamp)) || null;
+  }
+
+  indicatorAt(timestamp) {
+    if (this.indicator === "none") return null;
+    const index = this.barIndexByTimestamp.get(Number(timestamp));
+    if (index === undefined) return null;
+    const value = this.indicators[this.indicator]?.[index];
+    return value === undefined ? null : value;
   }
 
   focusedIndex() {
@@ -399,6 +492,7 @@ class PriceChart {
       changePct,
       shape: this.shapeAt(bar.ts),
       momentum: this.momentumAt(bar.ts),
+      indicator: this.indicatorAt(bar.ts),
       mode: this.hoverIndex !== null ? "hover" : focused !== null ? "focused" : "latest",
     });
   }
@@ -415,10 +509,13 @@ class PriceChart {
     const momentumLabel = this.payload?.relative_momentum?.snapshots?.length
       ? ", with relative momentum below volume"
       : "";
+    const indicatorLabel = this.indicator === "none"
+      ? ""
+      : `, with ${this.indicator.toUpperCase()} below relative momentum`;
     this.canvas.setAttribute(
       "aria-label",
       visible.length
-        ? `${this.payload.ticker} ${label} chart, ${visible.length.toLocaleString()} visible points from ${pacificDateTime.format(dateFromEpoch(first.ts))} to ${pacificDateTime.format(dateFromEpoch(last.ts))}${overlayLabel}${momentumLabel}`
+        ? `${this.payload.ticker} ${label} chart, ${visible.length.toLocaleString()} visible points from ${pacificDateTime.format(dateFromEpoch(first.ts))} to ${pacificDateTime.format(dateFromEpoch(last.ts))}${overlayLabel}${momentumLabel}${indicatorLabel}`
         : `${this.payload?.ticker || "Ticker"} ${label} chart with no available bars`,
     );
   }
@@ -655,6 +752,133 @@ class PriceChart {
     ctx.restore();
   }
 
+  drawCommonIndicatorPanel(ctx, bars, x, margin, plotWidth, panelTop, panelBottom) {
+    if (this.indicator === "none") return;
+    const values = this.indicators[this.indicator]?.slice(this.viewStart, this.viewEnd + 1) || [];
+    const panelHeight = panelBottom - panelTop;
+    const axisX = margin.left + plotWidth + margin.right - 2;
+    const line = (series, y, color, accessor = (value) => value) => {
+      ctx.beginPath();
+      let active = false;
+      series.forEach((item, index) => {
+        const value = accessor(item);
+        if (!Number.isFinite(Number(value))) {
+          active = false;
+          return;
+        }
+        if (active) ctx.lineTo(x(index), y(value));
+        else ctx.moveTo(x(index), y(value));
+        active = true;
+      });
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.25;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.stroke();
+    };
+    const grid = (levels, y) => {
+      levels.forEach((level) => {
+        ctx.beginPath();
+        ctx.strokeStyle = level === 0 || level === 50
+          ? "rgba(227, 235, 240, 0.16)"
+          : "rgba(227, 235, 240, 0.07)";
+        ctx.setLineDash(level === 0 || level === 50 ? [] : [3, 5]);
+        ctx.moveTo(margin.left, Math.round(y(level)) + 0.5);
+        ctx.lineTo(margin.left + plotWidth, Math.round(y(level)) + 0.5);
+        ctx.stroke();
+      });
+      ctx.setLineDash([]);
+    };
+    const axisLabel = (value, suffix = "") => {
+      const absolute = Math.abs(Number(value));
+      const digits = absolute >= 10 ? 0 : absolute >= 1 ? 1 : 2;
+      return `${Number(value) > 0 ? "+" : ""}${Number(value).toFixed(digits)}${suffix}`;
+    };
+
+    ctx.save();
+    ctx.font = "9px ui-monospace, SFMono-Regular, monospace";
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "left";
+    ctx.fillStyle = "#75838e";
+
+    let y;
+    let highlighted = null;
+    const highlightedIndex = this.highlightedVisibleIndex();
+    if (this.indicator === "rsi") {
+      y = (value) => panelTop + ((100 - Math.max(0, Math.min(100, Number(value)))) / 100) * panelHeight;
+      ctx.fillStyle = "rgba(255, 123, 115, 0.025)";
+      ctx.fillRect(margin.left, panelTop, plotWidth, y(70) - panelTop);
+      ctx.fillStyle = "rgba(112, 216, 220, 0.025)";
+      ctx.fillRect(margin.left, y(30), plotWidth, panelBottom - y(30));
+      grid([70, 50, 30], y);
+      ctx.fillStyle = "#75838e";
+      ctx.fillText("RSI 14", margin.left + 3, panelTop + 8);
+      ctx.textAlign = "right";
+      ctx.fillStyle = "#5f6c77";
+      [70, 50, 30].forEach((level) => ctx.fillText(String(level), axisX, y(level)));
+      line(values, y, "#70d8dc");
+      highlighted = highlightedIndex === null ? null : values[highlightedIndex];
+    } else if (this.indicator === "roc") {
+      const numeric = values.filter((value) => Number.isFinite(Number(value))).map(Number);
+      const maximum = Math.max(0.05, ...numeric.map((value) => Math.abs(value)));
+      const bound = Math.ceil(maximum * 10) / 10;
+      y = (value) => panelTop + ((bound - Math.max(-bound, Math.min(bound, Number(value)))) / (bound * 2)) * panelHeight;
+      grid([0], y);
+      ctx.fillText("ROC 10", margin.left + 3, panelTop + 8);
+      ctx.textAlign = "right";
+      ctx.fillStyle = "#5f6c77";
+      ctx.fillText(axisLabel(bound, "%"), axisX, panelTop + 5);
+      ctx.fillText("0", axisX, y(0));
+      ctx.fillText(axisLabel(-bound, "%"), axisX, panelBottom - 5);
+      line(values, y, "#d8ff72");
+      highlighted = highlightedIndex === null ? null : values[highlightedIndex];
+    } else {
+      const numeric = values.flatMap((value) => (
+        value ? [Number(value.value), Number(value.signal)] : []
+      )).filter(Number.isFinite);
+      const maximum = Math.max(0.01, ...numeric.map((value) => Math.abs(value)));
+      const bound = Math.ceil(maximum * 100) / 100;
+      y = (value) => panelTop + ((bound - Math.max(-bound, Math.min(bound, Number(value)))) / (bound * 2)) * panelHeight;
+      grid([0], y);
+      ctx.fillText("MACD 12·26·9", margin.left + 3, panelTop + 8);
+      ctx.textAlign = "right";
+      ctx.fillStyle = "#5f6c77";
+      ctx.fillText(axisLabel(bound), axisX, panelTop + 5);
+      ctx.fillText("0", axisX, y(0));
+      ctx.fillText(axisLabel(-bound), axisX, panelBottom - 5);
+      const zeroY = y(0);
+      const barWidth = Math.max(1, Math.min(plotWidth / Math.max(1, values.length), 3));
+      values.forEach((value, index) => {
+        if (!value || !Number.isFinite(Number(value.histogram))) return;
+        const valueY = y(value.histogram);
+        ctx.fillStyle = Number(value.histogram) >= 0
+          ? "rgba(216, 255, 114, 0.24)"
+          : "rgba(255, 123, 115, 0.22)";
+        ctx.fillRect(x(index), Math.min(zeroY, valueY), barWidth, Math.max(1, Math.abs(zeroY - valueY)));
+      });
+      line(values, y, "#d8ff72", (value) => value?.value);
+      line(values, y, "#f7b955", (value) => value?.signal);
+      highlighted = highlightedIndex === null ? null : values[highlightedIndex];
+    }
+
+    if (highlightedIndex !== null && highlighted !== null && y) {
+      const pointValues = this.indicator === "macd"
+        ? [
+            { value: highlighted?.value, color: "#d8ff72" },
+            { value: highlighted?.signal, color: "#f7b955" },
+          ]
+        : [{ value: highlighted, color: this.indicator === "rsi" ? "#70d8dc" : "#d8ff72" }];
+      pointValues.forEach((point) => {
+        if (!Number.isFinite(Number(point.value))) return;
+        ctx.beginPath();
+        ctx.fillStyle = point.color;
+        ctx.arc(x(highlightedIndex), y(point.value), 2.8, 0, Math.PI * 2);
+        ctx.fill();
+      });
+    }
+    ctx.restore();
+  }
+
   draw() {
     const { width, height } = this.size();
     const ctx = this.context;
@@ -665,8 +889,12 @@ class PriceChart {
     const margin = { top: 14, right: width < 500 ? 49 : 62, bottom: 32, left: 4 };
     const volumeHeight = 42;
     const momentumHeight = width < 500 ? 54 : 64;
+    const indicatorHeight = width < 500 ? 50 : 60;
     const panelGap = 12;
-    const momentumBottom = height - margin.bottom;
+    const indicatorVisible = this.indicator !== "none";
+    const indicatorBottom = height - margin.bottom;
+    const indicatorTop = indicatorBottom - (indicatorVisible ? indicatorHeight : 0);
+    const momentumBottom = indicatorVisible ? indicatorTop - panelGap : indicatorBottom;
     const momentumTop = momentumBottom - momentumHeight;
     const volumeBottom = momentumTop - panelGap;
     const priceBottom = volumeBottom - volumeHeight - 18;
@@ -770,6 +998,17 @@ class PriceChart {
       momentumTop,
       momentumBottom,
     );
+    if (indicatorVisible) {
+      this.drawCommonIndicatorPanel(
+        ctx,
+        bars,
+        x,
+        margin,
+        plotWidth,
+        indicatorTop,
+        indicatorBottom,
+      );
+    }
 
     const rising = Number(bars.at(-1).close) >= Number(bars[0].open);
     const color = rising ? "#d8ff72" : "#ff7b73";
@@ -934,6 +1173,20 @@ class PriceChart {
           "span",
           Number(momentum.value) >= 0 ? "momentum-up" : "momentum-down",
           `Rel momentum ${formatSigned(momentum.value)} · ${state}`,
+        ),
+      );
+    }
+    const indicator = this.indicatorAt(bar.ts);
+    if (this.indicator === "rsi" && Number.isFinite(Number(indicator))) {
+      contents.push(createElement("span", "indicator-value", `RSI 14 ${Number(indicator).toFixed(1)}`));
+    } else if (this.indicator === "roc" && Number.isFinite(Number(indicator))) {
+      contents.push(createElement("span", "indicator-value", `ROC 10 ${formatSigned(indicator, "%")}`));
+    } else if (this.indicator === "macd" && indicator) {
+      contents.push(
+        createElement(
+          "span",
+          "indicator-value",
+          `MACD ${formatSigned(indicator.value)} · signal ${formatSigned(indicator.signal)}`,
         ),
       );
     }
@@ -1457,6 +1710,14 @@ function renderStyleSelection() {
   });
 }
 
+function renderIndicatorSelection() {
+  document.querySelectorAll("#trader-menu-dropdown button[data-indicator]").forEach((button) => {
+    const active = button.dataset.indicator === state.indicator;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-checked", String(active));
+  });
+}
+
 $("#trader-menu-button").addEventListener("click", () => {
   const open = $("#trader-menu-button").getAttribute("aria-expanded") !== "true";
   setTraderMenu(open);
@@ -1470,11 +1731,17 @@ $("#trader-menu-button").addEventListener("keydown", (event) => {
 });
 
 $("#trader-menu-dropdown").addEventListener("click", (event) => {
-  const button = event.target.closest("button[data-style]");
+  const button = event.target.closest("button[data-style], button[data-indicator]");
   if (!button) return;
-  state.style = button.dataset.style;
-  renderStyleSelection();
-  chart.setStyle(state.style);
+  if (button.dataset.style) {
+    state.style = button.dataset.style;
+    renderStyleSelection();
+    chart.setStyle(state.style);
+  } else {
+    state.indicator = button.dataset.indicator;
+    renderIndicatorSelection();
+    chart.setIndicator(state.indicator);
+  }
   setTraderMenu(false);
   $("#trader-menu-button").focus();
 });

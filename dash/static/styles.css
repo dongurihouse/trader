@@ -126,7 +126,7 @@ button.brand {
   z-index: 30;
   top: calc(100% + 13px);
   left: 0;
-  width: 174px;
+  width: 202px;
   padding: 7px;
   background: rgba(16, 23, 33, 0.98);
   border: 1px solid var(--line-strong);
@@ -142,6 +142,12 @@ button.brand {
   font-size: 0.52rem;
   letter-spacing: 0.09em;
   text-transform: uppercase;
+}
+
+.trader-menu-dropdown .menu-section-label {
+  margin-top: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
 }
 
 .trader-menu-dropdown button {
@@ -178,6 +184,32 @@ button.brand {
   display: block;
   width: 18px;
   height: 12px;
+}
+
+.menu-indicator-icon {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  color: var(--ink);
+  font-size: 0.55rem;
+  font-weight: 850;
+  letter-spacing: 0;
+  background: var(--cyan);
+  border-radius: 5px;
+}
+
+.menu-indicator-icon.macd {
+  background: #f7b955;
+}
+
+.menu-indicator-icon.roc {
+  background: var(--acid);
+}
+
+.menu-indicator-icon.none {
+  color: var(--muted);
+  background: var(--line-strong);
 }
 
 .menu-style-icon.line::before {
@@ -1110,6 +1142,10 @@ h1 em {
   border: 1px solid var(--line-strong);
   border-radius: 9px;
   box-shadow: 0 12px 35px rgba(0, 0, 0, 0.3);
+}
+
+.chart-tooltip .indicator-value {
+  color: var(--cyan);
 }
 
 .chart-tooltip strong,
