@@ -410,7 +410,13 @@ $("#algo-strip").addEventListener("click", (event) => {
 $("#algo-strip").addEventListener("wheel", (event) => {
   const strip = event.currentTarget;
   if (strip.scrollWidth <= strip.clientWidth) return;
-  const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+  if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+  const deltaScale = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+    ? 16
+    : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+      ? strip.clientWidth
+      : 1;
+  const delta = event.deltaY * deltaScale;
   const maxScroll = strip.scrollWidth - strip.clientWidth;
   const canScroll = (delta < 0 && strip.scrollLeft > 0) || (delta > 0 && strip.scrollLeft < maxScroll);
   if (!canScroll) return;

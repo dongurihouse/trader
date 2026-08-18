@@ -1944,7 +1944,6 @@ pre {
   overflow-x: auto;
   overscroll-behavior-x: contain;
   scrollbar-width: none;
-  scroll-snap-type: x proximity;
 }
 
 .algo-strip::-webkit-scrollbar {
@@ -1964,7 +1963,6 @@ pre {
   border: 1px solid var(--line);
   border-radius: 12px;
   cursor: pointer;
-  scroll-snap-align: center;
   transition: 150ms ease;
 }
 
