@@ -2180,6 +2180,51 @@ def _algo_gap_continuation(context: AlgoContext) -> tuple[bool, bool, int]:
     return False, False, 0
 
 
+def _confirmed_extreme_direction(
+    context: AlgoContext,
+    session: Mapping[str, Any],
+    atr_session: float,
+    min_range_atr: float,
+    confirmation_bars: int,
+    window_min: int,
+    window_max: int,
+) -> int:
+    """Confirm a recent session extreme without storing private algo state."""
+    rows = context.read_bars(int(session["open_ts"]), None)
+    if len(rows) <= confirmation_bars:
+        return 0
+    current_price = float(rows[-1]["close"])
+    prior_rows = rows[:-1]
+    first_candidate = max(0, len(prior_rows) - confirmation_bars)
+    for index in range(len(prior_rows) - 1, first_candidate - 1, -1):
+        candidate = prior_rows[index]
+        candidate_minute = int(
+            (int(candidate["ts"]) - int(session["open_ts"])) // 60
+        )
+        if candidate_minute < window_min or candidate_minute >= window_max:
+            continue
+        history = prior_rows[: index + 1]
+        day_high = max(float(row["high"]) for row in history)
+        day_low = min(float(row["low"]) for row in history)
+        candidate_price = float(candidate["close"])
+        denominator = atr_session * candidate_price
+        if (
+            denominator <= 0.0
+            or (day_high - day_low) / denominator < min_range_atr
+        ):
+            continue
+        if float(candidate["low"]) <= day_low:
+            if current_price > float(candidate["high"]):
+                return 1
+            continue
+        if (
+            float(candidate["high"]) >= day_high
+            and current_price < float(candidate["low"])
+        ):
+            return -1
+    return 0
+
+
 def _algo_extreme_fade(context: AlgoContext) -> tuple[bool, bool, int]:
     session_name, extremes_name, atr_name, rvol_name, price_name = context.inputs
     session = context.inputs[session_name]
@@ -2205,6 +2250,7 @@ def _algo_extreme_fade(context: AlgoContext) -> tuple[bool, bool, int]:
     min_range_atr = float(context.parameters["min_range_atr"])
     stop_fraction = float(context.parameters["stop_atr_frac"])
     target_r = float(context.parameters["target_r"])
+    confirmation_bars = int(context.parameters["confirmation_bars"])
     min_rvol = float(context.parameters["min_rvol"])
     minute_min = int(context.parameters["minute_min"])
     minute_max = int(context.parameters["minute_max"])
@@ -2255,13 +2301,24 @@ def _algo_extreme_fade(context: AlgoContext) -> tuple[bool, bool, int]:
         or minute >= window_max
         or float(session["to_close"]) < entry_cutoff
         or float(rvol) <= min_rvol
-        or float(extremes["day_range_atr"]) < min_range_atr
     ):
         return False, False, 0
-    if bool(extremes["new_day_low"]):
-        return True, False, 1
-    if bool(extremes["new_day_high"]):
-        return True, False, -1
+    if (
+        float(extremes["day_range_atr"]) >= min_range_atr
+        and (bool(extremes["new_day_low"]) or bool(extremes["new_day_high"]))
+    ):
+        return False, False, 0
+    direction = _confirmed_extreme_direction(
+        context,
+        session,
+        float(atr_session),
+        min_range_atr,
+        confirmation_bars,
+        window_min,
+        window_max,
+    )
+    if direction:
+        return True, False, direction
     return False, False, 0
 
 
@@ -2418,8 +2475,10 @@ def _normalize_gap_continuation(
 def _normalize_extreme_fade(
     parameters: Mapping[str, Any], tickers: tuple[str, ...]
 ) -> Mapping[str, Any]:
-    return _normalize_targeted_window(
-        parameters,
+    base_parameters = dict(parameters)
+    confirmation_bars = base_parameters.pop("confirmation_bars", None)
+    result = _normalize_targeted_window(
+        base_parameters,
         tickers,
         (
             "min_range_atr",
@@ -2430,6 +2489,10 @@ def _normalize_extreme_fade(
             "flat_minutes",
         ),
     )
+    result["confirmation_bars"] = require_int(
+        confirmation_bars, "confirmation_bars", error=ConfigError
+    )
+    return result
 
 
 ALGO_FUNCTIONS: dict[str, AlgoSpec] = {

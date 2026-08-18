@@ -128,7 +128,7 @@ It has these algo functions:
 | `momentum_continuation` | `session`, `first30_ret`, `atr_session`, `rvol_open`, `last_close` | `target_tickers`, `first30_min_pct`, `risk_atr_frac`, `target_r`, `min_rvol`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
 | `failed_gap` | `session`, `prior_session`, `atr_session`, `last_close` | `target_tickers`, `gap_min_pct`, `risk_atr_frac`, `target_r`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
 | `gap_continuation` | `session`, `prior_session`, `opening_range`, `atr_session`, `rvol_open`, `last_close` | `target_tickers`, `gap_min_pct`, `risk_atr_frac`, `target_r`, `min_rvol`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
-| `extreme_fade` | `session`, `session_extremes`, `atr_session`, `rvol_open`, `last_close` | `target_tickers`, `min_range_atr`, `stop_atr_frac`, `target_r`, `min_rvol`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
+| `extreme_fade` | `session`, `session_extremes`, `atr_session`, `rvol_open`, `last_close` | `target_tickers`, `min_range_atr`, `stop_atr_frac`, `target_r`, `confirmation_bars`, `min_rvol`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
 
 Every algo output is `[is_entry, is_close_all, direction]`. Direction is `1`
 for long, `-1` for short, and `0` when quiet. Both actions cannot be true. A
@@ -155,7 +155,9 @@ The four migrated algorithms also trade SNDK only and enter at most once per
 regular session. `lateday_momentum` follows a large first-half-hour move late
 in the session. `failed_gap_reversal` fades a gap after price returns inside the
 prior range. `gap_play` follows a gap through the fifteen-minute opening range.
-`day_extreme_reversal` fades a fresh high or low after a one-ATR session range.
+`day_extreme_reversal` arms at a qualifying fresh high or low, then enters only
+when a later closed bar within `confirmation_bars` closes beyond the extreme
+bar's opposite edge.
 Their brackets use the entry price and the day-constant fourteen-session ATR.
 All exits use the minute close. The algo context exposes regular bars through a
 read-only accessor capped at the evaluation timestamp; the extreme fade uses
