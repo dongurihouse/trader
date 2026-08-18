@@ -13,20 +13,21 @@
     <a class="skip-link" href="#main">Skip to algorithms</a>
 
     <header class="topbar">
-      <a class="brand" href="/" aria-label="Trader dashboard home">
-        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-        <span>TRADER</span>
-      </a>
+      <div class="brand-status">
+        <a class="brand" href="/" aria-label="Trader dashboard home">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span>TRADER</span>
+        </a>
+        <span class="header-market brand-market-status" id="market-status" role="status" aria-label="Checking market" title="Checking market">
+          <span class="status-dot" id="market-dot"></span>
+        </span>
+      </div>
       <nav class="topbar-nav" aria-label="Dashboard views">
         <a href="/">Chart</a>
         <a class="active" href="/algos" aria-current="page">Algos</a>
         <a href="/logs">Logs</a>
       </nav>
-      <div class="topbar-meta">
-        <span class="header-market" id="market-status" aria-label="Checking market" title="Checking market">
-          <span class="status-dot" id="market-dot"></span>
-        </span>
-      </div>
+      <div class="topbar-meta" aria-hidden="true"></div>
     </header>
 
     <main id="main" class="algos-main">
