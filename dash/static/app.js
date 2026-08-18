@@ -1071,7 +1071,13 @@ async function loadOverview({ quiet = false } = {}) {
       && state.bars?.ticker === state.ticker
       && state.chartRevision !== null
       && Number(state.chartRevision) === Number(quote?.chart_revision);
-    if (!chartIsCurrent) await loadBars({ quiet });
+    if (!chartIsCurrent) {
+      const loadLatestSessionFirst = !state.bars && state.range === "HISTORY";
+      await loadBars({ quiet, range: loadLatestSessionFirst ? "1D" : state.range });
+      if (loadLatestSessionFirst && state.bars?.range === "1D") {
+        loadBars({ quiet: true, range: state.range });
+      }
+    }
   } catch (error) {
     showToast(error.message);
   }
@@ -1136,15 +1142,16 @@ async function selectTicker(ticker) {
   await loadBars();
 }
 
-async function loadBars({ quiet = false } = {}) {
+async function loadBars({ quiet = false, range = state.range } = {}) {
   if (!state.ticker) return;
   const request = ++state.chartRequest;
   if (!quiet || !state.bars) $("#chart-loading").hidden = false;
   $("#chart-empty").hidden = true;
   try {
-    const payload = await api(`/api/bars?ticker=${encodeURIComponent(state.ticker)}&range=${state.range}`);
+    const payload = await api(`/api/bars?ticker=${encodeURIComponent(state.ticker)}&range=${range}`);
     if (request !== state.chartRequest) return;
-    const shouldFocusLatest = state.bars?.ticker !== payload.ticker;
+    const shouldFocusLatest = state.bars?.ticker !== payload.ticker
+      || state.bars?.range !== payload.range;
     state.bars = payload;
     state.chartRevision = state.overview?.quotes.find(
       (item) => item.ticker === payload.ticker,
