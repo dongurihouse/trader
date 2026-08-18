@@ -11,8 +11,8 @@ pair are committed together, so one configured output is the completion marker.
 A config change with a new version therefore fills the same bounded window
 without a separate backtest path.
 
-Every entry or exit produced by an algo with `"trades": true` writes a trade,
-whether the evaluated bar is historical or new. Other algos write outputs only.
+Every entry or exit produced by a configured algo writes a trade, whether the
+evaluated bar is historical or new.
 
 The long-running service sends a macOS Messages alert after it commits a new
 entry or exit on the ticker's latest regular-session bar. Historical work,
@@ -145,9 +145,9 @@ for long, `-1` for short, and `0` when quiet. Both actions cannot be true. A
 new code function is needed only when a strategy cannot be expressed as
 another parameter set of these functions.
 
-`orb5` forms the first five regular-session bars, requires elapsed relative
+`orb5` forms the first ten regular-session bars, requires elapsed relative
 volume above `1.0`, and enters on the first close outside that range. The
-opposite range edge is the stop and the target is `2R`. It enters at most once
+opposite range edge is the stop and the target is `0.5R`. It enters at most once
 per session, blocks new entries inside ten minutes to close, and closes any
 open unit five minutes before the configured regular or early close.
 
@@ -202,8 +202,7 @@ Example:
     "sma_cross": {
       "function": "crossover",
       "inputs": ["fast", "slow"],
-      "params": {},
-      "trades": false
+      "params": {}
     }
   }
 }
