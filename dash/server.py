@@ -85,7 +85,6 @@ class DashboardData:
                 problems = []
                 history = []
                 nodes = []
-                stored_versions = []
                 counts = {}
             else:
                 services = self._services(connection, config)
@@ -100,27 +99,24 @@ class DashboardData:
                     limit=36,
                 )
                 nodes = self._nodes(connection, config)
-                stored_versions = [
-                    {
-                        "version": row["version"],
-                        "first_seen": row["first_seen"],
-                    }
-                    for row in connection.execute(
-                        "SELECT version, first_seen FROM configs ORDER BY first_seen DESC"
-                    )
-                ]
                 counts = {
                     table: connection.execute(
                         f"SELECT COUNT(*) FROM {table}"
                     ).fetchone()[0]
-                    for table in ("bars", "events", "trades", "outputs")
+                    for table in (
+                        "bars",
+                        "events",
+                        "trades",
+                        "outputs",
+                        "algos",
+                        "algo_history",
+                    )
                 }
 
         return {
             "generated_at": int(datetime.now(tz=UTC).timestamp()),
             "market": self._market_state(config),
             "config": {
-                "version": config.get("version"),
                 "tickers": configured_tickers,
                 "evaluation_days": config.get("algo", {}).get("evaluation_days"),
                 "poll_seconds": config.get("algo", {}).get("poll_seconds"),
@@ -134,7 +130,6 @@ class DashboardData:
             "problems": problems,
             "history": history,
             "nodes": nodes,
-            "stored_versions": stored_versions,
         }
 
     def bars(
@@ -366,52 +361,66 @@ class DashboardData:
             "has_more": len(rows) == row_limit,
         }
 
-    def node_detail(self, ticker: str, kind: str, version: str | None) -> dict[str, Any]:
+    def node_detail(
+        self, ticker: str, kind: str, version_id: str | None
+    ) -> dict[str, Any]:
         ticker = self._valid_symbol(ticker)
         if not kind or len(kind) > 120:
             raise DashboardError("A signal or algo name is required")
 
         with self.connection() as connection:
-            if version is None:
-                row = connection.execute(
+            dependencies: Any = {}
+            archived_at = None
+            if version_id is None:
+                definition, node_type = self._node_definition(kind)
+                values = []
+                for row in connection.execute(
                     """
-                    SELECT config
+                    SELECT ts, output, computed_at
                     FROM outputs
                     WHERE ticker = ? AND kind = ?
-                    ORDER BY ts DESC, computed_at DESC
-                    LIMIT 1
+                    ORDER BY ts DESC
+                    LIMIT 240
                     """,
                     (ticker, kind),
+                ).fetchall():
+                    values.append(
+                        {
+                            "ts": row["ts"],
+                            "output": self._json_value(row["output"]),
+                            "computed_at": row["computed_at"],
+                        }
+                    )
+                values.reverse()
+            else:
+                try:
+                    requested_id = int(version_id)
+                except ValueError as exc:
+                    raise DashboardError("Historical version ID must be an integer") from exc
+                row = connection.execute(
+                    """
+                    SELECT definition,dependencies,archived_at
+                    FROM algo_history
+                    WHERE version_id=? AND name=?
+                    """,
+                    (requested_id, kind),
                 ).fetchone()
-                version = str(row["config"]) if row else str(self.config().get("version", ""))
-
-            definition, node_type = self._node_definition(connection, kind, version)
-            values = []
-            for row in connection.execute(
-                """
-                SELECT ts, output, computed_at
-                FROM outputs
-                WHERE ticker = ? AND kind = ? AND config = ?
-                ORDER BY ts DESC
-                LIMIT 240
-                """,
-                (ticker, kind, version),
-            ).fetchall():
-                values.append(
-                    {
-                        "ts": row["ts"],
-                        "output": self._json_value(row["output"]),
-                        "computed_at": row["computed_at"],
-                    }
-                )
-            values.reverse()
+                if row is None:
+                    raise DashboardError("Historical algorithm definition was not found")
+                definition = self._json_value(row["definition"])
+                dependencies = self._json_value(row["dependencies"])
+                archived_at = row["archived_at"]
+                node_type = "algo"
+                values = []
 
         return {
             "ticker": ticker,
             "kind": kind,
             "node_type": node_type,
-            "version": version,
+            "version_id": int(version_id) if version_id is not None else None,
+            "archived_at": archived_at,
             "definition": definition,
+            "dependencies": dependencies,
             "values": values,
         }
 
@@ -421,32 +430,31 @@ class DashboardData:
         algo_names = set(self._mapping(config.get("algos")).keys())
 
         with self.connection() as connection:
-            for row in connection.execute("SELECT content FROM configs"):
-                stored = self._json_value(row["content"])
-                if isinstance(stored, dict):
-                    algo_names.update(self._mapping(stored.get("algos")).keys())
+            algo_names.update(
+                str(row["name"])
+                for row in connection.execute("SELECT name FROM algos")
+            )
 
             if not algo_names:
                 return {"ticker": ticker, "rows": []}
 
             placeholders = ",".join("?" for _ in algo_names)
             query = f"""
-                SELECT o.kind, o.config, o.ts, o.output, b.close
+                SELECT o.kind, o.ts, o.output, b.close
                 FROM outputs o
                 JOIN bars b ON b.ticker = o.ticker AND b.ts = o.ts
                 WHERE o.ticker = ? AND o.kind IN ({placeholders})
-                ORDER BY o.kind, o.config, o.ts
+                ORDER BY o.kind, o.ts
             """
             rows = connection.execute(query, (ticker, *sorted(algo_names))).fetchall()
 
-        groups: dict[tuple[str, str], dict[str, Any]] = {}
+        groups: dict[str, dict[str, Any]] = {}
         for row in rows:
-            key = (row["kind"], row["config"])
+            key = str(row["kind"])
             group = groups.setdefault(
                 key,
                 {
                     "algo": row["kind"],
-                    "version": row["config"],
                     "entries": 0,
                     "closed_units": 0,
                     "wins": 0,
@@ -483,7 +491,6 @@ class DashboardData:
             performance_rows.append(
                 {
                     "algo": group["algo"],
-                    "version": group["version"],
                     "entries": group["entries"],
                     "closed_units": closed,
                     "open_units": len(group["open_units"]),
@@ -492,7 +499,7 @@ class DashboardData:
                     "win_rate": round((group["wins"] / closed) * 100.0, 1) if closed else None,
                 }
             )
-        performance_rows.sort(key=lambda item: (item["algo"], str(item["version"])))
+        performance_rows.sort(key=lambda item: item["algo"])
         return {"ticker": ticker, "rows": performance_rows}
 
     @staticmethod
@@ -566,33 +573,54 @@ class DashboardData:
 
     def algorithms(self) -> dict[str, Any]:
         config = self.config()
-        current_version = str(config.get("version", ""))
         current_definitions = self._mapping(config.get("algos"))
         definitions: dict[str, dict[str, Any]] = {
             name: {
                 "definition": definition if isinstance(definition, dict) else {},
-                "version": current_version,
                 "configured": True,
+                "active_from": None,
             }
             for name, definition in current_definitions.items()
         }
+        histories: dict[str, list[dict[str, Any]]] = {}
 
         with self.connection() as connection:
             for row in connection.execute(
-                "SELECT version, content FROM configs ORDER BY first_seen DESC"
+                "SELECT name,definition,active_from FROM algos ORDER BY name"
             ):
-                stored = self._json_value(row["content"])
-                if not isinstance(stored, dict):
-                    continue
-                for name, definition in self._mapping(stored.get("algos")).items():
-                    definitions.setdefault(
-                        name,
-                        {
-                            "definition": definition if isinstance(definition, dict) else {},
-                            "version": str(row["version"]),
-                            "configured": False,
-                        },
-                    )
+                name = str(row["name"])
+                definition = self._json_value(row["definition"])
+                definitions[name] = {
+                    "definition": definition if isinstance(definition, dict) else {},
+                    "configured": name in current_definitions,
+                    "active_from": row["active_from"],
+                }
+            for row in connection.execute(
+                """
+                SELECT version_id,name,definition,dependencies,active_from,archived_at
+                FROM algo_history
+                ORDER BY name,version_id DESC
+                """
+            ):
+                name = str(row["name"])
+                definition = self._json_value(row["definition"])
+                histories.setdefault(name, []).append(
+                    {
+                        "version_id": int(row["version_id"]),
+                        "definition": definition if isinstance(definition, dict) else {},
+                        "dependencies": self._json_value(row["dependencies"]),
+                        "active_from": int(row["active_from"]),
+                        "archived_at": int(row["archived_at"]),
+                    }
+                )
+                definitions.setdefault(
+                    name,
+                    {
+                        "definition": definition if isinstance(definition, dict) else {},
+                        "configured": False,
+                        "active_from": None,
+                    },
+                )
 
             trade_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(trades)")
@@ -706,7 +734,7 @@ class DashboardData:
             group = algo_data[name]
             definition_meta = definitions.get(
                 name,
-                {"definition": {}, "version": None, "configured": False},
+                {"definition": {}, "configured": False, "active_from": None},
             )
             definition = definition_meta["definition"]
             positions = []
@@ -768,7 +796,8 @@ class DashboardData:
                     "inputs": definition.get("inputs", []),
                     "params": definition.get("params", {}),
                     "configured": definition_meta["configured"],
-                    "version": definition_meta["version"],
+                    "active_from": definition_meta["active_from"],
+                    "history": histories.get(name, []),
                     "stats": stats,
                     "tickers": ticker_rows,
                     "recent_trades": sorted(
@@ -783,10 +812,8 @@ class DashboardData:
         return {
             "generated_at": int(datetime.now(tz=UTC).timestamp()),
             "market": self._market_state(config),
-            "version": current_version,
             "return_basis": (
-                "Gross percentage points summed per entry unit; no sizing, fees, or slippage. "
-                "Trades are grouped by algorithm name because trade rows do not store config versions."
+                "Gross percentage points summed per entry unit; no sizing, fees, or slippage."
             ),
             "algorithms": algorithms,
         }
@@ -960,9 +987,9 @@ class DashboardData:
 
         for row in connection.execute(
             """
-            SELECT ticker, kind, config, ts, output
+            SELECT ticker, kind, ts, output
             FROM (
-                SELECT ticker, kind, config, ts, output,
+                SELECT ticker, kind, ts, output,
                        ROW_NUMBER() OVER (
                            PARTITION BY ticker, kind ORDER BY ts DESC, computed_at DESC
                        ) AS position
@@ -984,35 +1011,18 @@ class DashboardData:
             )
             node.setdefault("latest_by_ticker", {})[row["ticker"]] = {
                 "ts": row["ts"],
-                "version": row["config"],
                 "output": self._json_value(row["output"]),
             }
         return sorted(nodes.values(), key=lambda item: (item["node_type"], item["name"]))
 
-    def _node_definition(
-        self, connection: sqlite3.Connection, kind: str, version: str
-    ) -> tuple[Any, str]:
+    def _node_definition(self, kind: str) -> tuple[Any, str]:
         current = self.config()
-        candidates: list[dict[str, Any]] = []
-        if str(current.get("version", "")) == str(version):
-            candidates.append(current)
-        row = connection.execute(
-            "SELECT content FROM configs WHERE version = ?", (version,)
-        ).fetchone()
-        if row:
-            stored = self._json_value(row["content"])
-            if isinstance(stored, dict):
-                candidates.append(stored)
-        if not candidates:
-            candidates.append(current)
-
-        for candidate in candidates:
-            signals = self._mapping(candidate.get("signals"))
-            if kind in signals:
-                return signals[kind], "signal"
-            algos = self._mapping(candidate.get("algos"))
-            if kind in algos:
-                return algos[kind], "algo"
+        signals = self._mapping(current.get("signals"))
+        if kind in signals:
+            return signals[kind], "signal"
+        algos = self._mapping(current.get("algos"))
+        if kind in algos:
+            return algos[kind], "algo"
         return {}, "output"
 
     def _range_start(
@@ -1149,32 +1159,6 @@ class DashboardData:
         ):
             stride_minutes = 5
 
-        configured_version = str(config.get("version", ""))
-        # Start from the much smaller bar range so SQLite can probe outputs by
-        # the full (ticker, timestamp, kind) primary-key prefix.
-        version_row = connection.execute(
-            """
-            SELECT candidate.config, COUNT(*) AS usable_count
-            FROM bars AS chart_bar
-            CROSS JOIN outputs AS candidate
-              ON candidate.ticker = chart_bar.ticker
-             AND candidate.ts = chart_bar.ts
-            WHERE chart_bar.ticker = ?
-              AND chart_bar.ts >= ? AND chart_bar.ts <= ?
-              AND candidate.kind = ? AND candidate.output != 'null'
-            GROUP BY candidate.config
-            ORDER BY usable_count DESC,
-                     CASE WHEN candidate.config = ? THEN 1 ELSE 0 END DESC,
-                     CAST(candidate.config AS INTEGER) DESC,
-                     candidate.config DESC
-            LIMIT 1
-            """,
-            (ticker, start, end, kind, configured_version),
-        ).fetchone()
-        selected_version = (
-            str(version_row["config"]) if version_row is not None else configured_version
-        )
-
         snapshots = []
         for row in connection.execute(
             """
@@ -1188,11 +1172,11 @@ class DashboardData:
              AND candidate.ts = chart_bar.ts
             WHERE chart_bar.ticker = ?
               AND chart_bar.ts >= ? AND chart_bar.ts <= ?
-              AND candidate.kind = ? AND candidate.config = ?
+              AND candidate.kind = ?
               AND candidate.output != 'null'
             ORDER BY candidate.ts
             """,
-            (ticker, start, end, kind, selected_version),
+            (ticker, start, end, kind),
         ):
             top_shapes = self._json_value(row["top_shapes"])
             if not isinstance(top_shapes, list):
@@ -1216,7 +1200,6 @@ class DashboardData:
 
         return {
             "kind": kind,
-            "config": selected_version,
             "stride_minutes": stride_minutes,
             "snapshots": snapshots,
         }
@@ -1251,35 +1234,6 @@ class DashboardData:
         ):
             strong_threshold = 80.0
         strong_threshold = max(0.0, min(100.0, float(strong_threshold)))
-        configured_version = str(config.get("version", ""))
-        # Avoid scanning every stored signal and config version in the chart
-        # window; each bar produces a narrow primary-key lookup instead.
-        version_row = connection.execute(
-            """
-            SELECT candidate.config, COUNT(*) AS usable_count
-            FROM bars AS chart_bar
-            CROSS JOIN outputs AS candidate
-              ON candidate.ticker = chart_bar.ticker
-             AND candidate.ts = chart_bar.ts
-            WHERE chart_bar.ticker = ?
-              AND chart_bar.ts >= ? AND chart_bar.ts <= ?
-              AND candidate.kind = ? AND candidate.output != 'null'
-              AND CASE WHEN json_valid(candidate.output)
-                       THEN json_type(candidate.output, '$.persistence_score')
-                       ELSE NULL END IN ('integer', 'real')
-            GROUP BY candidate.config
-            ORDER BY usable_count DESC,
-                     CASE WHEN candidate.config = ? THEN 1 ELSE 0 END DESC,
-                     CAST(candidate.config AS INTEGER) DESC,
-                     candidate.config DESC
-            LIMIT 1
-            """,
-            (ticker, start, end, kind, configured_version),
-        ).fetchone()
-        selected_version = (
-            str(version_row["config"]) if version_row is not None else configured_version
-        )
-
         snapshots = []
         for row in connection.execute(
             """
@@ -1299,11 +1253,11 @@ class DashboardData:
              AND candidate.ts = chart_bar.ts
             WHERE chart_bar.ticker = ?
               AND chart_bar.ts >= ? AND chart_bar.ts <= ?
-              AND candidate.kind = ? AND candidate.config = ?
+              AND candidate.kind = ?
               AND candidate.output != 'null'
             ORDER BY candidate.ts
             """,
-            (ticker, start, end, kind, selected_version),
+            (ticker, start, end, kind),
         ):
             persistence_score = row["persistence_score"]
             signed_persistence = row["signed_persistence"]
@@ -1328,7 +1282,6 @@ class DashboardData:
 
         return {
             "kind": kind,
-            "config": selected_version,
             "strong_threshold": strong_threshold,
             "snapshots": snapshots,
         }
@@ -1472,7 +1425,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 payload = self.data.node_detail(
                     self._param(query, "ticker"),
                     self._param(query, "kind"),
-                    self._param(query, "version", None),
+                    self._param(query, "version_id", None),
                 )
             elif path == "/api/performance":
                 payload = self.data.performance(self._param(query, "ticker"))

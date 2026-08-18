@@ -69,8 +69,9 @@ unit return, win rate, profit factor, drawdown, holding time, per-ticker
 results, current marks, and recent closed units. Use the horizontal algorithm
 scorecards to compare summaries and switch the detail view. Returns do not include
 position sizing, fees, or slippage, and trade rows are grouped by algorithm
-name because they do not store a config version. Select a recent closed unit to
-open the SNDK chart, its trading date, and all algorithm overlays.
+name. Archived definitions appear with their historical version IDs. Select a
+recent closed unit to open the SNDK chart, its trading date, and all algorithm
+overlays.
 
 ## Logs
 

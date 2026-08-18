@@ -17,7 +17,9 @@ through calls between services.
 | events       | events                | algo, dashboard |
 | trades       | algo                  | dashboard       |
 | outputs      | algo                  | dashboard       |
-| configs      | algo                  | dashboard       |
+| signals      | algo                  | dashboard       |
+| algos        | algo                  | dashboard       |
+| algo_history | algo                  | dashboard       |
 | logs         | every service, own rows only | dashboard |
 
 One shared config file holds the ticker list, the signal and algo
@@ -140,7 +142,7 @@ algo; a list restricts the call to those algos.
 ### The algo output contract
 
 - Input: besides its signals, an algo receives its simulated open entries at
-  `t` from its own prior versioned outputs. Entry prices come from bars. 
+  `t` from its own prior live outputs. Entry prices come from bars.
 - Output at `t` is `(is_entry, is_close_all, direction)`. The first two values
   are booleans and direction is `1`, `-1`, or `0`. The
   algo decides among three moves from its open entries: `is_entry` opens
@@ -149,7 +151,7 @@ algo; a list restricts the call to those algos.
 - An exit device such as a bracket lives inside the algo: the open entries give
   the anchor and declared signals provide the current levels.
 - Historical position state lives in the database only: open units are entry
-  outputs since the last close output under the same config version. Live
+  outputs since the last close output. Live
   trade state is the entries since the last `exit_all` in trades. The loop
   keeps no position in memory. Work under one ticker runs oldest first, so an
   algo's prior outputs exist when it reads them.
@@ -175,8 +177,7 @@ algo; a list restricts the call to those algos.
   ```
 
 - The map key is the name, and it is the `kind` value in outputs. Presence
-  in the map means enabled; to disable a node, remove the entry and bump
-  the version.
+  in the map means enabled; to disable a node, remove the entry.
 - `inputs` declares what a node reads. Every algo action writes a trade row.
 - A `bar_metadata` input is also the fetch order. Bars reads the same config
   file and keeps the declared names populated. No service requests a fetch.
@@ -184,38 +185,33 @@ algo; a list restricts the call to those algos.
 - All parameters live in `params`. A complicated node adds `function`,
   which points to a function in the code, and the function hard-codes
   nothing.
-- The version is a field in the config file. The user bumps it by hand
-  with every change to a signal or an algo. When the algo service sees a
-  version that is not in the configs table, it stores the full file under
-  that version. A stored version therefore always resolves to readable
-  parameters, also after the config file has moved on.
-- The service trusts the version field, not the content. When the file
-  differs from the stored content under the same version, the loop logs a
-  warning; the fix is a version bump.
+- The live `algos` table stores each current algorithm definition and its
+  effective signal and algorithm dependencies. Live definitions have no ID.
+- `algo_history` mirrors the definition columns and adds `version_id` plus
+  the archive time. Database triggers archive an old live row before an update
+  or removal.
 
 ### A change is a standard operation
 
-Add a signal, add an algo, or change a parameter: edit the config file
-and bump the version field. That is the whole procedure. The algo service
-reacts on its own:
+Add a signal, add an algo, or change a parameter by editing the config file.
+The algo service reacts on its own:
 
-1. It sees the new version and stores the file in configs.
-2. The work rule (see the loop) now matches every pair in the evaluation
-   window, because no output rows exist under the new version, and fills
-   them. The rows are keyed, so the run is idempotent and resumable.
-3. The dashboard shows the new version next to the old ones as the rows
-   land.
+1. It validates and applies the new live definitions immediately.
+2. Before an existing algorithm changes or is removed, the database copies
+   its old definition to `algo_history` and assigns a new `version_id`.
+3. The service clears derived live outputs and affected trades, then refills
+   the evaluation window. The rows are keyed, so the run is resumable.
+4. The dashboard shows the current algorithm and its archived definitions.
 
 Easy: one file edit, no deploy. Fast: the work is bounded by the
 evaluation window, never by the full history. 
 
 ### The output cache
 
-Every evaluation is stored in outputs: one row per signal and one per algo,
-keyed by ticker, timestamp, name, and the config version, stamped with
-computed_at. A rerun under the same version updates the row in place; a
-changed config writes rows under a new version, and the old rows stay for
-reference. The dashboard reads the cache and never writes it.
+Every evaluation is stored in outputs: one live row per signal or algorithm,
+keyed by ticker, timestamp, and name, and stamped with `computed_at`. A rerun
+updates that row in place. Definition history lives in `algo_history`, not in
+the live output cache. The dashboard reads the cache and never writes it.
 
 Every enabled signal is evaluated and stored each tick, whether or not an
 algo reads it. A visual-aid signal, such as a shape forecast, is stored the
@@ -227,7 +223,7 @@ number.
 - No private clock. The loop polls the database and the config file every
   30 seconds and reacts to what changed.
 - The work list is every (ticker, timestamp) pair inside the evaluation
-  window where outputs has no row under the current version. This one
+  window where outputs has no live completion row. This one
   rule covers a live bar and a config change; the loop does not tell the
   cases apart.
 - Every enabled algo runs for every configured ticker. Algo definitions have
@@ -254,8 +250,9 @@ read-only health APIs.
 | ------------------------------------------ | --------------------------------------- |
 | minute-bar chart over all days             | bars                                    |
 | entry and exit overlays on the bars        | trades, per algo                        |
-| click-through detail of a signal or algo   | outputs (values) + configs (parameters) |
-| algo performance across parameter sets     | outputs across versions, priced by bars |
+| click-through detail of a signal or algo   | outputs + current config                |
+| current algo performance                   | outputs and trades, priced by bars      |
+| archived algo definitions                  | algo_history                            |
 | visual-aid signals, e.g. a shape forecast  | outputs, like any signal                |
 | service status                             | local health APIs                       |
 | service history and problems               | logs                                    |
@@ -346,16 +343,31 @@ CREATE TABLE outputs (
     ticker      TEXT    NOT NULL,
     ts          INTEGER NOT NULL,
     kind        TEXT    NOT NULL,  -- a signal name or an algo name
-    config      TEXT    NOT NULL,  -- the config file version
     output      TEXT    NOT NULL,  -- JSON
     computed_at INTEGER NOT NULL,  -- evaluation time, epoch seconds, UTC
-    PRIMARY KEY (ticker, ts, kind, config)
+    PRIMARY KEY (ticker, ts, kind)
 );
 
-CREATE TABLE configs (
-    version    TEXT    NOT NULL PRIMARY KEY,  -- the version field from the config file
-    first_seen INTEGER NOT NULL,              -- epoch seconds, UTC
-    content    TEXT    NOT NULL               -- the full config file, JSON
+CREATE TABLE signals (
+    name       TEXT    NOT NULL PRIMARY KEY,
+    definition TEXT    NOT NULL,  -- current config definition, JSON
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE algos (
+    name         TEXT    NOT NULL PRIMARY KEY,
+    definition   TEXT    NOT NULL,  -- current algo definition, JSON
+    dependencies TEXT    NOT NULL,  -- effective signal/algo inputs, JSON
+    active_from  INTEGER NOT NULL
+);
+
+CREATE TABLE algo_history (
+    version_id   INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    name         TEXT    NOT NULL,
+    definition   TEXT    NOT NULL,
+    dependencies TEXT    NOT NULL,
+    active_from  INTEGER NOT NULL,
+    archived_at  INTEGER NOT NULL
 );
 
 CREATE TABLE logs (
@@ -383,10 +395,10 @@ Notes:
 - `trades` binds every row to one algo and direction; nothing consolidates
   across algos. No price (recomputable) and no size (a row is one unit).
 - `outputs` grows fastest; `logs` grows steadily.
-- `configs` maps every stored version back to the full config file.
-- `logs` is append-only and the one table with an extra index.
-- No other indexes beyond the primary keys. Config stays in files; the
-  configs table is a record of versions, not the source of truth.
+- `algos` contains only live definitions and has no version column.
+- `algo_history.version_id` identifies only archived algorithm definitions.
+- `logs` is append-only. `logs` and `algo_history` have supporting indexes.
+- Config stays in files and is applied immediately after validation.
 
 ## Diagram
 
@@ -407,7 +419,9 @@ flowchart TB
         ET
         TR[(trades)]
         OUT[(outputs)]
-        CFG[(configs)]
+        SIG[(signals)]
+        ALG[(algos)]
+        AH[(algo_history)]
         LG[(logs)]
     end
 
@@ -420,7 +434,9 @@ flowchart TB
     ET -. read only .-> CORE
     LOOP --> TR
     LOOP --> OUT
-    LOOP --> CFG
+    LOOP --> SIG
+    LOOP --> ALG
+    LOOP --> AH
     BARS & EVENTS & LOOP --> LG
     DB -. read only .-> DASH[dashboard<br/>read-only webserver]
     BARS -. GET /health .-> DASH
@@ -431,13 +447,13 @@ flowchart TB
 
 1. No calendar table; the early-close days live in config.
 2. No backtest concept: the loop applies the core to timestamps, in bulk
-   or in real time. An output updates in place per version; old versions
-   stay for reference.
-3. No version hash: the user bumps the version field in config by hand.
+   or in real time. Each live output updates in place.
+3. Live state has no version. Replaced algorithm definitions move to
+   `algo_history`, where the database assigns `version_id`.
 4. Bar metadata comes from bars, never from algo. The handoff is a table, not
    a call, so the core stays deterministic and each service restarts alone.
    Config declares what to pull; nothing requests a fetch.
 
 ## Open
 
-1. The prune policy for old output versions.
+1. The retention policy for archived algorithm definitions.

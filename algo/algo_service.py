@@ -66,7 +66,7 @@ _PULLBACK_BASELINES: dict[
     Optional[tuple[float, float]],
 ] = {}
 _OUTPUT_SESSION_SEEDS: dict[
-    tuple[str, str, str, str, int], tuple[tuple[int, float, int], ...]
+    tuple[str, str, str, int], tuple[tuple[int, float, int], ...]
 ] = {}
 _SESSION_SUMMARIES: dict[
     tuple[str, str, date], Optional[Mapping[str, float]]
@@ -80,7 +80,7 @@ _RELATIVE_MOMENTUM_BASELINES: dict[
     tuple[str, str, date, int, int, int, float, int],
     Optional[Mapping[int, tuple[tuple[float, ...], tuple[float, ...]]]],
 ] = {}
-_RELATIVE_MOMENTUM_REPAIR_ATTEMPTS: set[tuple[str, str, str, int]] = set()
+_RELATIVE_MOMENTUM_REPAIR_ATTEMPTS: set[tuple[str, str, int]] = set()
 _INITIALIZED_DATABASES: set[Path] = set()
 _DATABASE_INIT_LOCK = threading.Lock()
 
@@ -103,7 +103,6 @@ class BrokerSettings:
 
 @dataclass(frozen=True)
 class Settings:
-    version: str
     database: Path
     tickers: tuple[str, ...]
     evaluation_days: int
@@ -337,9 +336,6 @@ def load_settings(
     if not isinstance(document, dict):
         raise ConfigError("config must be a JSON object")
 
-    version = document.get("version")
-    if isinstance(version, bool) or not isinstance(version, (str, int)) or not str(version):
-        raise ConfigError("version must be a non-empty string or integer")
     tickers = document.get("tickers")
     if not isinstance(tickers, list) or not tickers:
         raise ConfigError("tickers must be a non-empty list")
@@ -429,7 +425,6 @@ def load_settings(
         signals, algos
     )
     settings = Settings(
-        version=str(version),
         database=database,
         tickers=tuple(normalized),
         evaluation_days=require_int(
@@ -477,6 +472,148 @@ def _connect(path: Path, read_only: bool = False) -> sqlite3.Connection:
     return connection
 
 
+def _table_exists(connection: sqlite3.Connection, name: str) -> bool:
+    return connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone() is not None
+
+
+def _document_mapping(document: Mapping[str, Any], name: str) -> dict[str, Any]:
+    value = document.get(name)
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _algo_snapshots(
+    document: Mapping[str, Any],
+) -> dict[str, tuple[str, str]]:
+    """Return each raw algo definition and its effective config dependencies."""
+    signals = _document_mapping(document, "signals")
+    algos = _document_mapping(document, "algos")
+    schedule = {
+        "early_closes": document.get("early_closes", []),
+        "live_polling": document.get("live_polling", {}),
+    }
+    snapshots: dict[str, tuple[str, str]] = {}
+
+    for name, definition in algos.items():
+        signal_names: set[str] = set()
+        algo_names: set[str] = set()
+
+        def visit_signal(target: str) -> None:
+            if target in signal_names or target not in signals:
+                return
+            signal_names.add(target)
+            node = signals[target]
+            if not isinstance(node, Mapping):
+                return
+            for dependency in node.get("inputs", []):
+                if isinstance(dependency, str):
+                    visit_signal(dependency)
+
+        def visit_algo(target: str) -> None:
+            if target in algo_names or target not in algos:
+                return
+            algo_names.add(target)
+            node = algos[target]
+            if not isinstance(node, Mapping):
+                return
+            for dependency in node.get("inputs", []):
+                if not isinstance(dependency, str):
+                    continue
+                if dependency in algos:
+                    visit_algo(dependency)
+                else:
+                    visit_signal(dependency)
+
+        visit_algo(name)
+        algo_names.discard(name)
+        dependencies = {
+            "signals": {key: signals[key] for key in sorted(signal_names)},
+            "algos": {key: algos[key] for key in sorted(algo_names)},
+            "schedule": schedule,
+        }
+        snapshots[str(name)] = (_json(definition), _json(dependencies))
+    return snapshots
+
+
+def _migrate_legacy_versions(connection: sqlite3.Connection) -> bool:
+    """Convert stored global configs into per-algo history, then remove them."""
+    if not _table_exists(connection, "configs"):
+        return False
+    config_rows = connection.execute(
+        "SELECT first_seen,content FROM configs ORDER BY first_seen,version"
+    ).fetchall()
+    existing_algos = connection.execute("SELECT COUNT(*) FROM algos").fetchone()[0]
+    existing_history = connection.execute(
+        "SELECT COUNT(*) FROM algo_history"
+    ).fetchone()[0]
+    if config_rows and not existing_algos and not existing_history:
+        active: dict[str, tuple[str, str, int]] = {}
+        for row in config_rows:
+            try:
+                document = json.loads(row["content"])
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ConfigError("stored config is invalid JSON") from exc
+            if not isinstance(document, Mapping):
+                raise ConfigError("stored config must be a JSON object")
+            observed_at = int(row["first_seen"])
+            snapshots = _algo_snapshots(document)
+            for name in sorted(set(active) | set(snapshots)):
+                previous = active.get(name)
+                current = snapshots.get(name)
+                if previous is not None and (
+                    current is None or previous[:2] != current
+                ):
+                    connection.execute(
+                        """
+                        INSERT INTO algo_history(
+                            name,definition,dependencies,active_from,archived_at
+                        ) VALUES (?,?,?,?,?)
+                        """,
+                        (name, previous[0], previous[1], previous[2], observed_at),
+                    )
+                if current is None:
+                    active.pop(name, None)
+                elif previous is None or previous[:2] != current:
+                    active[name] = (current[0], current[1], observed_at)
+        connection.executemany(
+            """
+            INSERT INTO algos(name,definition,dependencies,active_from)
+            VALUES (?,?,?,?)
+            """,
+            [
+                (name, definition, dependencies, active_from)
+                for name, (definition, dependencies, active_from) in sorted(
+                    active.items()
+                )
+            ],
+        )
+    connection.execute("DROP TABLE configs")
+    return True
+
+
+def _migrate_outputs(connection: sqlite3.Connection) -> bool:
+    columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(outputs)")
+    }
+    if "config" not in columns:
+        return False
+    connection.execute("DROP TABLE outputs")
+    connection.execute(
+        """
+        CREATE TABLE outputs (
+            ticker      TEXT    NOT NULL,
+            ts          INTEGER NOT NULL,
+            kind        TEXT    NOT NULL,
+            output      TEXT    NOT NULL,
+            computed_at INTEGER NOT NULL,
+            PRIMARY KEY (ticker, ts, kind)
+        )
+        """
+    )
+    return True
+
+
 def _init_database(path: Path) -> None:
     path = path.resolve()
     if path in _INITIALIZED_DATABASES:
@@ -491,6 +628,7 @@ def _init_database(path: Path) -> None:
         connection = _connect(path)
         try:
             connection.executescript(schema)
+            connection.execute("BEGIN IMMEDIATE")
             trade_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(trades)")
             }
@@ -498,6 +636,14 @@ def _init_database(path: Path) -> None:
                 connection.execute(
                     "ALTER TABLE trades ADD COLUMN direction INTEGER NOT NULL DEFAULT 1 "
                     "CHECK(direction IN (-1, 1))"
+                )
+            migrated_versions = _migrate_legacy_versions(connection)
+            migrated_outputs = _migrate_outputs(connection)
+            if migrated_versions or migrated_outputs:
+                _log(
+                    connection,
+                    "info",
+                    "migrated live storage to unversioned outputs and per-algo history",
                 )
             connection.commit()
         finally:
@@ -2694,15 +2840,15 @@ def _algo_output(value: Any) -> tuple[bool, bool, int]:
 
 
 def _prior_output(
-    connection: sqlite3.Connection, ticker: str, ts: int, kind: str, version: str
+    connection: sqlite3.Connection, ticker: str, ts: int, kind: str
 ) -> Any:
     row = connection.execute(
         """
         SELECT output FROM outputs
-        WHERE ticker=? AND kind=? AND config=? AND ts<?
+        WHERE ticker=? AND kind=? AND ts<?
         ORDER BY ts DESC LIMIT 1
         """,
-        (ticker, kind, version, ts),
+        (ticker, kind, ts),
     ).fetchone()
     return json.loads(row["output"]) if row else None
 
@@ -2715,23 +2861,23 @@ def _output_state(
     ts: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     _, session_open, _ = _session_window(settings, ts)
-    seed_key = (str(settings.database), settings.version, ticker, algo, session_open)
+    seed_key = (str(settings.database), ticker, algo, session_open)
     if seed_key not in _OUTPUT_SESSION_SEEDS:
         last_close = connection.execute(
             """
             SELECT ts FROM outputs
-            WHERE ticker=? AND kind=? AND config=? AND ts<?
+            WHERE ticker=? AND kind=? AND ts<?
               AND json_extract(output,'$[1]')=1
             ORDER BY ts DESC LIMIT 1
             """,
-            (ticker, algo, settings.version, session_open),
+            (ticker, algo, session_open),
         ).fetchone()
         rows = connection.execute(
             """
             SELECT o.ts, o.output, b.close
             FROM outputs o
             JOIN bars b ON b.ticker=o.ticker AND b.ts=o.ts
-            WHERE o.ticker=? AND o.kind=? AND o.config=?
+            WHERE o.ticker=? AND o.kind=?
               AND o.ts>? AND o.ts<?
               AND json_extract(o.output,'$[0]')=1
             ORDER BY o.ts
@@ -2739,7 +2885,6 @@ def _output_state(
             (
                 ticker,
                 algo,
-                settings.version,
                 int(last_close["ts"]) if last_close else -1,
                 session_open,
             ),
@@ -2757,12 +2902,12 @@ def _output_state(
         SELECT o.ts, o.output, b.close
         FROM outputs o
         JOIN bars b ON b.ticker=o.ticker AND b.ts=o.ts
-        WHERE o.ticker=? AND o.kind=? AND o.config=?
+        WHERE o.ticker=? AND o.kind=?
           AND o.ts>=? AND o.ts<?
           AND (json_extract(o.output,'$[0]')=1 OR json_extract(o.output,'$[1]')=1)
         ORDER BY o.ts
         """,
-        (ticker, algo, settings.version, session_open, ts),
+        (ticker, algo, session_open, ts),
     ).fetchall()
     prior: list[dict[str, Any]] = []
     open_entries = [
@@ -2839,11 +2984,11 @@ def _seed_evaluation_state(
                 SELECT kind,output,
                        ROW_NUMBER() OVER (PARTITION BY kind ORDER BY ts DESC) AS position
                 FROM outputs
-                WHERE ticker=? AND config=? AND ts<?
+                WHERE ticker=? AND ts<?
             )
             WHERE position=1
             """,
-            (ticker, settings.version, ts),
+            (ticker, ts),
         ).fetchall()
     }
     open_entries: dict[str, list[dict[str, Any]]] = {}
@@ -2941,7 +3086,7 @@ def run_core(
         previous: dict[str, Any] = {
             "_self": state.previous.get(name)
             if state is not None
-            else _prior_output(connection, ticker, ts, name, settings.version)
+            else _prior_output(connection, ticker, ts, name)
         }
         for target in node["inputs"]:
             if target in settings.signals:
@@ -2951,9 +3096,7 @@ def run_core(
             previous[target] = (
                 state.previous.get(target)
                 if state is not None
-                else _prior_output(
-                    connection, ticker, ts, target, settings.version
-                )
+                else _prior_output(connection, ticker, ts, target)
             )
         if state is None:
             open_entries, session_outputs = _output_state(
@@ -3014,26 +3157,6 @@ def run_core(
     }
 
 
-def _effective_settings(
-    connection: sqlite3.Connection, current: Settings, config_path: Path
-) -> tuple[Settings, bool]:
-    row = connection.execute(
-        "SELECT content FROM configs WHERE version=?", (current.version,)
-    ).fetchone()
-    if row is None:
-        return current, False
-    try:
-        document = json.loads(row["content"])
-    except json.JSONDecodeError as exc:
-        raise ConfigError("stored config %s is invalid JSON" % current.version) from exc
-    if _json(document) == current.content:
-        return current, False
-    stored = load_settings(config_path, document, current.database)
-    if stored.version != current.version:
-        raise ConfigError("stored config version does not match its row key")
-    return stored, True
-
-
 def core(
     ticker: str,
     ts: int,
@@ -3046,8 +3169,7 @@ def core(
     current = load_settings(config_path)
     connection = _connect(current.database, read_only=True)
     try:
-        settings, _ = _effective_settings(connection, current, config_path)
-        result = run_core(connection, settings, ticker, ts, algos)
+        result = run_core(connection, current, ticker, ts, algos)
         return {key: result[key] for key in ("ticker", "ts", "signals", "algos")}
     finally:
         connection.close()
@@ -3069,6 +3191,96 @@ def _log(
         "INSERT INTO logs(ts,service,level,message) VALUES (?,'algo',?,?)",
         (now if now is not None else int(time.time()), level, message),
     )
+
+
+def _sync_live_definitions(
+    connection: sqlite3.Connection, settings: Settings, now: int
+) -> dict[str, Any]:
+    """Apply config immediately and archive each replaced live algo."""
+    try:
+        document = json.loads(settings.content)
+    except json.JSONDecodeError as exc:
+        raise ConfigError("config content is invalid JSON") from exc
+    if not isinstance(document, Mapping):
+        raise ConfigError("config must be a JSON object")
+
+    configured_signals = {
+        str(name): _json(definition)
+        for name, definition in _document_mapping(document, "signals").items()
+    }
+    stored_signals = {
+        str(row["name"]): str(row["definition"])
+        for row in connection.execute("SELECT name,definition FROM signals")
+    }
+    signals_changed = configured_signals != stored_signals
+    for name in sorted(set(stored_signals) - set(configured_signals)):
+        connection.execute("DELETE FROM signals WHERE name=?", (name,))
+    for name, definition in sorted(configured_signals.items()):
+        if name not in stored_signals:
+            connection.execute(
+                "INSERT INTO signals(name,definition,updated_at) VALUES (?,?,?)",
+                (name, definition, now),
+            )
+        elif stored_signals[name] != definition:
+            connection.execute(
+                "UPDATE signals SET definition=?,updated_at=? WHERE name=?",
+                (definition, now, name),
+            )
+
+    configured_algos = _algo_snapshots(document)
+    stored_algos = {
+        str(row["name"]): (str(row["definition"]), str(row["dependencies"]))
+        for row in connection.execute(
+            "SELECT name,definition,dependencies FROM algos"
+        )
+    }
+    changed_algos: list[str] = []
+    archived: list[dict[str, Any]] = []
+    for name in sorted(set(stored_algos) - set(configured_algos)):
+        connection.execute("DELETE FROM algos WHERE name=?", (name,))
+        version_id = connection.execute(
+            "SELECT MAX(version_id) FROM algo_history WHERE name=?", (name,)
+        ).fetchone()[0]
+        changed_algos.append(name)
+        archived.append({"name": name, "version_id": int(version_id)})
+    for name, (definition, dependencies) in sorted(configured_algos.items()):
+        previous = stored_algos.get(name)
+        if previous is None:
+            connection.execute(
+                """
+                INSERT INTO algos(name,definition,dependencies,active_from)
+                VALUES (?,?,?,?)
+                """,
+                (name, definition, dependencies, now),
+            )
+            changed_algos.append(name)
+        elif previous != (definition, dependencies):
+            connection.execute(
+                """
+                UPDATE algos
+                SET definition=?,dependencies=?,active_from=?
+                WHERE name=?
+                """,
+                (definition, dependencies, now, name),
+            )
+            version_id = connection.execute(
+                "SELECT MAX(version_id) FROM algo_history WHERE name=?", (name,)
+            ).fetchone()[0]
+            changed_algos.append(name)
+            archived.append({"name": name, "version_id": int(version_id)})
+
+    if signals_changed or changed_algos:
+        connection.execute("DELETE FROM outputs")
+    if changed_algos:
+        placeholders = ",".join("?" for _ in changed_algos)
+        connection.execute(
+            f"DELETE FROM trades WHERE algo IN ({placeholders})", changed_algos
+        )
+    return {
+        "signals_changed": signals_changed,
+        "changed_algos": changed_algos,
+        "archived": archived,
+    }
 
 
 def _pending(
@@ -3099,7 +3311,7 @@ def _pending(
             WHERE b.ticker=? AND b.ts>=? AND NOT EXISTS (
                 SELECT 1 FROM outputs o
                 WHERE o.ticker=b.ticker AND o.ts=b.ts
-                  AND o.kind=? AND o.config=?
+                  AND o.kind=?
             )
             ORDER BY b.ts LIMIT ?
             """,
@@ -3107,7 +3319,6 @@ def _pending(
                 ticker,
                 int(latest) - settings.evaluation_days * 86_400,
                 marker,
-                settings.version,
                 remaining,
             ),
         ).fetchall()
@@ -3166,9 +3377,9 @@ def _warm_primary_shape(
         for row in connection.execute(
             """
             SELECT ts FROM outputs
-            WHERE ticker=? AND kind=? AND config=? AND ts>=? AND ts<=?
+            WHERE ticker=? AND kind=? AND ts>=? AND ts<=?
             """,
-            (ticker, kind, settings.version, timestamps[0], timestamps[-1]),
+            (ticker, kind, timestamps[0], timestamps[-1]),
         )
     }
     targets = [ts for ts in timestamps if ts not in stored]
@@ -3186,12 +3397,12 @@ def _warm_primary_shape(
             {"bars": None},
             settings,
         )
-        rows.append((ticker, ts, kind, settings.version, _json(value), computed_at))
+        rows.append((ticker, ts, kind, _json(value), computed_at))
     connection.executemany(
         """
-        INSERT INTO outputs(ticker,ts,kind,config,output,computed_at)
-        VALUES (?,?,?,?,?,?)
-        ON CONFLICT(ticker,ts,kind,config) DO UPDATE SET
+        INSERT INTO outputs(ticker,ts,kind,output,computed_at)
+        VALUES (?,?,?,?,?)
+        ON CONFLICT(ticker,ts,kind) DO UPDATE SET
           output=excluded.output,computed_at=excluded.computed_at
         """,
         rows,
@@ -3242,9 +3453,9 @@ def _warm_primary_relative_momentum(
         for row in connection.execute(
             """
             SELECT ts,output FROM outputs
-            WHERE ticker=? AND kind=? AND config=? AND ts>=? AND ts<?
+            WHERE ticker=? AND kind=? AND ts>=? AND ts<?
             """,
-            (ticker, kind, settings.version, session_open, session_close),
+            (ticker, kind, session_open, session_close),
         )
     }
     targets = [
@@ -3267,12 +3478,12 @@ def _warm_primary_relative_momentum(
             {"bars": None, "session": session},
             settings,
         )
-        rows.append((ticker, ts, kind, settings.version, _json(value), computed_at))
+        rows.append((ticker, ts, kind, _json(value), computed_at))
     connection.executemany(
         """
-        INSERT INTO outputs(ticker,ts,kind,config,output,computed_at)
-        VALUES (?,?,?,?,?,?)
-        ON CONFLICT(ticker,ts,kind,config) DO UPDATE SET
+        INSERT INTO outputs(ticker,ts,kind,output,computed_at)
+        VALUES (?,?,?,?,?)
+        ON CONFLICT(ticker,ts,kind) DO UPDATE SET
           output=excluded.output,computed_at=excluded.computed_at
         """,
         rows,
@@ -3326,7 +3537,7 @@ def _repair_relative_momentum_gaps(
         candidates = connection.execute(
             """
             SELECT ts,output FROM outputs
-            WHERE ticker=? AND kind=? AND config=? AND ts>=?
+            WHERE ticker=? AND kind=? AND ts>=?
               AND (
                 output='null' OR NOT json_valid(output) OR
                 COALESCE(json_type(output, '$.persistence_score'), '')
@@ -3337,13 +3548,12 @@ def _repair_relative_momentum_gaps(
             (
                 ticker,
                 kind,
-                settings.version,
                 int(latest) - settings.evaluation_days * 86_400,
             ),
         ).fetchall()
         for row in candidates:
             ts = int(row["ts"])
-            attempt = (database_key, settings.version, ticker, ts)
+            attempt = (database_key, ticker, ts)
             if attempt in _RELATIVE_MOMENTUM_REPAIR_ATTEMPTS:
                 continue
             _RELATIVE_MOMENTUM_REPAIR_ATTEMPTS.add(attempt)
@@ -3362,7 +3572,7 @@ def _repair_relative_momentum_gaps(
             serialized = _json(value)
             if _relative_momentum_has_score(serialized):
                 repaired_rows.append(
-                    (ticker, ts, kind, settings.version, serialized, computed_at)
+                    (ticker, ts, kind, serialized, computed_at)
                 )
             if evaluated >= limit:
                 break
@@ -3372,9 +3582,9 @@ def _repair_relative_momentum_gaps(
     if repaired_rows:
         connection.executemany(
             """
-            INSERT INTO outputs(ticker,ts,kind,config,output,computed_at)
-            VALUES (?,?,?,?,?,?)
-            ON CONFLICT(ticker,ts,kind,config) DO UPDATE SET
+            INSERT INTO outputs(ticker,ts,kind,output,computed_at)
+            VALUES (?,?,?,?,?)
+            ON CONFLICT(ticker,ts,kind) DO UPDATE SET
               output=excluded.output,computed_at=excluded.computed_at
             """,
             repaired_rows,
@@ -3395,7 +3605,6 @@ def _write_result(
                 result["ticker"],
                 result["ts"],
                 name,
-                settings.version,
                 result["_serialized"][name],
                 computed_at,
             )
@@ -3406,7 +3615,6 @@ def _write_result(
                 result["ticker"],
                 result["ts"],
                 name,
-                settings.version,
                 result["_serialized"][name],
                 computed_at,
             )
@@ -3418,9 +3626,9 @@ def _write_result(
     try:
         connection.executemany(
             """
-            INSERT INTO outputs(ticker,ts,kind,config,output,computed_at)
-            VALUES (?,?,?,?,?,?)
-            ON CONFLICT(ticker,ts,kind,config) DO UPDATE SET
+            INSERT INTO outputs(ticker,ts,kind,output,computed_at)
+            VALUES (?,?,?,?,?)
+            ON CONFLICT(ticker,ts,kind) DO UPDATE SET
               output=excluded.output,computed_at=excluded.computed_at
             """,
             rows,
@@ -3540,25 +3748,26 @@ def cycle(
     connection = _connect(current.database)
     try:
         now = int(time.time())
-        row = connection.execute(
-            "SELECT 1 FROM configs WHERE version=?", (current.version,)
-        ).fetchone()
-        if row is None:
-            connection.execute(
-                "INSERT INTO configs(version,first_seen,content) VALUES (?,?,?)",
-                (current.version, now, current.content),
-            )
-            settings, mismatch = current, False
-        else:
-            settings, mismatch = _effective_settings(connection, current, config_path)
-        if mismatch:
+        settings = current
+        definition_sync = _sync_live_definitions(connection, settings, now)
+        for archived in definition_sync["archived"]:
             _log(
                 connection,
-                "warn",
-                "config version %s changed without a version bump; using stored content"
-                % current.version,
+                "info",
+                "archived algo definition name=%s version_id=%d"
+                % (archived["name"], archived["version_id"]),
                 now,
-                once=True,
+            )
+        if definition_sync["signals_changed"] or definition_sync["changed_algos"]:
+            _log(
+                connection,
+                "info",
+                "applied live definitions signals_changed=%s algos=%s"
+                % (
+                    str(definition_sync["signals_changed"]).lower(),
+                    ",".join(definition_sync["changed_algos"]) or "none",
+                ),
+                now,
             )
         connection.commit()
 
@@ -3688,8 +3897,8 @@ def status(settings: Settings) -> str:
                 (ticker,),
             ).fetchone()
             outputs = connection.execute(
-                "SELECT COUNT(*) FROM outputs WHERE ticker=? AND config=?",
-                (ticker, settings.version),
+                "SELECT COUNT(*) FROM outputs WHERE ticker=?",
+                (ticker,),
             ).fetchone()[0]
             latest = datetime.fromtimestamp(row["latest"], UTC).isoformat() if row["latest"] else "-"
             lines.append("%-7s %-9d %-9d %s" % (ticker, row["count"], outputs, latest))
@@ -3698,7 +3907,6 @@ def status(settings: Settings) -> str:
         connection.close()
     lines.extend(
         (
-            "version %s" % settings.version,
             "enabled signals %d" % len(settings.enabled_signals()),
             "enabled algos %d" % len(settings.enabled_algos()),
             "trades %d" % trades,
@@ -3750,7 +3958,7 @@ class Service:
             while not self.stop_event.is_set():
                 try:
                     observed = load_settings(self.config_path)
-                    if observed.version != self.settings.version:
+                    if observed.content != self.settings.content:
                         self.alert_resume_after = int(time.time())
                     stats, settings = cycle(
                         self.config_path,
@@ -3855,8 +4063,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         elif arguments.command == "validate":
             settings = load_settings(config_path)
             print(
-                "valid version=%s signals=%d algos=%d"
-                % (settings.version, len(settings.signals), len(settings.algos))
+                "valid signals=%d algos=%d"
+                % (len(settings.signals), len(settings.algos))
             )
         elif arguments.command == "core":
             print(

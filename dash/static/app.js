@@ -177,10 +177,8 @@ function mergeBy(items, keyFor) {
 function mergeForecasts(payloads, key) {
   const forecasts = payloads.map((payload) => payload?.[key]).filter(Boolean);
   if (!forecasts.length) return null;
-  const configs = [...new Set(forecasts.map((forecast) => forecast.config).filter(Boolean))];
   return {
     ...forecasts[0],
-    config: configs.length === 1 ? configs[0] : "mixed",
     snapshots: mergeBy(
       forecasts.flatMap((forecast) => forecast.snapshots || []),
       (snapshot) => Number(snapshot.ts),

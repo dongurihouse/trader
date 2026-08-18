@@ -1,15 +1,15 @@
 # algo
 
-`algo` is the one writer for the shared database's `outputs`, `configs`, and
-`trades` rows. It reads minute bars, evaluates every enabled signal and algo,
-and stores deterministic JSON output under the config version.
+`algo` is the one writer for the shared database's `outputs`, `signals`,
+`algos`, `algo_history`, and `trades` rows. It reads minute bars, evaluates
+every enabled signal and algo, and stores one unversioned live output per node.
 
 The service has no market clock. Every cycle takes at most 2,000 configured
-ticker/bar pairs inside the evaluation window that do not have outputs under
-the current version. It processes each ticker oldest first. All outputs for a
-pair are committed together, so one configured output is the completion marker.
-A config change with a new version therefore fills the same bounded window
-without a separate backtest path.
+ticker/bar pairs inside the evaluation window that do not have live outputs.
+It processes each ticker oldest first. All outputs for a pair are committed
+together, so one configured output is the completion marker. A definition
+change clears the live output cache and fills the same bounded window without a
+separate backtest path.
 
 Every entry or exit produced by a configured algo writes a trade, whether the
 evaluated bar is historical or new.
@@ -59,7 +59,7 @@ It does not write heartbeat or idle-cycle rows.
 
 `inputs` is a list. A signal can read `bars`, `bar_metadata`, `events`, and
 signals. An algo can read signals and algos. Presence in the map means enabled.
-Remove a node and bump the version to disable it. `function` defaults to the
+Remove a node to disable it. `function` defaults to the
 node name, so only a node whose name differs from its code function needs that
 field. Dependency cycles, unknown functions, missing nodes, and duplicate
 signal/algo names are rejected before evaluation.
@@ -183,7 +183,6 @@ Example:
 
 ```json
 {
-  "version": 2,
   "signals": {
     "fast": {
       "inputs": ["bars"],
@@ -219,9 +218,15 @@ stays in the same file. `algo.evaluation_days` bounds the cache fill and
 `algo.poll_seconds` sets the service cadence. `algo.api_port` sets the
 loopback health API port.
 
-The service stores the full config the first time it sees a version. If the
-file later changes without a version bump, it logs a warning and keeps using
-the stored content for deterministic output. Bump `version` to apply a change.
+The service applies a valid config change immediately. The `algos` table holds
+each current definition with the signal and algo definitions it depends on.
+When an effective algorithm definition changes or is removed, a database
+trigger copies the old row to `algo_history`, assigns it an auto-incrementing
+`version_id`, and then lets the live row change. Live rows have no version ID.
+
+Any signal or algorithm definition change clears the derived live output cache.
+Trades for affected algorithms are also cleared before their current results
+are rebuilt. The historical definition stays readable from `algo_history`.
 
 ## Operate
 
@@ -237,7 +242,7 @@ make algo-logs
 make algo-uninstall
 ```
 
-Run one read-only core call without writing output, trades, configs, or logs:
+Run one read-only core call without writing output, trades, definitions, or logs:
 
 ```sh
 python3 algo/algo_service.py core SNDK 2026-08-17T13:30:00Z

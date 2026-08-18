@@ -1,5 +1,4 @@
 {
-  "version": 23,
   "database": "../data/trader.sqlite3",
   "tickers": ["SNDK", "MU", "WDC", "SPY", "QQQ", "SPCX"],
   "early_closes": ["2026-11-27", "2026-12-24"],

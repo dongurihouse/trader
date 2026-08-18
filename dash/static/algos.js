@@ -179,6 +179,26 @@ function renderDefinition(algo) {
   return section;
 }
 
+function renderDefinitionHistory(algo) {
+  const section = createElement("section", "algo-section algo-history");
+  section.append(createElement("h3", "", "Archived definitions"));
+  if (!(algo.history || []).length) {
+    section.append(createElement("p", "algo-muted", "No prior definition has been archived."));
+    return section;
+  }
+  (algo.history || []).forEach((item) => {
+    const details = createElement("details", "algo-history-item");
+    const summary = createElement(
+      "summary",
+      "",
+      `Version ID ${item.version_id} · ${pacificDateTime.format(dateFromEpoch(item.active_from))} → ${pacificDateTime.format(dateFromEpoch(item.archived_at))}`,
+    );
+    details.append(summary, renderDefinition(item.definition || {}));
+    section.append(details);
+  });
+  return section;
+}
+
 function renderTickerTable(algo) {
   const section = createElement("section", "algo-section");
   section.append(createElement("h3", "", "Instrument results"));
@@ -300,7 +320,7 @@ function renderAlgo(algo, tabId) {
   card.id = "algo-panel";
   card.setAttribute("role", "tabpanel");
   card.setAttribute("aria-labelledby", tabId);
-  card.append(renderDefinition(algo), renderTickerTable(algo));
+  card.append(renderDefinition(algo), renderDefinitionHistory(algo), renderTickerTable(algo));
   const open = renderOpenPositions(algo);
   if (open) card.append(open);
   card.append(renderRecentTrades(algo));
