@@ -838,6 +838,7 @@ def _normalize_pullback(
         "late_window_minutes",
         "late_market_strength_ratio",
         "max_threshold_ratio",
+        "max_ticker_flip_ratio",
         "entry_cutoff_minutes",
         "baseline_sessions",
         "min_baseline_sessions",
@@ -854,6 +855,9 @@ def _normalize_pullback(
         ),
         "max_threshold_ratio": _parameter_number(
             parameters, "max_threshold_ratio", minimum=1.0
+        ),
+        "max_ticker_flip_ratio": _parameter_number(
+            parameters, "max_ticker_flip_ratio"
         ),
         "entry_cutoff_minutes": _parameter_int(
             parameters, "entry_cutoff_minutes", minimum=0
@@ -1779,6 +1783,7 @@ def _signal_pullback(
     late_window = int(parameters["late_window_minutes"])
     late_market_strength_ratio = float(parameters["late_market_strength_ratio"])
     max_threshold_ratio = float(parameters["max_threshold_ratio"])
+    max_ticker_flip_ratio = float(parameters["max_ticker_flip_ratio"])
     entry_cutoff = int(parameters["entry_cutoff_minutes"])
     baseline_sessions = int(parameters["baseline_sessions"])
     min_baseline_sessions = int(parameters["min_baseline_sessions"])
@@ -1838,6 +1843,29 @@ def _signal_pullback(
     threshold = (
         baseline[0 if regime == "early" else 1] if baseline is not None else None
     )
+    opening_ticker_return = require_float(
+        sentiment.get("ticker_return_pct"),
+        "opening_sentiment.ticker_return_pct",
+        nullable=True,
+        error=EvaluationError,
+    )
+    current_ticker_return = _session_return_pct(
+        connection, ticker, session_open, ts
+    )
+    ticker_flip_ratio = (
+        abs(current_ticker_return) / abs(opening_ticker_return)
+        if opening_ticker_return not in (None, 0.0)
+        and current_ticker_return is not None
+        and current_ticker_return * direction < 0.0
+        else 0.0
+    )
+    ticker_direction_valid = bool(
+        current_ticker_return is not None
+        and (
+            current_ticker_return * direction >= 0.0
+            or ticker_flip_ratio < max_ticker_flip_ratio
+        )
+    )
     opening_market_return = require_float(
         sentiment.get("market_return_pct"),
         "opening_sentiment.market_return_pct",
@@ -1876,6 +1904,7 @@ def _signal_pullback(
         and threshold_ratio is not None
         and threshold_ratio <= max_threshold_ratio
         and distance >= min_extreme_distance
+        and ticker_direction_valid
         and market_strength_valid
     )
     prior_setup = False
@@ -1945,6 +1974,10 @@ def _signal_pullback(
         "threshold_ratio": threshold_ratio,
         "prior_setup": prior_setup,
         "distance_from_extreme_pct": distance,
+        "opening_ticker_return_pct": opening_ticker_return,
+        "current_ticker_return_pct": current_ticker_return,
+        "ticker_flip_ratio": ticker_flip_ratio,
+        "ticker_direction_valid": ticker_direction_valid,
         "market_strength_ratio": market_strength_ratio,
         "market_strength_valid": market_strength_valid,
         "pattern_valid": bool(sentiment["pattern_valid"]),

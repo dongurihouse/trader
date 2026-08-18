@@ -201,6 +201,7 @@
         "late_window_minutes": 30,
         "late_market_strength_ratio": 1.0,
         "max_threshold_ratio": 1.25,
+        "max_ticker_flip_ratio": 0.5,
         "entry_cutoff_minutes": 60,
         "baseline_sessions": 20,
         "min_baseline_sessions": 5,
