@@ -84,7 +84,7 @@ The service has these signal functions:
 | `relative_momentum` | `window_minutes`, `baseline_sessions`, `min_sessions`, `time_tolerance_minutes`, `min_momentum_pct`, `strong_percentile` | direction, current move and duration, relative percentiles, and strength |
 | `last_close` | `include_interpolated` | number or `null` |
 | `opening_sentiment` | `market_tickers`, `minutes`, `min_market_move_pct`, `require_ticker_agreement` | fixed opening direction, current-ticker agreement, and live pattern validity |
-| `pullback` | `entry_window_minutes`, `impulse_window_minutes`, `confirmation_bars`, `baseline_sessions`, `min_baseline_sessions`, `percentile`, `min_extreme_distance_pct` | opening impulse extreme, prior-session threshold, and confirmed reversal trigger |
+| `pullback` | `early_minutes`, `early_window_minutes`, `late_window_minutes`, `entry_cutoff_minutes`, `baseline_sessions`, `min_baseline_sessions`, `percentile`, `min_extreme_distance_pct` | current countertrend move, prior-session threshold, and entry trigger |
 | `shape_v1` | `history_sessions`, `min_sessions`, `stride_minutes`, `shape_base_rate_w`, `age_halflife_days`, `support_k` | path funnel, eight shape probabilities, and evidence; otherwise `null` |
 
 Supported fields are `open`, `high`, `low`, `close`, and `volume`. Every read
@@ -135,7 +135,7 @@ It has these algo functions:
 | --- | --- | --- |
 | `crossover` | `fast`, `slow` | none |
 | `range_breakout` | `session`, `opening_range`, `rvol_open`, `last_close` | `direction`, `target_r`, `min_rvol`, `entry_cutoff_minutes`, `flat_minutes` |
-| `sentiment_pullback` | `session`, `opening_sentiment`, `pullback`, `last_close` | `hold_minutes`, `take_profit_pct`, `stop_loss_pct`, `pattern_exit`, `flat_minutes`, `capital_fraction` |
+| `sentiment_pullback` | `session`, `opening_sentiment`, `pullback`, `last_close` | `early_minutes`, `early_hold_minutes`, `late_hold_minutes`, `take_profit_pct`, `stop_loss_pct`, `pattern_exit`, `flat_minutes`, `capital_fraction` |
 | `momentum_continuation` | `session`, `first30_ret`, `atr_session`, `rvol_open`, `last_close` | `first30_min_pct`, `risk_atr_frac`, `target_r`, `min_rvol`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
 | `failed_gap` | `session`, `prior_session`, `atr_session`, `last_close` | `gap_min_pct`, `risk_atr_frac`, `target_r`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
 | `gap_continuation` | `session`, `prior_session`, `opening_range`, `atr_session`, `rvol_open`, `last_close` | `gap_min_pct`, `risk_atr_frac`, `target_r`, `min_rvol`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
@@ -153,15 +153,14 @@ per session, blocks new entries inside ten minutes to close, and closes any
 open unit five minutes before the configured regular or early close.
 
 `sentiment_pullback` fixes the opening direction after five minutes from the
-median SPY and QQQ return and requires the ticker being evaluated to agree.
-During the first 30 minutes it arms on an unusually large five-minute move
-against that direction. It enters against the impulse only after a later closed
-bar within `confirmation_bars` closes in the reversal direction beyond the
-extreme bar's close. Its threshold uses only complete prior sessions. It enters
-at most once per session, never adds to an open unit, and exits on its configured
-close-based profit, close-based loss, time, market-pattern, or end-of-session
-rule. One unit maps to at most 50% of capital for performance reporting; broker
-submission uses its separately configured fixed quantity.
+median SPY and QQQ return and requires the ticker being evaluated to agree. It
+then enters immediately on an unusually large move against that direction. The
+move uses a five-minute window inside the first 30 minutes and a 30-minute
+window later. Its threshold uses only complete prior sessions. It enters at
+most once per session, never adds to an open unit, and exits on its configured
+close-based profit, close-based loss, early or late time limit, market-pattern,
+or end-of-session rule. One unit maps to at most 50% of capital for performance
+reporting; broker submission uses its separately configured fixed quantity.
 
 The four migrated algorithms run on every configured ticker and enter at most
 once per regular session. `lateday_momentum` follows a large first-half-hour

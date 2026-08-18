@@ -1,5 +1,5 @@
 {
-  "version": 19,
+  "version": 20,
   "database": "../data/trader.sqlite3",
   "tickers": ["SNDK", "MU", "WDC", "SPY", "QQQ", "SPCX"],
   "early_closes": ["2026-11-27", "2026-12-24"],
@@ -197,9 +197,10 @@
     "pullback": {
       "inputs": ["bars", "session", "opening_sentiment"],
       "params": {
-        "entry_window_minutes": 30,
-        "impulse_window_minutes": 5,
-        "confirmation_bars": 2,
+        "early_minutes": 30,
+        "early_window_minutes": 5,
+        "late_window_minutes": 30,
+        "entry_cutoff_minutes": 60,
         "baseline_sessions": 20,
         "min_baseline_sessions": 5,
         "percentile": 0.9,
@@ -234,7 +235,9 @@
     "sentiment_pullback": {
       "inputs": ["session", "opening_sentiment", "pullback", "last_close"],
       "params": {
-        "hold_minutes": 3,
+        "early_minutes": 30,
+        "early_hold_minutes": 3,
+        "late_hold_minutes": 10,
         "take_profit_pct": 1.0,
         "stop_loss_pct": 1.5,
         "pattern_exit": true,
