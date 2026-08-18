@@ -19,6 +19,9 @@
           <span>TRADER</span>
           <span class="brand-chevron" aria-hidden="true">⌄</span>
         </button>
+        <span class="header-market brand-market-status" id="market-status" role="status" aria-label="Checking market" title="Checking market">
+          <span class="status-dot" id="market-dot"></span>
+        </span>
         <div class="trader-menu-dropdown" id="trader-menu-dropdown" role="menu" aria-label="Chart display" hidden>
           <small>Chart style</small>
           <button type="button" role="menuitemradio" data-style="line" aria-checked="true">
@@ -53,11 +56,7 @@
         <a href="/algos">Algos</a>
         <a href="/logs">Logs</a>
       </nav>
-      <div class="topbar-meta">
-        <span class="header-market" id="market-status" aria-label="Checking market" title="Checking market">
-          <span class="status-dot" id="market-dot"></span>
-        </span>
-      </div>
+      <div class="topbar-meta" aria-hidden="true"></div>
     </header>
 
     <main id="main" class="chart-only-main">
