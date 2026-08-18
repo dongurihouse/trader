@@ -1073,6 +1073,26 @@ class DashboardData:
         ):
             stride_minutes = 5
 
+        configured_version = str(config.get("version", ""))
+        version_row = connection.execute(
+            """
+            SELECT config, COUNT(*) AS usable_count
+            FROM outputs
+            WHERE ticker = ? AND kind = ?
+              AND ts >= ? AND ts <= ? AND output != 'null'
+            GROUP BY config
+            ORDER BY usable_count DESC,
+                     CASE WHEN config = ? THEN 1 ELSE 0 END DESC,
+                     CAST(config AS INTEGER) DESC,
+                     config DESC
+            LIMIT 1
+            """,
+            (ticker, kind, start, end, configured_version),
+        ).fetchone()
+        selected_version = (
+            str(version_row["config"]) if version_row is not None else configured_version
+        )
+
         snapshots = []
         for row in connection.execute(
             """
@@ -1082,7 +1102,7 @@ class DashboardData:
               AND ts >= ? AND ts <= ? AND output != 'null'
             ORDER BY ts
             """,
-            (ticker, kind, str(config.get("version", "")), start, end),
+            (ticker, kind, selected_version, start, end),
         ):
             output = self._json_value(row["output"])
             if not isinstance(output, dict):
@@ -1109,6 +1129,7 @@ class DashboardData:
 
         return {
             "kind": kind,
+            "config": selected_version,
             "stride_minutes": stride_minutes,
             "snapshots": snapshots,
         }
