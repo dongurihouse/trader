@@ -62,8 +62,7 @@ _RVOL_BASELINES: dict[
     tuple[str, str, date, int, int], Optional[tuple[float, ...]]
 ] = {}
 _PULLBACK_BASELINES: dict[
-    tuple[str, str, date, int, int, int, int, int, int, float],
-    Optional[tuple[float, float]],
+    tuple[str, str, date, int, int, int, int, float], Optional[float]
 ] = {}
 _OUTPUT_SESSION_SEEDS: dict[
     tuple[str, str, str, str, int], tuple[tuple[int, float, int], ...]
@@ -726,10 +725,9 @@ def _normalize_pullback(
     parameters: Mapping[str, Any], tickers: tuple[str, ...]
 ) -> Mapping[str, Any]:
     names = {
-        "early_minutes",
-        "early_window_minutes",
-        "late_window_minutes",
-        "entry_cutoff_minutes",
+        "entry_window_minutes",
+        "impulse_window_minutes",
+        "confirmation_bars",
         "baseline_sessions",
         "min_baseline_sessions",
         "percentile",
@@ -737,23 +735,19 @@ def _normalize_pullback(
     }
     _parameter_keys(parameters, names)
     result: dict[str, Any] = {
-        "early_minutes": require_int(
-            parameters.get("early_minutes"), "early_minutes", error=ConfigError
-        ),
-        "early_window_minutes": require_int(
-            parameters.get("early_window_minutes"),
-            "early_window_minutes",
+        "entry_window_minutes": require_int(
+            parameters.get("entry_window_minutes"),
+            "entry_window_minutes",
             error=ConfigError,
         ),
-        "late_window_minutes": require_int(
-            parameters.get("late_window_minutes"),
-            "late_window_minutes",
+        "impulse_window_minutes": require_int(
+            parameters.get("impulse_window_minutes"),
+            "impulse_window_minutes",
             error=ConfigError,
         ),
-        "entry_cutoff_minutes": require_int(
-            parameters.get("entry_cutoff_minutes"),
-            "entry_cutoff_minutes",
-            minimum=0,
+        "confirmation_bars": require_int(
+            parameters.get("confirmation_bars"),
+            "confirmation_bars",
             error=ConfigError,
         ),
         "baseline_sessions": require_int(
@@ -774,6 +768,8 @@ def _normalize_pullback(
     }
     if result["min_baseline_sessions"] > result["baseline_sessions"]:
         raise ConfigError("min_baseline_sessions cannot exceed baseline_sessions")
+    if result["impulse_window_minutes"] >= result["entry_window_minutes"]:
+        raise ConfigError("impulse_window_minutes must be less than entry_window_minutes")
     if result["percentile"] > 1.0:
         raise ConfigError("percentile must be <= 1")
     return result
@@ -1601,30 +1597,25 @@ def _prior_pullback_baseline(
     settings: Settings,
     ticker: str,
     local_day: date,
-    early_window: int,
-    late_window: int,
-    early_minutes: int,
-    entry_cutoff: int,
+    entry_window: int,
+    impulse_window: int,
     baseline_sessions: int,
     min_baseline_sessions: int,
     percentile: float,
-) -> Optional[tuple[float, float]]:
+) -> Optional[float]:
     key = (
         str(settings.database),
         ticker,
         local_day,
-        early_window,
-        late_window,
-        early_minutes,
-        entry_cutoff,
+        entry_window,
+        impulse_window,
         baseline_sessions,
         min_baseline_sessions,
         percentile,
     )
     if key in _PULLBACK_BASELINES:
         return _PULLBACK_BASELINES[key]
-    early_values: list[float] = []
-    late_values: list[float] = []
+    values: list[float] = []
     complete_sessions = 0
     candidate = local_day - timedelta(days=1)
     for _ in range(baseline_sessions * 4 + 60):
@@ -1646,23 +1637,12 @@ def _prior_pullback_baseline(
             for index, row in enumerate(rows)
         )
         if continuous:
-            early_stop = min(early_minutes, len(rows) - entry_cutoff)
-            for index in range(early_window, max(early_window, early_stop)):
-                early_values.append(
+            stop = min(entry_window, len(rows))
+            for index in range(impulse_window, stop):
+                values.append(
                     abs(
                         float(rows[index]["close"])
-                        / float(rows[index - early_window]["close"])
-                        - 1.0
-                    )
-                    * 100.0
-                )
-            late_start = max(early_minutes, late_window)
-            late_stop = max(late_start, len(rows) - entry_cutoff)
-            for index in range(late_start, late_stop):
-                late_values.append(
-                    abs(
-                        float(rows[index]["close"])
-                        / float(rows[index - late_window]["close"])
+                        / float(rows[index - impulse_window]["close"])
                         - 1.0
                     )
                     * 100.0
@@ -1671,17 +1651,10 @@ def _prior_pullback_baseline(
             if complete_sessions == baseline_sessions:
                 break
         candidate -= timedelta(days=1)
-    if (
-        complete_sessions < min_baseline_sessions
-        or not early_values
-        or not late_values
-    ):
+    if complete_sessions < min_baseline_sessions or not values:
         _PULLBACK_BASELINES[key] = None
         return None
-    result = (
-        _percentile(early_values, percentile),
-        _percentile(late_values, percentile),
-    )
+    result = _percentile(values, percentile)
     _PULLBACK_BASELINES[key] = result
     return result
 
@@ -1693,85 +1666,128 @@ def _signal_pullback(
     sentiment = inputs["opening_sentiment"]
     if session is None or sentiment is None:
         return None
-    early_minutes = int(parameters["early_minutes"])
-    early_window = int(parameters["early_window_minutes"])
-    late_window = int(parameters["late_window_minutes"])
-    entry_cutoff = int(parameters["entry_cutoff_minutes"])
+    entry_window = int(parameters["entry_window_minutes"])
+    impulse_window = int(parameters["impulse_window_minutes"])
+    confirmation_bars = int(parameters["confirmation_bars"])
     baseline_sessions = int(parameters["baseline_sessions"])
     min_baseline_sessions = int(parameters["min_baseline_sessions"])
     percentile = float(parameters["percentile"])
     min_extreme_distance = float(parameters["min_extreme_distance_pct"])
     minute = int(session["minute"])
-    direction = int(sentiment["direction"])
-    regime = "early" if minute < early_minutes else "late"
-    window = early_window if regime == "early" else late_window
+    sentiment_direction = int(sentiment["direction"])
+    local_day, session_open, _ = _session_window(settings, ts)
     current = connection.execute(
         "SELECT close FROM bars WHERE ticker=? AND ts=? AND interpolated=0",
         (ticker, ts),
     ).fetchone()
-    previous = connection.execute(
-        "SELECT close FROM bars WHERE ticker=? AND ts=? AND interpolated=0",
-        (ticker, ts - window * 60),
-    ).fetchone()
     if current is None:
         return None
     price = float(current["close"])
-    movement = (
-        (price / float(previous["close"]) - 1.0) * 100.0
-        if previous is not None and float(previous["close"]) > 0.0
-        else None
-    )
-    local_day, session_open, _ = _session_window(settings, ts)
-    extremes = connection.execute(
-        """
-        SELECT MAX(high) AS high,MIN(low) AS low
-        FROM bars
-        WHERE ticker=? AND ts>=? AND ts<=? AND interpolated=0
-        """,
-        (ticker, session_open, ts),
-    ).fetchone()
-    running_high = float(extremes["high"]) if extremes["high"] is not None else price
-    running_low = float(extremes["low"]) if extremes["low"] is not None else price
-    distance = (
-        (running_high / price - 1.0) * 100.0
-        if direction == 1 and price > 0.0
-        else (price / running_low - 1.0) * 100.0
-        if direction == -1 and running_low > 0.0
-        else 0.0
-    )
     baseline = _prior_pullback_baseline(
         connection,
         settings,
         ticker,
         local_day,
-        early_window,
-        late_window,
-        early_minutes,
-        entry_cutoff,
+        entry_window,
+        impulse_window,
         baseline_sessions,
         min_baseline_sessions,
         percentile,
     )
-    threshold = (
-        baseline[0 if regime == "early" else 1] if baseline is not None else None
-    )
-    trigger = bool(
-        direction
+    trigger = False
+    direction = 0
+    impulse_direction = 0
+    movement: Optional[float] = None
+    distance = 0.0
+    candidate_ts: Optional[int] = None
+    if (
+        sentiment_direction
+        and minute < entry_window + confirmation_bars
         and minute > int(sentiment["minutes"])
-        and float(session["to_close"]) > entry_cutoff
         and bool(sentiment["pattern_valid"])
-        and movement is not None
-        and threshold is not None
-        and movement * direction <= -threshold
-        and distance >= min_extreme_distance
-    )
+        and baseline is not None
+    ):
+        rows = _session_bars(
+            connection, ticker, session_open, ts + 60, ts, include_interpolated=False
+        )
+        row_by_ts = {int(row["ts"]): row for row in rows}
+        prior_rows = rows[:-1]
+        first_candidate = max(0, len(prior_rows) - confirmation_bars)
+        for index in range(len(prior_rows) - 1, first_candidate - 1, -1):
+            candidate = prior_rows[index]
+            candidate_minute = int(
+                (int(candidate["ts"]) - int(session["open_ts"])) // 60
+            )
+            if (
+                candidate_minute <= int(sentiment["minutes"])
+                or candidate_minute >= entry_window
+            ):
+                continue
+            anchor = row_by_ts.get(int(candidate["ts"]) - impulse_window * 60)
+            if anchor is None or float(anchor["close"]) <= 0.0:
+                continue
+            candidate_move = (
+                float(candidate["close"]) / float(anchor["close"]) - 1.0
+            ) * 100.0
+            candidate_impulse = 0
+            if candidate_move >= baseline:
+                candidate_impulse = 1
+            elif candidate_move <= -baseline:
+                candidate_impulse = -1
+            candidate_direction = -candidate_impulse
+            if not candidate_impulse or candidate_direction != sentiment_direction:
+                continue
+            impulse_rows = [
+                row
+                for row in rows
+                if int(anchor["ts"]) <= int(row["ts"]) <= int(candidate["ts"])
+            ]
+            is_extreme = (
+                float(candidate["high"])
+                >= max(float(row["high"]) for row in impulse_rows)
+                if candidate_impulse == 1
+                else float(candidate["low"])
+                <= min(float(row["low"]) for row in impulse_rows)
+            )
+            history = rows[: index + 1]
+            running_high = max(float(row["high"]) for row in history)
+            running_low = min(float(row["low"]) for row in history)
+            candidate_price = float(candidate["close"])
+            candidate_distance = (
+                (candidate_price / running_low - 1.0) * 100.0
+                if candidate_impulse == 1 and running_low > 0.0
+                else (running_high / candidate_price - 1.0) * 100.0
+                if candidate_impulse == -1 and candidate_price > 0.0
+                else 0.0
+            )
+            confirmed = (
+                price < candidate_price
+                if candidate_direction == -1
+                else price > candidate_price
+            )
+            if (
+                not is_extreme
+                or candidate_distance < min_extreme_distance
+                or not confirmed
+            ):
+                continue
+            trigger = True
+            direction = candidate_direction
+            impulse_direction = candidate_impulse
+            movement = candidate_move
+            distance = candidate_distance
+            candidate_ts = int(candidate["ts"])
+            break
     return {
         "trigger": trigger,
         "direction": direction,
-        "regime": regime,
-        "window_minutes": window,
+        "impulse_direction": impulse_direction,
+        "candidate_ts": candidate_ts,
+        "entry_window_minutes": entry_window,
+        "window_minutes": impulse_window,
+        "confirmation_bars": confirmation_bars,
         "move_pct": movement,
-        "threshold_pct": threshold,
+        "threshold_pct": baseline,
         "distance_from_extreme_pct": distance,
         "pattern_valid": bool(sentiment["pattern_valid"]),
         "price": price,
@@ -1929,9 +1945,7 @@ def _algo_sentiment_pullback(context: AlgoContext) -> tuple[bool, bool, int]:
     price = require_float(
         context.inputs[price_name], "last_close", nullable=True, error=EvaluationError
     )
-    early_minutes = int(context.parameters["early_minutes"])
-    early_hold = int(context.parameters["early_hold_minutes"])
-    late_hold = int(context.parameters["late_hold_minutes"])
+    hold_minutes = int(context.parameters["hold_minutes"])
     take_profit = float(context.parameters["take_profit_pct"])
     stop_loss = float(context.parameters["stop_loss_pct"])
     flat_minutes = float(context.parameters["flat_minutes"])
@@ -1943,8 +1957,6 @@ def _algo_sentiment_pullback(context: AlgoContext) -> tuple[bool, bool, int]:
         entry = context.open_entries[0]
         direction = int(entry["direction"])
         elapsed = (int(session["ts"]) - int(entry["ts"])) / 60.0
-        entry_minute = (int(entry["ts"]) - int(session["open_ts"])) / 60.0
-        hold_minutes = early_hold if entry_minute < early_minutes else late_hold
         pnl_pct = direction * (float(price) / float(entry["price"]) - 1.0) * 100.0
         pattern_broke = (
             pattern_exit
@@ -2415,9 +2427,7 @@ def _normalize_sentiment_pullback(
     parameters: Mapping[str, Any], tickers: tuple[str, ...]
 ) -> Mapping[str, Any]:
     names = {
-        "early_minutes",
-        "early_hold_minutes",
-        "late_hold_minutes",
+        "hold_minutes",
         "take_profit_pct",
         "stop_loss_pct",
         "pattern_exit",
@@ -2431,17 +2441,9 @@ def _normalize_sentiment_pullback(
     if capital_fraction <= 0.0 or capital_fraction > 0.5:
         raise ConfigError("capital_fraction must be > 0 and <= 0.5")
     return {
-        "early_minutes": require_int(
-            parameters.get("early_minutes"), "early_minutes", error=ConfigError
-        ),
-        "early_hold_minutes": require_int(
-            parameters.get("early_hold_minutes"),
-            "early_hold_minutes",
-            error=ConfigError,
-        ),
-        "late_hold_minutes": require_int(
-            parameters.get("late_hold_minutes"),
-            "late_hold_minutes",
+        "hold_minutes": require_int(
+            parameters.get("hold_minutes"),
+            "hold_minutes",
             error=ConfigError,
         ),
         "take_profit_pct": _number(
