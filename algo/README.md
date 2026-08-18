@@ -85,6 +85,14 @@ move or an unusually persistent move can qualify. The signal uses no current-
 session future bars and returns `null` outside regular hours or without enough
 complete history.
 
+After the longest alignment window is available, the signal also publishes a
+`persistence_score`. It combines 80% joint magnitude/duration strength with
+20% agreement between the current direction and trailing windows at one-half,
+two times, and three times `window_minutes`. This score measures evidence that
+the current direction will stay active; it does not claim that the future
+direction-adjusted return will be positive. `persistent` uses the same
+`strong_percentile` threshold as `strong`.
+
 `atr_session` also accepts complete, uniform two- or five-minute archive
 sessions. It uses only the session high, low, and close, so lower-frequency
 source bars can warm the daily ATR without inventing one-minute prices.

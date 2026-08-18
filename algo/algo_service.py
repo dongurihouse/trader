@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import re
 import signal
@@ -1101,13 +1102,7 @@ def _relative_momentum_features(
             run_length = 0
             continue
         momentum_pct = (price / reference - 1.0) * 100.0
-        direction = (
-            1
-            if momentum_pct >= min_momentum_pct
-            else -1
-            if momentum_pct <= -min_momentum_pct
-            else 0
-        )
+        direction = _momentum_direction(momentum_pct, min_momentum_pct)
         if direction == 0:
             run_length = 0
         elif direction == previous_direction:
@@ -1138,6 +1133,46 @@ def _relative_momentum_features(
             }
         )
     return tuple(features)
+
+
+def _momentum_direction(momentum_pct: float, minimum_pct: float) -> int:
+    if momentum_pct >= minimum_pct:
+        return 1
+    if momentum_pct <= -minimum_pct:
+        return -1
+    return 0
+
+
+def _momentum_direction_alignment(
+    rows: Sequence[Mapping[str, Any]],
+    direction: int,
+    windows: Sequence[int],
+    min_momentum_pct: float,
+) -> Optional[float]:
+    if direction == 0 or not rows or len(rows) < max(windows):
+        return None
+    prices = [float(rows[0]["open"])] + [float(row["close"]) for row in rows]
+    elapsed = len(rows)
+    aligned = 0
+    for window in windows:
+        reference = prices[elapsed - window]
+        price = prices[elapsed]
+        if reference <= 0.0 or price <= 0.0:
+            return None
+        momentum_pct = (price / reference - 1.0) * 100.0
+        aligned += _momentum_direction(momentum_pct, min_momentum_pct) == direction
+    return aligned / len(windows)
+
+
+def _momentum_persistence_score(
+    magnitude_percentile: float,
+    duration_percentile: float,
+    direction_alignment: Optional[float],
+) -> Optional[float]:
+    if direction_alignment is None:
+        return None
+    joint_strength = math.sqrt(magnitude_percentile * duration_percentile)
+    return 0.8 * joint_strength + 0.2 * direction_alignment * 100.0
 
 
 def _complete_relative_momentum_session(
@@ -1322,9 +1357,29 @@ def _signal_relative_momentum(
     direction = (
         "up" if direction_value > 0 else "down" if direction_value < 0 else "neutral"
     )
+    alignment_windows = (
+        max(1, window_minutes // 2),
+        window_minutes * 2,
+        window_minutes * 3,
+    )
+    direction_alignment = _momentum_direction_alignment(
+        rows,
+        direction_value,
+        alignment_windows,
+        float(parameters["min_momentum_pct"]),
+    )
+    persistence_score = _momentum_persistence_score(
+        magnitude_percentile,
+        duration_percentile,
+        direction_alignment,
+    )
     strong = (
         direction_value != 0
         and strength_percentile >= float(parameters["strong_percentile"])
+    )
+    persistent = (
+        persistence_score is not None
+        and persistence_score >= float(parameters["strong_percentile"])
     )
     return {
         "direction": direction,
@@ -1340,6 +1395,19 @@ def _signal_relative_momentum(
         "signed_strength": round(
             direction_value * strength_percentile / 100.0, 6
         ),
+        "direction_alignment": round(direction_alignment, 6)
+        if direction_alignment is not None
+        else None,
+        "persistence_score": round(persistence_score, 3)
+        if persistence_score is not None
+        else None,
+        "signed_persistence": round(
+            direction_value * persistence_score / 100.0, 6
+        )
+        if persistence_score is not None
+        else None,
+        "persistent": persistent,
+        "alignment_windows": list(alignment_windows),
         "strength_basis": basis,
         "strong": strong,
         "sample_sessions": len(magnitudes),
