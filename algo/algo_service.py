@@ -558,10 +558,18 @@ def _complete_session_summary(
         session_close - 1,
         include_interpolated=False,
     )
-    expected = (session_close - session_open) // 60
-    if len(rows) != expected or any(
-        int(row["ts"]) != session_open + index * 60
-        for index, row in enumerate(rows)
+    timestamps = [int(row["ts"]) for row in rows]
+    cadence = timestamps[1] - timestamps[0] if len(timestamps) > 1 else 0
+    expected = (session_close - session_open) // cadence if cadence else 0
+    if (
+        cadence not in (60, 120, 300)
+        or len(rows) != expected
+        or timestamps[0] != session_open
+        or timestamps[-1] != session_close - cadence
+        or any(
+            timestamp != session_open + index * cadence
+            for index, timestamp in enumerate(timestamps)
+        )
     ):
         _SESSION_SUMMARIES[key] = None
         return None
@@ -790,7 +798,10 @@ def _prior_volume_baseline(
             limit=cap_bars,
             include_interpolated=False,
         )
-        if len(rows) == cap_bars:
+        if len(rows) == cap_bars and all(
+            int(row["ts"]) == session_open + slot * 60
+            for slot, row in enumerate(rows)
+        ):
             sessions.append([float(row["volume"]) for row in rows])
             if len(sessions) == baseline_sessions:
                 break

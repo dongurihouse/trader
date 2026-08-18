@@ -1,5 +1,5 @@
 {
-  "version": 7,
+  "version": 8,
   "database": "../data/trader.sqlite3",
   "tickers": ["SNDK", "SNXX", "SNDQ", "MU", "SPY", "QQQ", "SOXX"],
   "early_closes": ["2026-11-27", "2026-12-24"],
@@ -154,7 +154,7 @@
       "inputs": ["bars", "session"],
       "params": {
         "cap_bars": 30,
-        "baseline_sessions": 20
+        "baseline_sessions": 10
       }
     },
     "last_close": {
@@ -241,7 +241,7 @@
         "risk_atr_frac": 0.15,
         "target_r": 1.5,
         "min_rvol": 1.0,
-        "minute_min": 315,
+        "minute_min": 270,
         "minute_max": 380,
         "entry_cutoff_minutes": 10,
         "flat_minutes": 5
@@ -276,7 +276,7 @@
       "params": {
         "target_tickers": ["SNDK"],
         "gap_min_pct": 2.0,
-        "risk_atr_frac": 0.15,
+        "risk_atr_frac": 0.2,
         "target_r": 2.0,
         "min_rvol": 1.0,
         "minute_min": 15,
@@ -297,7 +297,7 @@
       ],
       "params": {
         "target_tickers": ["SNDK"],
-        "min_range_atr": 1.0,
+        "min_range_atr": 0.75,
         "stop_atr_frac": 0.35,
         "target_r": 1.5,
         "min_rvol": 1.0,
