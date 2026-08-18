@@ -107,6 +107,8 @@ button.brand {
 
 .trader-menu {
   position: relative;
+  display: inline-flex;
+  align-items: center;
 }
 
 .brand-status {
@@ -117,9 +119,10 @@ button.brand {
 .brand-market-status {
   position: absolute;
   z-index: 1;
-  top: -6px;
-  right: -8px;
+  top: 50%;
+  right: -16px;
   pointer-events: none;
+  transform: translateY(-50%);
 }
 
 .brand-chevron {
