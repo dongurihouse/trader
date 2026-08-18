@@ -144,7 +144,13 @@ class DashboardData:
             "stored_versions": stored_versions,
         }
 
-    def bars(self, ticker: str, span: str) -> dict[str, Any]:
+    def bars(
+        self,
+        ticker: str,
+        span: str,
+        window_start: str | None = None,
+        window_end: str | None = None,
+    ) -> dict[str, Any]:
         ticker = self._valid_symbol(ticker)
         span = span.upper()
         if span not in {"HISTORY", "1D", "5D", "1M", "3M", "120D", "ALL"}:
@@ -152,6 +158,17 @@ class DashboardData:
                 "Range must be HISTORY, 1D, 5D, 1M, 3M, 120D, or ALL"
             )
         config = self.config()
+        custom_window = window_start is not None or window_end is not None
+        if custom_window:
+            if window_start is None or window_end is None:
+                raise DashboardError("A chart window requires start and end")
+            try:
+                requested_start = int(window_start)
+                requested_end = int(window_end)
+            except ValueError as exc:
+                raise DashboardError("Chart window timestamps must be integers") from exc
+            if requested_start < 0 or requested_end < requested_start:
+                raise DashboardError("Invalid chart window")
 
         with self.connection() as connection:
             latest = connection.execute(
@@ -175,15 +192,22 @@ class DashboardData:
                     "interpolated_count": 0,
                 }
 
-            start = self._range_start(connection, ticker, int(latest), span)
+            if custom_window:
+                start = requested_start
+                end = min(requested_end, int(latest))
+                response_range = "WINDOW"
+            else:
+                start = self._range_start(connection, ticker, int(latest), span)
+                end = int(latest)
+                response_range = span
             rows = connection.execute(
                 """
                 SELECT ts, open, high, low, close, volume, interpolated, fetched_at
                 FROM bars
-                WHERE ticker = ? AND ts >= ?
+                WHERE ticker = ? AND ts >= ? AND ts <= ?
                 ORDER BY ts
                 """,
-                (ticker, start),
+                (ticker, start, end),
             ).fetchall()
             # Every range returns the literal stored minute history. The chart's
             # client-side viewport handles display density, zoom, and panning.
@@ -200,10 +224,10 @@ class DashboardData:
                     f"""
                     SELECT ticker, algo, ts, action, {direction_column}
                     FROM trades
-                    WHERE ticker = ? AND ts >= ?
+                    WHERE ticker = ? AND ts >= ? AND ts <= ?
                     ORDER BY ts
                     """,
-                    (ticker, start),
+                    (ticker, start, end),
                 )
             ]
             events = [
@@ -215,19 +239,19 @@ class DashboardData:
                     WHERE ticker = ? AND window_end >= ? AND window_start <= ?
                     ORDER BY event_ts
                     """,
-                    (ticker, start, latest),
+                    (ticker, start, end),
                 )
             ]
             shape_forecast = self._shape_forecast(
-                connection, config, ticker, start, int(latest)
+                connection, config, ticker, start, end
             )
             relative_momentum = self._relative_momentum(
-                connection, config, ticker, start, int(latest)
+                connection, config, ticker, start, end
             )
 
         return {
             "ticker": ticker,
-            "range": span,
+            "range": response_range,
             "start": int(rows[0]["ts"]) if rows else None,
             "end": int(rows[-1]["ts"]) if rows else None,
             "source_count": len(rows),
@@ -238,6 +262,46 @@ class DashboardData:
             "shape_forecast": shape_forecast,
             "relative_momentum": relative_momentum,
             "algo_overlays": self._algo_overlays(rows, config),
+        }
+
+    def calendar(self, ticker: str, span: str) -> dict[str, Any]:
+        ticker = self._valid_symbol(ticker)
+        span = span.upper()
+        if span not in {"HISTORY", "1D", "5D", "1M", "3M", "120D", "ALL"}:
+            raise DashboardError(
+                "Range must be HISTORY, 1D, 5D, 1M, 3M, 120D, or ALL"
+            )
+
+        with self.connection() as connection:
+            latest = connection.execute(
+                "SELECT MAX(ts) FROM bars WHERE ticker = ?", (ticker,)
+            ).fetchone()[0]
+            if latest is None:
+                return {"ticker": ticker, "range": span, "sessions": []}
+            start = self._range_start(connection, ticker, int(latest), span)
+            timestamps = connection.execute(
+                "SELECT ts FROM bars WHERE ticker = ? AND ts >= ? ORDER BY ts",
+                (ticker, start),
+            )
+
+            sessions: list[dict[str, Any]] = []
+            for row in timestamps:
+                timestamp = int(row["ts"])
+                date = datetime.fromtimestamp(timestamp, tz=EASTERN).date().isoformat()
+                previous = sessions[-1] if sessions else None
+                if previous is None or previous["date"] != date:
+                    sessions.append(
+                        {"date": date, "start": timestamp, "end": timestamp}
+                    )
+                else:
+                    previous["end"] = timestamp
+
+        return {
+            "ticker": ticker,
+            "range": span,
+            "start": sessions[0]["start"] if sessions else None,
+            "end": sessions[-1]["end"] if sessions else None,
+            "sessions": list(reversed(sessions)),
         }
 
     def logs(
@@ -1394,6 +1458,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 )
             elif path == "/api/bars":
                 payload = self.data.bars(
+                    self._param(query, "ticker"),
+                    self._param(query, "range", "HISTORY"),
+                    self._param(query, "start", None),
+                    self._param(query, "end", None),
+                )
+            elif path == "/api/calendar":
+                payload = self.data.calendar(
                     self._param(query, "ticker"),
                     self._param(query, "range", "HISTORY"),
                 )

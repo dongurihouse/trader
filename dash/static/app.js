@@ -1,4 +1,6 @@
 const $ = (selector) => document.querySelector(selector);
+const HISTORY_SESSIONS_PER_CHUNK = 5;
+const HISTORY_PARALLEL_REQUESTS = 3;
 
 const state = {
   overview: null,
@@ -11,6 +13,7 @@ const state = {
   sessions: [],
   selectedDate: null,
   chartRequest: 0,
+  historyLoad: 0,
 };
 
 const pacificDateTime = new Intl.DateTimeFormat("en-US", {
@@ -133,6 +136,74 @@ function sessionDateRanges(bars) {
     }
   });
   return sessions;
+}
+
+function mergeBy(items, keyFor) {
+  const values = new Map();
+  items.forEach((item) => values.set(keyFor(item), item));
+  return [...values.values()];
+}
+
+function mergeForecasts(payloads, key) {
+  const forecasts = payloads.map((payload) => payload?.[key]).filter(Boolean);
+  if (!forecasts.length) return null;
+  const configs = [...new Set(forecasts.map((forecast) => forecast.config).filter(Boolean))];
+  return {
+    ...forecasts[0],
+    config: configs.length === 1 ? configs[0] : "mixed",
+    snapshots: mergeBy(
+      forecasts.flatMap((forecast) => forecast.snapshots || []),
+      (snapshot) => Number(snapshot.ts),
+    ).sort((left, right) => Number(left.ts) - Number(right.ts)),
+  };
+}
+
+function mergeOverlays(payloads) {
+  const overlays = new Map();
+  payloads.flatMap((payload) => payload?.algo_overlays || []).forEach((overlay) => {
+    const current = overlays.get(overlay.algo) || { ...overlay, ranges: [] };
+    current.ranges = mergeBy(
+      [...current.ranges, ...(overlay.ranges || [])],
+      (range) => `${range.date}|${range.start}|${range.end}`,
+    ).sort((left, right) => Number(left.start) - Number(right.start));
+    overlays.set(overlay.algo, current);
+  });
+  return [...overlays.values()];
+}
+
+function mergeHistoryPayload(base, parts, { includeBaseInterpolation = true } = {}) {
+  const payloads = [base, ...parts].filter(Boolean);
+  const bars = mergeBy(
+    payloads.flatMap((payload) => payload.bars || []),
+    (bar) => Number(bar.ts),
+  ).sort((left, right) => Number(left.ts) - Number(right.ts));
+  const trades = mergeBy(
+    payloads.flatMap((payload) => payload.trades || []),
+    (trade) => `${trade.ticker}|${trade.algo}|${trade.ts}|${trade.action}|${trade.direction}`,
+  ).sort((left, right) => Number(left.ts) - Number(right.ts));
+  const events = mergeBy(
+    payloads.flatMap((payload) => payload.events || []),
+    (event) => `${event.event}|${event.event_ts}|${event.window_start}|${event.window_end}`,
+  ).sort((left, right) => Number(left.event_ts) - Number(right.event_ts));
+  const partInterpolation = parts.reduce(
+    (total, payload) => total + Number(payload?.interpolated_count || 0),
+    0,
+  );
+  return {
+    ticker: base.ticker,
+    range: "HISTORY",
+    start: bars[0]?.ts ?? null,
+    end: bars.at(-1)?.ts ?? null,
+    source_count: bars.length,
+    interpolated_count: partInterpolation
+      + (includeBaseInterpolation ? Number(base.interpolated_count || 0) : 0),
+    bars,
+    trades,
+    events,
+    shape_forecast: mergeForecasts(payloads, "shape_forecast"),
+    relative_momentum: mergeForecasts(payloads, "relative_momentum"),
+    algo_overlays: mergeOverlays(payloads),
+  };
 }
 
 function showToast(message) {
@@ -1161,10 +1232,12 @@ async function loadOverview({ quiet = false } = {}) {
       && state.chartRevision !== null
       && Number(state.chartRevision) === Number(quote?.chart_revision);
     if (!chartIsCurrent) {
-      const loadLatestSessionFirst = !state.bars && state.range === "HISTORY";
-      await loadBars({ quiet, range: loadLatestSessionFirst ? "1D" : state.range });
-      if (loadLatestSessionFirst && state.bars?.range === "1D") {
-        loadBars({ quiet: true, range: state.range });
+      const hasHistory = state.bars?.ticker === state.ticker
+        && state.bars?.range === "HISTORY";
+      if (quiet && hasHistory) {
+        await refreshLatestSession();
+      } else {
+        await loadChart({ quiet });
       }
     }
   } catch (error) {
@@ -1228,35 +1301,122 @@ async function selectTicker(ticker) {
   state.ticker = ticker;
   renderTickers(state.overview.quotes);
   renderQuote();
-  await loadBars();
+  await loadChart();
 }
 
-async function loadBars({ quiet = false, range = state.range } = {}) {
+function applyBarsPayload(payload, { focusLatest = false } = {}) {
+  state.bars = payload;
+  renderAlgoOverlay();
+  renderDateStrip(payload);
+  chart.setData(payload);
+  if (focusLatest && state.sessions.length) focusDate(state.sessions[0].date);
+  $("#chart-empty").hidden = payload.bars.length > 0;
+}
+
+async function loadBars({ quiet = false, range = state.range, apply = true } = {}) {
   if (!state.ticker) return;
+  const ticker = state.ticker;
   const request = ++state.chartRequest;
   if (!quiet || !state.bars) $("#chart-loading").hidden = false;
   $("#chart-empty").hidden = true;
   try {
-    const payload = await api(`/api/bars?ticker=${encodeURIComponent(state.ticker)}&range=${range}`);
+    const payload = await api(`/api/bars?ticker=${encodeURIComponent(ticker)}&range=${range}`);
     if (request !== state.chartRequest) return;
     const shouldFocusLatest = state.bars?.ticker !== payload.ticker
       || state.bars?.range !== payload.range;
-    state.bars = payload;
     state.chartRevision = state.overview?.quotes.find(
       (item) => item.ticker === payload.ticker,
     )?.chart_revision ?? null;
-    renderAlgoOverlay();
-    renderDateStrip(payload);
-    chart.setData(payload);
-    if (shouldFocusLatest && state.sessions.length) {
-      focusDate(state.sessions[0].date);
-    }
-    $("#chart-empty").hidden = payload.bars.length > 0;
+    if (apply) applyBarsPayload(payload, { focusLatest: shouldFocusLatest });
+    return payload;
   } catch (error) {
     if (request === state.chartRequest) showToast(error.message);
+    return null;
   } finally {
     if (request === state.chartRequest) $("#chart-loading").hidden = true;
   }
+}
+
+function historyChunks(sessions) {
+  const chunks = [];
+  for (let index = 0; index < sessions.length; index += HISTORY_SESSIONS_PER_CHUNK) {
+    const group = sessions.slice(index, index + HISTORY_SESSIONS_PER_CHUNK);
+    chunks.push({
+      start: Math.min(...group.map((session) => Number(session.start))),
+      end: Math.max(...group.map((session) => Number(session.end))),
+    });
+  }
+  return chunks;
+}
+
+async function hydrateHistory(base, manifest, request) {
+  const ticker = base.ticker;
+  const chunks = historyChunks(manifest.sessions || []);
+  const parts = new Map();
+  const historyLoad = ++state.historyLoad;
+  let nextChunk = 0;
+
+  async function worker() {
+    while (nextChunk < chunks.length) {
+      const chunkIndex = nextChunk;
+      nextChunk += 1;
+      const chunk = chunks[chunkIndex];
+      try {
+        const payload = await api(
+          `/api/bars?ticker=${encodeURIComponent(ticker)}&range=HISTORY&start=${chunk.start}&end=${chunk.end}`,
+        );
+        if (
+          request !== state.chartRequest
+          || historyLoad !== state.historyLoad
+          || ticker !== state.ticker
+        ) return;
+        parts.set(chunkIndex, payload);
+        const orderedParts = [...parts.entries()]
+          .sort(([left], [right]) => left - right)
+          .map(([, part]) => part);
+        const merged = mergeHistoryPayload(base, orderedParts, {
+          includeBaseInterpolation: !parts.has(0),
+        });
+        applyBarsPayload(merged, { focusLatest: state.bars?.range !== "HISTORY" });
+      } catch (error) {
+        if (request === state.chartRequest && historyLoad === state.historyLoad) {
+          showToast(error.message);
+        }
+      }
+    }
+  }
+
+  const workerCount = Math.min(HISTORY_PARALLEL_REQUESTS, chunks.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+}
+
+async function loadChart({ quiet = false } = {}) {
+  if (state.range !== "HISTORY") return loadBars({ quiet, range: state.range });
+  const ticker = state.ticker;
+  const manifestPromise = api(
+    `/api/calendar?ticker=${encodeURIComponent(ticker)}&range=${state.range}`,
+  ).then((manifest) => ({ manifest })).catch((error) => ({ error }));
+  const base = await loadBars({ quiet, range: "1D" });
+  if (!base || ticker !== state.ticker) return base;
+  const request = state.chartRequest;
+  const result = await manifestPromise;
+  if (result.error) {
+    if (request === state.chartRequest) showToast(result.error.message);
+  } else if (request === state.chartRequest && ticker === state.ticker) {
+    hydrateHistory(base, result.manifest, request);
+  }
+  return base;
+}
+
+async function refreshLatestSession() {
+  const history = state.bars;
+  const latest = await loadBars({ quiet: true, range: "1D", apply: false });
+  if (!latest || history?.ticker !== latest.ticker) return;
+  const merged = mergeHistoryPayload(history, [latest], {
+    includeBaseInterpolation: false,
+  });
+  merged.interpolated_count = history.interpolated_count;
+  applyBarsPayload(merged);
 }
 
 $("#date-strip").addEventListener("click", (event) => {

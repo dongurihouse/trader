@@ -46,7 +46,8 @@ the loopback ports configured by `bars.api_port` and `algo.api_port`.
 
 ## Chart
 
-- Opens on the latest trading date with the loaded history available from the date row.
+- Opens on the latest trading date, then fills the date row from five-session
+  history chunks with up to three requests in flight.
 - Minute-level bars remain available for zooming and panning.
 - Switchable line and candlestick chart styles.
 - Automatic entry and exit markers for the configured trading algo, read from `trades`.
