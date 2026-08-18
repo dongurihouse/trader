@@ -22,6 +22,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
+from notify import send_trade_alerts
 from shape_signal import clear_shape_cache, normalize_shape_parameters, shape_v1
 from validation import require_float, require_int
 
@@ -35,6 +36,7 @@ SYMBOL = re.compile(r"^[A-Z][A-Z0-9.-]{0,14}$")
 BAR_FIELDS = {"open", "high", "low", "close", "volume"}
 CYCLE_PAIR_LIMIT = 2_000
 CYCLE_PROGRESS_INTERVAL = 1_000
+ALERT_CLOSE_GRACE_SECONDS = 5 * 60
 METADATA_DEFAULTS = {
     "ema": {"period": 9},
     "sma": {"period": 9},
@@ -3076,7 +3078,7 @@ def _write_result(
     connection: sqlite3.Connection,
     settings: Settings,
     result: Mapping[str, Any],
-) -> dict[str, int]:
+) -> tuple[dict[str, int], list[dict[str, Any]]]:
     computed_at = int(time.time())
     rows = []
     for name, value in result["signals"].items():
@@ -3103,6 +3105,7 @@ def _write_result(
         )
 
     stats = {"pairs": 1, "outputs": len(rows), "entries": 0, "exits": 0}
+    alerts: list[dict[str, Any]] = []
     connection.execute("BEGIN IMMEDIATE")
     try:
         connection.executemany(
@@ -3146,16 +3149,71 @@ def _write_result(
                 "INSERT INTO trades(ticker,algo,ts,action,direction) VALUES (?,?,?,?,?)",
                 (result["ticker"], name, result["ts"], action, direction),
             )
+            price = connection.execute(
+                "SELECT close FROM bars WHERE ticker=? AND ts=?",
+                (result["ticker"], result["ts"]),
+            ).fetchone()
+            alerts.append(
+                {
+                    "ticker": result["ticker"],
+                    "algo": name,
+                    "ts": result["ts"],
+                    "action": action,
+                    "direction": direction,
+                    "price": None if price is None else price["close"],
+                }
+            )
             stats["exits" if action == "exit_all" else "entries"] += 1
         connection.commit()
     except Exception:
         connection.rollback()
         raise
-    return stats
+    return stats, alerts
+
+
+def _live_trade_alerts(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    records: Sequence[Mapping[str, Any]],
+    resume_after: int,
+    now: Optional[int] = None,
+) -> list[dict[str, Any]]:
+    """Keep only fresh latest-bar trades witnessed by the live service."""
+    current = int(time.time()) if now is None else now
+    latest_by_session: dict[tuple[str, int, int], Optional[int]] = {}
+    eligible = []
+    for record in records:
+        ticker = str(record["ticker"])
+        event_ts = int(record["ts"])
+        if event_ts <= resume_after:
+            continue
+        _day, session_open, session_close = _session_window(settings, event_ts)
+        if not (session_open <= event_ts < session_close):
+            continue
+        session_key = (ticker, session_open, session_close)
+        if session_key not in latest_by_session:
+            latest_by_session[session_key] = connection.execute(
+                "SELECT MAX(ts) FROM bars WHERE ticker=? AND ts>=? AND ts<?",
+                session_key,
+            ).fetchone()[0]
+        if latest_by_session[session_key] != event_ts:
+            continue
+        if not (session_open <= current < session_close + ALERT_CLOSE_GRACE_SECONDS):
+            continue
+        eligible.append(dict(record))
+    return eligible
+
+
+def _report_alert_failure(config_path: Path, reason: str) -> None:
+    message = "alerting failed: %s" % " ".join(reason.split())
+    logging.error(message)
+    _best_effort_log(config_path, "error", message)
 
 
 def cycle(
-    config_path: Path, stop_event: Optional[threading.Event] = None
+    config_path: Path,
+    stop_event: Optional[threading.Event] = None,
+    alert_resume_after: Optional[int] = None,
 ) -> tuple[dict[str, int], Settings]:
     _RVOL_BASELINES.clear()
     _PULLBACK_BASELINES.clear()
@@ -3225,10 +3283,22 @@ def cycle(
             result = run_core(
                 connection, settings, ticker, ts, state=state
             )
-            part = _write_result(connection, settings, result)
+            part, trade_alerts = _write_result(connection, settings, result)
             state.advance(result)
             for key in stats:
                 stats[key] += part[key]
+            if alert_resume_after is not None and trade_alerts:
+                send_trade_alerts(
+                    _live_trade_alerts(
+                        connection,
+                        settings,
+                        trade_alerts,
+                        alert_resume_after,
+                    ),
+                    on_failure=lambda reason: _report_alert_failure(
+                        config_path, reason
+                    ),
+                )
             if stats["pairs"] % CYCLE_PROGRESS_INTERVAL == 0:
                 progress = "cycle progress pairs=%d outputs=%d entries=%d exits=%d" % (
                     stats["pairs"], stats["outputs"], stats["entries"], stats["exits"]
@@ -3306,6 +3376,7 @@ class Service:
         self.settings = load_settings(self.config_path)
         self.stop_event = threading.Event()
         self.started_at = int(time.time())
+        self.alert_resume_after = self.started_at
 
     def health(self) -> dict[str, Any]:
         return {
@@ -3340,7 +3411,15 @@ class Service:
             _best_effort_log(self.config_path, "info", "service started")
             while not self.stop_event.is_set():
                 try:
-                    stats, settings = cycle(self.config_path, self.stop_event)
+                    observed = load_settings(self.config_path)
+                    if observed.version != self.settings.version:
+                        self.alert_resume_after = int(time.time())
+                    stats, settings = cycle(
+                        self.config_path,
+                        self.stop_event,
+                        alert_resume_after=self.alert_resume_after,
+                    )
+                    self.settings = settings
                     delay = (
                         0
                         if stats["pairs"] == CYCLE_PAIR_LIMIT

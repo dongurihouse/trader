@@ -14,6 +14,14 @@ without a separate backtest path.
 Every entry or exit produced by an algo with `"trades": true` writes a trade,
 whether the evaluated bar is historical or new. Other algos write outputs only.
 
+The long-running service sends a macOS Messages alert after it commits a new
+entry or exit on the ticker's latest regular-session bar. Historical work,
+config backfills, and `make algo-once` never send messages. The trade row is the
+at-most-once alert ledger, so a restart cannot resend it. Alert delivery runs in
+a background thread and cannot stop evaluation. Set `TRADER_SMS_TO` in the
+environment or the repository `.env`; when it is absent, Trader reuses the
+existing `DT_SMS_TO` setting from the sibling `dt` checkout.
+
 The default config enables `orb5`, `sentiment_pullback`, and four SNDK-only
 migrations from the DT roster. The `shape` path forecast remains read-only.
 
