@@ -162,6 +162,9 @@ class PriceChart {
     this.viewStart = 0;
     this.viewEnd = -1;
     this.drag = null;
+    this.touchPointers = new Map();
+    this.pinch = null;
+    this.pinchGestureActive = false;
     this.suppressClick = false;
     this.wheelPanRemainder = 0;
     this.minimumViewPoints = 10;
@@ -787,6 +790,57 @@ class PriceChart {
     return Math.max(0, Math.min(bars.length - 1, Math.round(ratio * (bars.length - 1))));
   }
 
+  anchorForClientX(clientX) {
+    const rectangle = this.canvas.getBoundingClientRect();
+    const localX = clientX - rectangle.left;
+    return Math.max(0, Math.min(1, (localX - this.bounds.margin.left) / this.bounds.plotWidth));
+  }
+
+  startPinch() {
+    const points = Array.from(this.touchPointers.entries()).slice(0, 2);
+    if (points.length < 2) return;
+    const [[firstId, first], [secondId, second]] = points;
+    const midpointX = (first.x + second.x) / 2;
+    const startLength = this.viewLength();
+    const startAnchor = this.anchorForClientX(midpointX);
+    this.pinch = {
+      pointerIds: [firstId, secondId],
+      startDistance: Math.max(1, Math.hypot(second.x - first.x, second.y - first.y)),
+      startLength,
+      anchorIndex: this.viewStart + (startLength - 1) * startAnchor,
+    };
+    this.pinchGestureActive = true;
+    this.drag = null;
+    this.canvas.classList.remove("is-dragging");
+    points.forEach(([pointerId]) => this.canvas.setPointerCapture?.(pointerId));
+  }
+
+  updatePinch() {
+    if (!this.pinch) return;
+    const [firstId, secondId] = this.pinch.pointerIds;
+    const first = this.touchPointers.get(firstId);
+    const second = this.touchPointers.get(secondId);
+    if (!first || !second) return;
+    const distance = Math.max(1, Math.hypot(second.x - first.x, second.y - first.y));
+    const midpointX = (first.x + second.x) / 2;
+    const total = this.totalBars();
+    const minimum = Math.min(this.minimumViewPoints, total);
+    const nextLength = Math.max(
+      minimum,
+      Math.min(total, Math.round(this.pinch.startLength * this.pinch.startDistance / distance)),
+    );
+    const anchor = this.anchorForClientX(midpointX);
+    const maximumStart = total - nextLength;
+    const nextStart = Math.max(
+      0,
+      Math.min(maximumStart, Math.round(this.pinch.anchorIndex - (nextLength - 1) * anchor)),
+    );
+    if (nextStart === this.viewStart && nextLength === this.viewLength()) return;
+    this.focusedTimestamp = null;
+    this.wheelPanRemainder = 0;
+    this.setView(nextStart, nextStart + nextLength - 1);
+  }
+
   onPointer(event) {
     const bars = this.visibleBars();
     const index = this.pointerIndex(event);
@@ -837,6 +891,19 @@ class PriceChart {
 
   onPointerDown(event) {
     if (event.button !== 0 || !this.totalBars() || !this.bounds) return;
+    if (event.pointerType === "touch") {
+      this.touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (this.pinchGestureActive) {
+        event.preventDefault();
+        return;
+      }
+      if (this.touchPointers.size >= 2) {
+        this.startPinch();
+        this.suppressClick = true;
+        event.preventDefault();
+        return;
+      }
+    }
     if (this.viewLength() === this.totalBars()) {
       this.onPointer(event);
       return;
@@ -853,6 +920,15 @@ class PriceChart {
   }
 
   onPointerMove(event) {
+    if (event.pointerType === "touch" && this.touchPointers.has(event.pointerId)) {
+      this.touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    }
+    if (this.pinch) {
+      this.updatePinch();
+      event.preventDefault();
+      return;
+    }
+    if (this.pinchGestureActive) return;
     if (!this.drag || this.drag.pointerId !== event.pointerId) {
       this.onPointer(event);
       return;
@@ -867,6 +943,19 @@ class PriceChart {
   }
 
   onPointerUp(event) {
+    if (event.pointerType === "touch") this.touchPointers.delete(event.pointerId);
+    if (this.pinchGestureActive) {
+      this.pinch = null;
+      this.pinchGestureActive = this.touchPointers.size > 0;
+      this.drag = null;
+      this.canvas.classList.remove("is-dragging");
+      if (this.canvas.hasPointerCapture?.(event.pointerId)) this.canvas.releasePointerCapture(event.pointerId);
+      clearTimeout(this.pinchClickTimer);
+      this.pinchClickTimer = setTimeout(() => {
+        this.suppressClick = false;
+      }, 500);
+      return;
+    }
     if (!this.drag || this.drag.pointerId !== event.pointerId) return;
     const moved = this.drag.moved;
     this.drag = null;
