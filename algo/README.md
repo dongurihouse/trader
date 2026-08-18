@@ -73,6 +73,10 @@ signals ignore interpolated bars. Relative volume uses the median volume for
 each elapsed opening slot across the configured number of complete prior data
 sessions.
 
+`atr_session` also accepts complete, uniform two- or five-minute archive
+sessions. It uses only the session high, low, and close, so lower-frequency
+source bars can warm the daily ATR without inventing one-minute prices.
+
 Before the regular open, `shape_v1` publishes a prior-session distribution on
 every stored bar. It has no price funnel because the session opening price does
 not exist yet. During regular hours it evaluates on the configured stride,
