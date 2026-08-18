@@ -47,4 +47,24 @@ continuation remains negative in the forward period.
 `sentiment_pullback`. A one- to five-minute reversal confirmation was tested as
 a small exhaustion proxy. The existing algo produced +2.031 in discovery and
 +0.404 forward. Every confirmation variant reduced discovery return to +0.568
-or less, so `sentiment_pullback` remains unchanged.
+or less, so no reversal confirmation is used.
+
+## Sentiment pullback entry guard
+
+Measured again on 2026-08-17, the entry guard rejects a counter-move above
+1.25 times its historical threshold. In the late regime, it also requires the
+current market move to retain its opening magnitude and allows only the first
+qualifying setup. It does not delay an entry for reversal confirmation.
+
+On the original three-market replay, this removed the July 7 overshoot and the
+net-negative August 14 trade. The result changed from 9 trades, +2.435%, a
+66.7% win rate, and -0.861% maximum drawdown to 7 trades, +3.322%, an 85.7%
+win rate, and -0.103% maximum drawdown. Discovery return improved from +2.031%
+to +2.892%; forward return improved from +0.404% to +0.430%.
+
+On the current fixed-history replay, discovery was unchanged at 5 trades and
++2.020%. Forward changed from 3 trades and -0.110% to 2 trades and +0.430%.
+The complete result changed from 8 trades, +1.911%, and -0.540% maximum
+drawdown to 7 trades, +2.451%, and -0.179% maximum drawdown. Threshold caps
+from 1.25 through 1.40 produced the same SNDK trades and returns. The sample is
+still small, so these remain paper results rather than promotion evidence.

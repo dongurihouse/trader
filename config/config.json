@@ -1,5 +1,5 @@
 {
-  "version": 22,
+  "version": 23,
   "database": "../data/trader.sqlite3",
   "tickers": ["SNDK", "MU", "WDC", "SPY", "QQQ", "SPCX"],
   "early_closes": ["2026-11-27", "2026-12-24"],
@@ -200,6 +200,8 @@
         "early_minutes": 30,
         "early_window_minutes": 5,
         "late_window_minutes": 30,
+        "late_market_strength_ratio": 1.0,
+        "max_threshold_ratio": 1.25,
         "entry_cutoff_minutes": 60,
         "baseline_sessions": 20,
         "min_baseline_sessions": 5,

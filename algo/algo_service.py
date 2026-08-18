@@ -738,6 +738,8 @@ def _normalize_pullback(
         "early_minutes",
         "early_window_minutes",
         "late_window_minutes",
+        "late_market_strength_ratio",
+        "max_threshold_ratio",
         "entry_cutoff_minutes",
         "baseline_sessions",
         "min_baseline_sessions",
@@ -758,6 +760,15 @@ def _normalize_pullback(
             parameters.get("late_window_minutes"),
             "late_window_minutes",
             error=ConfigError,
+        ),
+        "late_market_strength_ratio": _number(
+            parameters.get("late_market_strength_ratio"),
+            "late_market_strength_ratio",
+        ),
+        "max_threshold_ratio": _number(
+            parameters.get("max_threshold_ratio"),
+            "max_threshold_ratio",
+            minimum=1.0,
         ),
         "entry_cutoff_minutes": require_int(
             parameters.get("entry_cutoff_minutes"),
@@ -1704,6 +1715,8 @@ def _signal_pullback(
     early_minutes = int(parameters["early_minutes"])
     early_window = int(parameters["early_window_minutes"])
     late_window = int(parameters["late_window_minutes"])
+    late_market_strength_ratio = float(parameters["late_market_strength_ratio"])
+    max_threshold_ratio = float(parameters["max_threshold_ratio"])
     entry_cutoff = int(parameters["entry_cutoff_minutes"])
     baseline_sessions = int(parameters["baseline_sessions"])
     min_baseline_sessions = int(parameters["min_baseline_sessions"])
@@ -1763,15 +1776,102 @@ def _signal_pullback(
     threshold = (
         baseline[0 if regime == "early" else 1] if baseline is not None else None
     )
+    opening_market_return = require_float(
+        sentiment.get("market_return_pct"),
+        "opening_sentiment.market_return_pct",
+        nullable=True,
+        error=EvaluationError,
+    )
+    current_market_return = require_float(
+        sentiment.get("current_market_return_pct"),
+        "opening_sentiment.current_market_return_pct",
+        nullable=True,
+        error=EvaluationError,
+    )
+    market_strength_ratio = (
+        abs(current_market_return) / abs(opening_market_return)
+        if opening_market_return not in (None, 0.0)
+        and current_market_return is not None
+        else None
+    )
+    market_strength_valid = bool(
+        regime == "early"
+        or (
+            market_strength_ratio is not None
+            and market_strength_ratio >= late_market_strength_ratio
+        )
+    )
+    threshold_ratio = (
+        abs(movement) / threshold
+        if movement is not None and threshold is not None and threshold > 0.0
+        else None
+    )
+    setup_candidate = bool(
+        direction
+        and movement is not None
+        and threshold is not None
+        and movement * direction <= -threshold
+        and threshold_ratio is not None
+        and threshold_ratio <= max_threshold_ratio
+        and distance >= min_extreme_distance
+        and market_strength_valid
+    )
+    prior_setup = False
+    if setup_candidate:
+        rows = _session_bars(
+            connection,
+            ticker,
+            session_open,
+            ts,
+            ts - 60,
+            include_interpolated=False,
+        )
+        row_by_ts = {int(row["ts"]): row for row in rows}
+        running_high: Optional[float] = None
+        running_low: Optional[float] = None
+        for row in rows:
+            row_ts = int(row["ts"])
+            row_high = float(row["high"])
+            row_low = float(row["low"])
+            running_high = (
+                row_high if running_high is None else max(running_high, row_high)
+            )
+            running_low = row_low if running_low is None else min(running_low, row_low)
+            candidate_minute = (row_ts - session_open) // 60
+            in_regime = (
+                int(sentiment["minutes"]) < candidate_minute < early_minutes
+                if regime == "early"
+                else candidate_minute >= early_minutes
+            )
+            if not in_regime:
+                continue
+            anchor = row_by_ts.get(row_ts - window * 60)
+            if anchor is None or float(anchor["close"]) <= 0.0:
+                continue
+            candidate_price = float(row["close"])
+            candidate_move = (
+                candidate_price / float(anchor["close"]) - 1.0
+            ) * 100.0
+            candidate_distance = (
+                (running_high / candidate_price - 1.0) * 100.0
+                if direction == 1 and candidate_price > 0.0
+                else (candidate_price / running_low - 1.0) * 100.0
+                if direction == -1 and running_low > 0.0
+                else 0.0
+            )
+            if (
+                candidate_move * direction <= -threshold
+                and candidate_distance >= min_extreme_distance
+            ):
+                prior_setup = True
+                break
     trigger = bool(
         direction
         and minute > int(sentiment["minutes"])
         and float(session["to_close"]) > entry_cutoff
         and bool(sentiment["pattern_valid"])
-        and movement is not None
-        and threshold is not None
-        and movement * direction <= -threshold
-        and distance >= min_extreme_distance
+        and setup_candidate
+        and not prior_setup
     )
     return {
         "trigger": trigger,
@@ -1780,7 +1880,11 @@ def _signal_pullback(
         "window_minutes": window,
         "move_pct": movement,
         "threshold_pct": threshold,
+        "threshold_ratio": threshold_ratio,
+        "prior_setup": prior_setup,
         "distance_from_extreme_pct": distance,
+        "market_strength_ratio": market_strength_ratio,
+        "market_strength_valid": market_strength_valid,
         "pattern_valid": bool(sentiment["pattern_valid"]),
         "price": price,
         "ts": ts,
