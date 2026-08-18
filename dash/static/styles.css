@@ -1046,7 +1046,16 @@ h1 em {
   gap: 6px;
   align-items: baseline;
   min-width: 0;
+  margin: 0 -4px;
+  padding: 1px 4px;
+  border-radius: 3px;
   font-size: 0.6rem;
+  transition: background-color 100ms ease, box-shadow 100ms ease;
+}
+
+.day-trade-row.is-highlighted {
+  background: rgba(216, 255, 114, 0.1);
+  box-shadow: inset 2px 0 var(--acid);
 }
 
 .day-trade-time {

@@ -10,6 +10,10 @@ function algorithmUrl(name) {
   return `/algos?${parameters}`;
 }
 
+function tradePairKey(pair) {
+  return `${pair.entry.algo}|${Number(pair.entry.ts)}`;
+}
+
 const state = {
   overview: null,
   ticker: requestedTicker?.toUpperCase() || null,
@@ -311,11 +315,12 @@ function showToast(message) {
 }
 
 class PriceChart {
-  constructor(canvas, tooltip, onViewChange, onInspect) {
+  constructor(canvas, tooltip, onViewChange, onInspect, onTradeHighlight) {
     this.canvas = canvas;
     this.tooltip = tooltip;
     this.onViewChange = onViewChange;
     this.onInspect = onInspect;
+    this.onTradeHighlight = onTradeHighlight;
     this.context = canvas.getContext("2d");
     this.style = "line";
     this.indicator = "rsi";
@@ -323,6 +328,8 @@ class PriceChart {
     this.barIndexByTimestamp = new Map();
     this.tradePresentationCache = null;
     this.tradeMarkerHitAreas = [];
+    this.tradeLineHitAreas = [];
+    this.highlightedTradeKeys = new Set();
     this.payload = null;
     this.momentumByTimestamp = new Map();
     this.hoverIndex = null;
@@ -366,6 +373,8 @@ class PriceChart {
     const previousStartTime = previousBars[this.viewStart]?.ts;
     this.payload = payload;
     this.tradePresentationCache = null;
+    this.highlightedTradeKeys = new Set();
+    this.onTradeHighlight?.(this.highlightedTradeKeys);
     this.indicators = commonMomentumIndicators(payload?.bars || []);
     this.barIndexByTimestamp = new Map(
       (payload?.bars || []).map((bar, index) => [Number(bar.ts), index]),
@@ -431,13 +440,53 @@ class PriceChart {
     return `${trade.algo}|${Number(trade.ts)}`;
   }
 
-  tradeMarkerAt(event) {
+  tradeActionKey(trade) {
+    return `${this.tradeKey(trade)}|${trade.action}`;
+  }
+
+  tradePairsForAction(trade) {
+    const key = this.tradeActionKey(trade);
+    return this.tradePresentation().pairs.filter((pair) => (
+      this.tradeActionKey(pair.entry) === key
+      || (pair.exit && this.tradeActionKey(pair.exit) === key)
+    ));
+  }
+
+  tradeTargetAt(event) {
     const rectangle = this.canvas.getBoundingClientRect();
     const x = event.clientX - rectangle.left;
     const y = event.clientY - rectangle.top;
-    return [...this.tradeMarkerHitAreas].reverse().find((area) => (
+    const marker = [...this.tradeMarkerHitAreas].reverse().find((area) => (
       x >= area.left && x <= area.right && y >= area.top && y <= area.bottom
-    ))?.trade || null;
+    ));
+    if (marker) return { algo: marker.trade.algo, pairs: marker.pairs };
+
+    const line = [...this.tradeLineHitAreas].reverse().find((area) => {
+      const dx = area.x2 - area.x1;
+      const dy = area.y2 - area.y1;
+      const lengthSquared = dx * dx + dy * dy;
+      const position = lengthSquared
+        ? Math.max(0, Math.min(1, ((x - area.x1) * dx + (y - area.y1) * dy) / lengthSquared))
+        : 0;
+      const nearestX = area.x1 + position * dx;
+      const nearestY = area.y1 + position * dy;
+      return Math.hypot(x - nearestX, y - nearestY) <= 7;
+    });
+    return line ? { algo: line.pair.entry.algo, pairs: [line.pair] } : null;
+  }
+
+  setTradeHighlight(pairs) {
+    const next = new Set(pairs.map(tradePairKey));
+    const unchanged = next.size === this.highlightedTradeKeys.size
+      && [...next].every((key) => this.highlightedTradeKeys.has(key));
+    if (unchanged) return;
+    this.highlightedTradeKeys = next;
+    this.onTradeHighlight?.(next);
+    this.draw();
+  }
+
+  clearTradeHighlight() {
+    this.setTradeHighlight([]);
   }
 
   tradePresentation() {
@@ -458,7 +507,9 @@ class PriceChart {
       const openEntries = openEntriesByAlgo.get(trade.algo) || [];
       openEntriesByAlgo.set(trade.algo, openEntries);
       if (trade.action === "entry") {
-        openEntries.push(trade);
+        const pair = { entry: trade, exit: null, returnPct: null };
+        openEntries.push(pair);
+        pairs.push(pair);
         return;
       }
       if (trade.action !== "exit_all") return;
@@ -466,16 +517,17 @@ class PriceChart {
       const exitBar = barByTimestamp.get(Number(trade.ts));
       const closed = openEntries.splice(0);
       const returns = [];
-      closed.forEach((entry) => {
-        const entryBar = barByTimestamp.get(Number(entry.ts));
+      closed.forEach((pair) => {
+        const entryBar = barByTimestamp.get(Number(pair.entry.ts));
         const entryPrice = Number(entryBar?.close);
         const exitPrice = Number(exitBar?.close);
-        const direction = Number(entry.direction) < 0 ? -1 : 1;
+        const direction = Number(pair.entry.direction) < 0 ? -1 : 1;
         const returnPct = Number.isFinite(entryPrice) && entryPrice > 0 && Number.isFinite(exitPrice)
           ? ((exitPrice / entryPrice) - 1) * 100 * direction
           : null;
         if (Number.isFinite(returnPct)) returns.push(returnPct);
-        pairs.push({ entry, exit: trade, returnPct });
+        pair.exit = trade;
+        pair.returnPct = returnPct;
       });
       if (returns.length) {
         exitSummaries.set(this.tradeKey(trade), {
@@ -696,27 +748,39 @@ class PriceChart {
     ctx.save();
     ctx.lineJoin = "round";
 
-    pairs.forEach((pair) => {
+    const orderedPairs = pairs.slice().sort((left, right) => (
+      Number(this.highlightedTradeKeys.has(tradePairKey(left)))
+      - Number(this.highlightedTradeKeys.has(tradePairKey(right)))
+    ));
+    orderedPairs.forEach((pair) => {
+      if (!pair.exit) return;
       const entryIndex = indexByTimestamp.get(Number(pair.entry.ts));
       const exitIndex = indexByTimestamp.get(Number(pair.exit.ts));
       if (entryIndex === undefined || exitIndex === undefined) return;
       const entryBar = barByTimestamp.get(Number(pair.entry.ts));
       const exitBar = barByTimestamp.get(Number(pair.exit.ts));
       const resultColor = Number(pair.returnPct) >= 0 ? "216, 255, 114" : "255, 123, 115";
+      const highlighted = this.highlightedTradeKeys.has(tradePairKey(pair));
+      const dimmed = this.highlightedTradeKeys.size > 0 && !highlighted;
+      const x1 = x(entryIndex);
+      const y1 = y(entryBar.close);
+      const x2 = x(exitIndex);
+      const y2 = y(exitBar.close);
+      this.tradeLineHitAreas.push({ pair, x1, y1, x2, y2 });
 
       ctx.beginPath();
-      ctx.moveTo(x(entryIndex), y(entryBar.close));
-      ctx.lineTo(x(exitIndex), y(exitBar.close));
-      ctx.strokeStyle = `rgba(${resultColor}, 0.12)`;
-      ctx.lineWidth = 5;
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.strokeStyle = `rgba(${resultColor}, ${highlighted ? 0.34 : dimmed ? 0.03 : 0.12})`;
+      ctx.lineWidth = highlighted ? 9 : 5;
       ctx.setLineDash([]);
       ctx.stroke();
 
       ctx.beginPath();
-      ctx.moveTo(x(entryIndex), y(entryBar.close));
-      ctx.lineTo(x(exitIndex), y(exitBar.close));
-      ctx.strokeStyle = `rgba(${resultColor}, 0.58)`;
-      ctx.lineWidth = 1.25;
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.strokeStyle = `rgba(${resultColor}, ${highlighted ? 1 : dimmed ? 0.18 : 0.58})`;
+      ctx.lineWidth = highlighted ? 2.5 : 1.25;
       ctx.setLineDash([5, 4]);
       ctx.stroke();
     });
@@ -740,6 +804,10 @@ class PriceChart {
       const returnText = formattedReturn
         ? `${summary.entryCount > 1 ? "AVG " : ""}${formattedReturn}`
         : null;
+      const markerPairs = this.tradePairsForAction(trade);
+      const highlighted = markerPairs.some((pair) => (
+        this.highlightedTradeKeys.has(tradePairKey(pair))
+      ));
       const returnWidth = returnText ? Math.ceil(ctx.measureText(returnText).width) + 12 : 0;
       const badgeGap = returnText ? 4 : 0;
       const actionLeft = Math.max(
@@ -784,6 +852,7 @@ class PriceChart {
       });
       this.tradeMarkerHitAreas.push({
         trade,
+        pairs: markerPairs,
         left: actionLeft,
         right: actionLeft + actionWidth,
         top: badgeTop,
@@ -795,18 +864,26 @@ class PriceChart {
       ctx.beginPath();
       ctx.moveTo(pointX, priceY + (badgeBelowPrice ? 4 : -4));
       ctx.lineTo(actionCenterX, leaderEndY);
-      ctx.strokeStyle = isEntry ? "rgba(112, 216, 220, 0.82)" : "rgba(255, 123, 115, 0.82)";
-      ctx.lineWidth = 1.4;
+      ctx.strokeStyle = isEntry
+        ? `rgba(112, 216, 220, ${highlighted ? 1 : 0.82})`
+        : `rgba(255, 123, 115, ${highlighted ? 1 : 0.82})`;
+      ctx.lineWidth = highlighted ? 2.4 : 1.4;
       ctx.stroke();
 
       ctx.beginPath();
       ctx.fillStyle = color;
-      ctx.arc(pointX, priceY, 3.2, 0, Math.PI * 2);
+      ctx.arc(pointX, priceY, highlighted ? 4.5 : 3.2, 0, Math.PI * 2);
       ctx.fill();
-      ctx.strokeStyle = "#101721";
-      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = highlighted ? "#f4fbff" : "#101721";
+      ctx.lineWidth = highlighted ? 2 : 1.5;
       ctx.stroke();
 
+      if (highlighted) {
+        roundedRectPath(ctx, actionLeft - 2, badgeTop - 2, actionWidth + 4, badgeHeight + 4, isEntry ? 11 : 5);
+        ctx.strokeStyle = "rgba(244, 251, 255, 0.95)";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
       roundedRectPath(ctx, actionLeft, badgeTop, actionWidth, badgeHeight, isEntry ? 9 : 3);
       ctx.fillStyle = color;
       ctx.fill();
@@ -1074,6 +1151,7 @@ class PriceChart {
     const ctx = this.context;
     ctx.clearRect(0, 0, width, height);
     this.tradeMarkerHitAreas = [];
+    this.tradeLineHitAreas = [];
     const bars = this.visibleBars();
     if (!bars.length) return;
 
@@ -1442,7 +1520,11 @@ class PriceChart {
   }
 
   onPointerMove(event) {
-    this.canvas.classList.toggle("is-trade-link", Boolean(this.tradeMarkerAt(event)));
+    const tradeTarget = !this.drag && !this.pinchGestureActive
+      ? this.tradeTargetAt(event)
+      : null;
+    this.setTradeHighlight(tradeTarget?.pairs || []);
+    this.canvas.classList.toggle("is-trade-link", Boolean(tradeTarget));
     if (event.pointerType === "touch" && this.touchPointers.has(event.pointerId)) {
       this.touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
     }
@@ -1493,9 +1575,9 @@ class PriceChart {
       this.suppressClick = false;
       return;
     }
-    const trade = this.tradeMarkerAt(event);
-    if (trade) {
-      window.location.assign(algorithmUrl(trade.algo));
+    const tradeTarget = this.tradeTargetAt(event);
+    if (tradeTarget) {
+      window.location.assign(algorithmUrl(tradeTarget.algo));
       return;
     }
     const index = this.pointerIndex(event);
@@ -1543,6 +1625,7 @@ class PriceChart {
 
   clearPointer() {
     this.hoverIndex = null;
+    this.clearTradeHighlight();
     this.canvas.classList.remove("is-trade-link");
     this.tooltip.hidden = true;
     this.notifyInspection();
@@ -1622,6 +1705,15 @@ function tradeTime(trade, className, label) {
   return time;
 }
 
+let highlightedDayTradeKeys = new Set();
+
+function highlightDayTradeRows(keys) {
+  highlightedDayTradeKeys = new Set(keys);
+  document.querySelectorAll("#day-trades-list .day-trade-row[data-trade-key]").forEach((row) => {
+    row.classList.toggle("is-highlighted", highlightedDayTradeKeys.has(row.dataset.tradeKey));
+  });
+}
+
 function renderDayTrades(date) {
   const title = $("#day-trades-title");
   const list = $("#day-trades-list");
@@ -1649,6 +1741,7 @@ function renderDayTrades(date) {
     const entryTime = pacificClock.format(dateFromEpoch(pair.entry.ts));
     const exitTime = pair.exit ? pacificClock.format(dateFromEpoch(pair.exit.ts)) : "open";
     const row = createElement("div", "day-trade-row");
+    row.dataset.tradeKey = tradePairKey(pair);
     row.setAttribute(
       "aria-label",
       `${algoName}, ${directionName}, entry ${entryTime}, exit ${exitTime}`,
@@ -1661,9 +1754,12 @@ function renderDayTrades(date) {
       tradeTime(pair.entry, "day-trade-time day-trade-entry-time", "Entry"),
       tradeTime(pair.exit, "day-trade-time day-trade-exit-time", "Exit"),
     );
+    row.addEventListener("pointerenter", () => chart.setTradeHighlight([pair]));
+    row.addEventListener("pointerleave", () => chart.clearTradeHighlight());
     fragment.append(row);
   });
   list.replaceChildren(fragment);
+  highlightDayTradeRows(highlightedDayTradeKeys);
 }
 
 function renderInspection(inspection) {
@@ -1682,6 +1778,7 @@ const chart = new PriceChart(
   $("#chart-tooltip"),
   renderViewport,
   renderInspection,
+  highlightDayTradeRows,
 );
 
 function renderDateStrip(payload) {

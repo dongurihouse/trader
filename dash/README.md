@@ -53,6 +53,7 @@ the loopback ports configured by `bars.api_port` and `algo.api_port`.
 - Paired `IN` and `OUT` markers for every stored trading algorithm, read from `trades`.
 - Select an `IN` or `OUT` marker to open its algorithm summary.
 - Per-algorithm holding-span connectors and realized returns calculated from exact bar-close prices.
+- Hover a trade row, marker, or connector to highlight the same trade across the chart; select a connector to open its algorithm summary.
 - Up/down arrows identify long and short positions inside each marker, with action details on hover.
 - Hover inspection and click-locked bar focus update price, change, time, and shape probabilities.
 - Time zoom with the mouse wheel or a two-finger pinch on touch screens.
