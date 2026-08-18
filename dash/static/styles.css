@@ -1841,7 +1841,7 @@ pre {
 
 .algo-tab {
   display: grid;
-  flex: 0 0 clamp(560px, 58vw, 760px);
+  flex: 0 0 clamp(480px, 46vw, 600px);
   align-self: stretch;
   min-width: 0;
   padding: 0;
