@@ -1053,14 +1053,14 @@ h1 em {
 
 .day-trades-list {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
   gap: 1px 14px;
 }
 
 .day-trade-row {
   display: grid;
-  grid-template-columns: 54px auto 1fr;
-  gap: 7px;
+  grid-template-columns: 54px auto minmax(0, 1fr) auto;
+  gap: 6px;
   align-items: baseline;
   min-width: 0;
   font-size: 0.6rem;
@@ -1081,11 +1081,19 @@ h1 em {
   color: var(--red);
 }
 
+.day-trade-algo,
 .day-trade-direction {
   overflow: hidden;
-  color: var(--text);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.day-trade-algo {
+  color: var(--text);
+}
+
+.day-trade-direction {
+  color: var(--muted);
 }
 
 .day-trades-unavailable {

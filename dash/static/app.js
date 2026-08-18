@@ -4,7 +4,6 @@ const HISTORY_PARALLEL_REQUESTS = 3;
 const initialParameters = new URLSearchParams(window.location.search);
 const requestedDate = initialParameters.get("date");
 const requestedTicker = initialParameters.get("ticker");
-const requestedAlgo = initialParameters.get("algo");
 
 const state = {
   overview: null,
@@ -12,8 +11,6 @@ const state = {
   range: "HISTORY",
   style: "line",
   indicator: "rsi",
-  algo: requestedAlgo || null,
-  requestedAlgo: requestedAlgo || null,
   requestedDate: /^\d{4}-\d{2}-\d{2}$/.test(requestedDate || "") ? requestedDate : null,
   bars: null,
   chartRevision: null,
@@ -320,7 +317,6 @@ class PriceChart {
     this.indicators = { rsi: [], macd: [], roc: [] };
     this.barIndexByTimestamp = new Map();
     this.tradePresentationCache = null;
-    this.algo = null;
     this.payload = null;
     this.momentumByTimestamp = new Map();
     this.hoverIndex = null;
@@ -411,43 +407,41 @@ class PriceChart {
     this.draw();
   }
 
-  setAlgo(algo) {
-    const next = algo || null;
-    if (next === this.algo) return;
-    this.algo = next;
-    this.tradePresentationCache = null;
-    this.updateLabel();
-    this.draw();
-  }
-
   visibleTrades(bars = this.visibleBars()) {
-    if (!this.algo || !bars.length) return [];
+    if (!bars.length) return [];
     const timestamps = new Set(bars.map((bar) => Number(bar.ts)));
     return (this.payload?.trades || []).filter(
-      (trade) => trade.algo === this.algo && timestamps.has(Number(trade.ts)),
+      (trade) => timestamps.has(Number(trade.ts)),
     );
   }
 
   tradesAt(timestamp) {
     return (this.payload?.trades || []).filter(
-      (trade) => trade.algo === this.algo && Number(trade.ts) === Number(timestamp),
+      (trade) => Number(trade.ts) === Number(timestamp),
     );
   }
 
+  tradeKey(trade) {
+    return `${trade.algo}|${Number(trade.ts)}`;
+  }
+
   tradePresentation() {
-    if (!this.algo) return { pairs: [], exitSummaries: new Map() };
     if (this.tradePresentationCache) return this.tradePresentationCache;
     const barByTimestamp = new Map(
       (this.payload?.bars || []).map((bar) => [Number(bar.ts), bar]),
     );
     const trades = (this.payload?.trades || [])
-      .filter((trade) => trade.algo === this.algo)
-      .sort((left, right) => Number(left.ts) - Number(right.ts));
-    const openEntries = [];
+      .slice()
+      .sort((left, right) => (
+        Number(left.ts) - Number(right.ts) || String(left.algo).localeCompare(String(right.algo))
+      ));
+    const openEntriesByAlgo = new Map();
     const pairs = [];
     const exitSummaries = new Map();
 
     trades.forEach((trade) => {
+      const openEntries = openEntriesByAlgo.get(trade.algo) || [];
+      openEntriesByAlgo.set(trade.algo, openEntries);
       if (trade.action === "entry") {
         openEntries.push(trade);
         return;
@@ -469,7 +463,7 @@ class PriceChart {
         pairs.push({ entry, exit: trade, returnPct });
       });
       if (returns.length) {
-        exitSummaries.set(Number(trade.ts), {
+        exitSummaries.set(this.tradeKey(trade), {
           entryCount: returns.length,
           averageReturnPct: returns.reduce((total, value) => total + value, 0) / returns.length,
         });
@@ -574,9 +568,11 @@ class PriceChart {
     const visible = this.visibleBars();
     const first = visible[0];
     const last = visible.at(-1);
-    const actionCount = this.visibleTrades(visible).length;
-    const overlayLabel = this.algo
-      ? `, ${this.algo} overlay with ${actionCount.toLocaleString()} ${actionCount === 1 ? "action" : "actions"}`
+    const visibleTrades = this.visibleTrades(visible);
+    const actionCount = visibleTrades.length;
+    const algoCount = new Set(visibleTrades.map((trade) => trade.algo)).size;
+    const overlayLabel = actionCount
+      ? `, trade overlay with ${actionCount.toLocaleString()} ${actionCount === 1 ? "action" : "actions"} from ${algoCount.toLocaleString()} ${algoCount === 1 ? "algorithm" : "algorithms"}`
       : "";
     const momentumLabel = this.payload?.relative_momentum?.snapshots?.length
       ? ", with relative momentum below volume"
@@ -723,7 +719,7 @@ class PriceChart {
       const color = isEntry ? "#70d8dc" : "#ff7b73";
       const actionText = isEntry ? "IN" : "OUT";
       const actionWidth = isEntry ? 28 : 34;
-      const summary = isEntry ? null : exitSummaries.get(Number(trade.ts));
+      const summary = isEntry ? null : exitSummaries.get(this.tradeKey(trade));
       const formattedReturn = formatTradeReturn(summary?.averageReturnPct);
       const returnText = formattedReturn
         ? `${summary.entryCount > 1 ? "AVG " : ""}${formattedReturn}`
@@ -1367,7 +1363,7 @@ class PriceChart {
       const action = trade.action === "exit_all" ? "exit" : "entry";
       const direction = Number(trade.direction) < 0 ? "Short" : "Long";
       const summary = action === "exit"
-        ? this.tradePresentation().exitSummaries.get(Number(trade.ts))
+        ? this.tradePresentation().exitSummaries.get(this.tradeKey(trade))
         : null;
       const result = formatTradeReturn(summary?.averageReturnPct);
       const resultDetail = result
@@ -1562,11 +1558,10 @@ function renderShapeForest(shape) {
 function renderDayTrades(date) {
   const title = $("#day-trades-title");
   const list = $("#day-trades-list");
-  const algoName = state.algo ? formatShapeName(state.algo) : "Trade";
   const session = state.sessions.find((candidate) => candidate.date === date);
   title.textContent = session
-    ? `${algoName} entry / exit · ${pacificDateButton.format(dateFromEpoch(session.ts))}`
-    : `${algoName} entry / exit`;
+    ? `Entry / exit · ${pacificDateButton.format(dateFromEpoch(session.ts))}`
+    : "Entry / exit";
 
   if (!date) {
     list.replaceChildren(createElement("span", "day-trades-unavailable", "Select a trading date"));
@@ -1574,8 +1569,10 @@ function renderDayTrades(date) {
   }
 
   const trades = (state.bars?.trades || [])
-    .filter((trade) => trade.algo === state.algo && pacificDateKey(trade.ts) === date)
-    .sort((left, right) => Number(left.ts) - Number(right.ts));
+    .filter((trade) => pacificDateKey(trade.ts) === date)
+    .sort((left, right) => (
+      Number(left.ts) - Number(right.ts) || String(left.algo).localeCompare(String(right.algo))
+    ));
   if (!trades.length) {
     list.replaceChildren(createElement("span", "day-trades-unavailable", "No entries or exits"));
     return;
@@ -1585,9 +1582,12 @@ function renderDayTrades(date) {
   trades.forEach((trade) => {
     const action = trade.action === "entry" ? "entry" : "exit";
     const row = createElement("div", `day-trade-row ${action}`);
+    const algo = createElement("span", "day-trade-algo", formatShapeName(trade.algo));
+    algo.title = formatShapeName(trade.algo);
     row.append(
       createElement("time", "day-trade-time", pacificClock.format(dateFromEpoch(trade.ts))),
       createElement("strong", "day-trade-action", action),
+      algo,
       createElement("span", "day-trade-direction", Number(trade.direction) < 0 ? "Short" : "Long"),
     );
     fragment.append(row);
@@ -1678,20 +1678,6 @@ function focusDate(date) {
   });
 }
 
-function renderAlgoOverlay() {
-  const configured = Object.entries(state.overview?.config?.algos || {})
-    .filter(([, definition]) => definition?.trades === true)
-    .map(([name]) => name);
-  if (state.requestedAlgo) {
-    state.algo = state.requestedAlgo;
-  } else if (!configured.includes(state.algo)) {
-    state.algo = configured[0] || null;
-  }
-
-  chart.setAlgo(state.algo);
-  renderDayTrades(state.selectedDate);
-}
-
 async function loadOverview({ quiet = false } = {}) {
   try {
     const overview = await api("/api/overview?compact=1");
@@ -1725,7 +1711,6 @@ function renderOverview() {
   $("#market-status").setAttribute("aria-label", overview.market.label);
   $("#market-status").title = overview.market.label;
   $("#market-dot").classList.toggle("live", overview.market.state === "live");
-  renderAlgoOverlay();
   renderTickers(overview.quotes);
   renderQuote();
 }
@@ -1782,7 +1767,6 @@ async function selectTicker(ticker) {
 
 function applyBarsPayload(payload, { focusLatest = false } = {}) {
   state.bars = payload;
-  renderAlgoOverlay();
   renderDateStrip(payload);
   chart.setData(payload);
   if (state.requestedDate && state.sessions.some((session) => session.date === state.requestedDate)) {
