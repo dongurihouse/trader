@@ -40,7 +40,6 @@ continuation remains negative in the forward period.
   by config validation.
 - The early-close map converts the regular late window from 270..380 to
   170..200 on a 210-minute session.
-- Every migrated algo returns quiet for non-SNDK tickers.
 
 ## Sentiment overlap
 

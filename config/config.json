@@ -1,7 +1,7 @@
 {
-  "version": 16,
+  "version": 17,
   "database": "../data/trader.sqlite3",
-  "tickers": ["SNDK", "SNXX", "SNDQ", "MU", "SPY", "QQQ", "SOXX"],
+  "tickers": ["SNDK", "MU", "WDC", "SPY", "QQQ"],
   "early_closes": ["2026-11-27", "2026-12-24"],
   "live_polling": {
     "start": "04:00",
@@ -32,14 +32,6 @@
     "api_port": 8791,
     "evaluation_days": 60,
     "poll_seconds": 30
-  },
-  "broker": {
-    "enabled": true,
-    "quantity": "0",
-    "account_env": "TRADER_ROBINHOOD_ACCOUNT",
-    "target_ticker": "SNDK",
-    "long_symbol": "SNXX",
-    "short_symbol": "SNDQ"
   },
   "signals": {
     "ema9": {
@@ -185,11 +177,10 @@
     "opening_sentiment": {
       "inputs": ["bars", "session"],
       "params": {
-        "target_tickers": ["SNDK"],
-        "market_tickers": ["SPY", "QQQ", "SOXX"],
+        "market_tickers": ["SPY", "QQQ"],
         "minutes": 5,
         "min_market_move_pct": 0.0,
-        "require_target_agreement": true
+        "require_ticker_agreement": true
       }
     },
     "pullback": {
@@ -250,7 +241,6 @@
         "last_close"
       ],
       "params": {
-        "target_tickers": ["SNDK"],
         "first30_min_pct": 1.0,
         "risk_atr_frac": 0.15,
         "target_r": 1.5,
@@ -265,7 +255,6 @@
       "function": "failed_gap",
       "inputs": ["session", "prior_session", "atr_session", "last_close"],
       "params": {
-        "target_tickers": ["SNDK"],
         "gap_min_pct": 2.0,
         "risk_atr_frac": 0.25,
         "target_r": 2.0,
@@ -286,7 +275,6 @@
         "last_close"
       ],
       "params": {
-        "target_tickers": ["SNDK"],
         "gap_min_pct": 2.0,
         "risk_atr_frac": 0.2,
         "target_r": 2.0,
@@ -307,7 +295,6 @@
         "last_close"
       ],
       "params": {
-        "target_tickers": ["SNDK"],
         "min_range_atr": 0.75,
         "stop_atr_frac": 0.35,
         "target_r": 0.35,

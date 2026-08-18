@@ -230,6 +230,8 @@ number.
   window where outputs has no row under the current version. This one
   rule covers a live bar and a config change; the loop does not tell the
   cases apart.
+- Every enabled algo runs for every configured ticker. Algo definitions have
+  no separate ticker scope.
 - Work updates outputs; a rerun is a safe upsert because the rows are
   keyed and the core is deterministic.
 - A trade row is ticker, algo, exact timestamp, action, and direction. `is_entry` writes

@@ -13,6 +13,8 @@ without a separate backtest path.
 
 Every entry or exit produced by a configured algo writes a trade, whether the
 evaluated bar is historical or new.
+Every enabled algo runs for every configured ticker. There is no per-algo ticker
+list or ticker gate.
 
 The long-running service sends a macOS Messages alert after it commits a new
 entry or exit on the ticker's latest regular-session bar. Historical work,
@@ -22,18 +24,12 @@ a background thread and cannot stop evaluation. Set `TRADER_SMS_TO` in the
 environment or the repository `.env`; when it is absent, Trader reuses the
 existing `DT_SMS_TO` setting from the sibling `dt` checkout.
 
-The same live-only gate submits Robinhood equity orders when `broker.enabled`
-is true. A long SNDK entry buys `broker.long_symbol` (SNXX by default), and a
-short entry buys `broker.short_symbol` (SNDQ). The matching exit sells that
-symbol. Orders use market, regular-hours, good-for-day terms and a deterministic
-broker idempotency key. Set the account number in the environment variable
-named by `broker.account_env`, normally `TRADER_ROBINHOOD_ACCOUNT`. Order
-submission runs in a background thread. Every accepted order or broker error is
-written to the `algo` logs. The initial config uses zero shares so Robinhood
-rejects the request without trading money while the complete path is tested.
+This service does not submit broker orders. The removed SNDK-specific adapter
+could not express universal long and short execution safely. Trade rows and
+live Messages alerts continue for every configured ticker.
 
-The default config enables `orb5`, `sentiment_pullback`, and four SNDK-only
-migrations from the DT roster. The `shape` path forecast remains read-only.
+The default config enables `orb5`, `sentiment_pullback`, and four migrations
+from the DT roster. The `shape` path forecast remains read-only.
 
 The service exposes read-only process health at
 `http://127.0.0.1:8791/health` for Dash. A non-empty cycle logs progress every
@@ -82,7 +78,7 @@ The service has these signal functions:
 | `rvol_open` | `cap_bars`, `baseline_sessions` | number or `null` |
 | `relative_momentum` | `window_minutes`, `baseline_sessions`, `min_sessions`, `time_tolerance_minutes`, `min_momentum_pct`, `strong_percentile` | direction, current move and duration, relative percentiles, and strength |
 | `last_close` | `include_interpolated` | number or `null` |
-| `opening_sentiment` | `target_tickers`, `market_tickers`, `minutes`, `min_market_move_pct`, `require_target_agreement` | fixed opening direction, target agreement, and live pattern validity |
+| `opening_sentiment` | `market_tickers`, `minutes`, `min_market_move_pct`, `require_ticker_agreement` | fixed opening direction, current-ticker agreement, and live pattern validity |
 | `pullback` | `entry_window_minutes`, `impulse_window_minutes`, `confirmation_bars`, `baseline_sessions`, `min_baseline_sessions`, `percentile`, `min_extreme_distance_pct` | opening impulse extreme, prior-session threshold, and confirmed reversal trigger |
 | `shape_v1` | `history_sessions`, `min_sessions`, `stride_minutes`, `shape_base_rate_w`, `age_halflife_days`, `support_k` | path funnel, eight shape probabilities, and evidence; otherwise `null` |
 
@@ -135,10 +131,10 @@ It has these algo functions:
 | `crossover` | `fast`, `slow` | none |
 | `range_breakout` | `session`, `opening_range`, `rvol_open`, `last_close` | `direction`, `target_r`, `min_rvol`, `entry_cutoff_minutes`, `flat_minutes` |
 | `sentiment_pullback` | `session`, `opening_sentiment`, `pullback`, `last_close` | `hold_minutes`, `take_profit_pct`, `stop_loss_pct`, `pattern_exit`, `flat_minutes`, `capital_fraction` |
-| `momentum_continuation` | `session`, `first30_ret`, `atr_session`, `rvol_open`, `last_close` | `target_tickers`, `first30_min_pct`, `risk_atr_frac`, `target_r`, `min_rvol`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
-| `failed_gap` | `session`, `prior_session`, `atr_session`, `last_close` | `target_tickers`, `gap_min_pct`, `risk_atr_frac`, `target_r`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
-| `gap_continuation` | `session`, `prior_session`, `opening_range`, `atr_session`, `rvol_open`, `last_close` | `target_tickers`, `gap_min_pct`, `risk_atr_frac`, `target_r`, `min_rvol`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
-| `extreme_fade` | `session`, `session_extremes`, `atr_session`, `rvol_open`, `last_close` | `target_tickers`, `min_range_atr`, `stop_atr_frac`, `target_r`, `confirmation_bars`, `min_rvol`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
+| `momentum_continuation` | `session`, `first30_ret`, `atr_session`, `rvol_open`, `last_close` | `first30_min_pct`, `risk_atr_frac`, `target_r`, `min_rvol`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
+| `failed_gap` | `session`, `prior_session`, `atr_session`, `last_close` | `gap_min_pct`, `risk_atr_frac`, `target_r`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
+| `gap_continuation` | `session`, `prior_session`, `opening_range`, `atr_session`, `rvol_open`, `last_close` | `gap_min_pct`, `risk_atr_frac`, `target_r`, `min_rvol`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
+| `extreme_fade` | `session`, `session_extremes`, `atr_session`, `rvol_open`, `last_close` | `min_range_atr`, `stop_atr_frac`, `target_r`, `confirmation_bars`, `min_rvol`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
 
 Every algo output is `[is_entry, is_close_all, direction]`. Direction is `1`
 for long, `-1` for short, and `0` when quiet. Both actions cannot be true. A
@@ -151,25 +147,24 @@ opposite range edge is the stop and the target is `0.5R`. It enters at most once
 per session, blocks new entries inside ten minutes to close, and closes any
 open unit five minutes before the configured regular or early close.
 
-`sentiment_pullback` trades SNDK only. It fixes the opening direction after five
-minutes from the median SPY, QQQ, and SOXX return and requires SNDK to agree.
+`sentiment_pullback` fixes the opening direction after five minutes from the
+median SPY and QQQ return and requires the ticker being evaluated to agree.
 During the first 30 minutes it arms on an unusually large five-minute move
 against that direction. It enters against the impulse only after a later closed
 bar within `confirmation_bars` closes in the reversal direction beyond the
-extreme bar's close.
-Its threshold uses only complete prior sessions. It enters at most once per
-session, never adds to an open unit, and exits on its configured close-based
-profit, close-based loss, time, market-pattern, or end-of-session rule. One unit
-maps to at most 50% of capital; this signal service does not place or size
-brokerage orders.
+extreme bar's close. Its threshold uses only complete prior sessions. It enters
+at most once per session, never adds to an open unit, and exits on its configured
+close-based profit, close-based loss, time, market-pattern, or end-of-session
+rule. One unit maps to at most 50% of capital; this signal service does not place
+or size brokerage orders.
 
-The four migrated algorithms also trade SNDK only and enter at most once per
-regular session. `lateday_momentum` follows a large first-half-hour move late
-in the session. `failed_gap_reversal` fades a gap after price returns inside the
-prior range. `gap_play` follows a gap through the fifteen-minute opening range.
-`day_extreme_reversal` arms at a qualifying fresh high or low, then enters only
-when a later closed bar within `confirmation_bars` closes beyond the extreme
-bar's opposite edge.
+The four migrated algorithms run on every configured ticker and enter at most
+once per regular session. `lateday_momentum` follows a large first-half-hour
+move late in the session. `failed_gap_reversal` fades a gap after price returns
+inside the prior range. `gap_play` follows a gap through the fifteen-minute
+opening range. `day_extreme_reversal` arms at a qualifying fresh high or low,
+then enters only when a later closed bar within `confirmation_bars` closes
+beyond the extreme bar's opposite edge.
 Their brackets use the entry price and the day-constant fourteen-session ATR.
 All exits use the minute close. The algo context exposes regular bars through a
 read-only accessor capped at the evaluation timestamp; the extreme fade uses

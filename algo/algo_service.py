@@ -22,7 +22,6 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
-from broker import send_broker_orders
 from notify import send_trade_alerts
 from shape_signal import clear_shape_cache, normalize_shape_parameters, shape_v1
 from validation import require_float, require_int
@@ -93,16 +92,6 @@ class EvaluationError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class BrokerSettings:
-    enabled: bool
-    quantity: str
-    account_env: str
-    target_ticker: str
-    long_symbol: str
-    short_symbol: str
-
-
-@dataclass(frozen=True)
 class Settings:
     version: str
     database: Path
@@ -119,7 +108,6 @@ class Settings:
     signal_order: tuple[str, ...]
     algo_order: tuple[str, ...]
     algo_requirements: Mapping[str, frozenset[str]]
-    broker: BrokerSettings
     content: str
 
     def enabled_signals(self) -> tuple[str, ...]:
@@ -206,59 +194,6 @@ def _nodes(document: Mapping[str, Any], key: str) -> dict[str, Mapping[str, Any]
             "inputs": inputs,
         }
     return nodes
-
-
-def _broker_settings(
-    document: Mapping[str, Any], tickers: tuple[str, ...]
-) -> BrokerSettings:
-    raw = document.get("broker", {})
-    if not isinstance(raw, dict):
-        raise ConfigError("broker must be an object")
-    unknown = set(raw) - {
-        "enabled",
-        "quantity",
-        "account_env",
-        "target_ticker",
-        "long_symbol",
-        "short_symbol",
-    }
-    if unknown:
-        raise ConfigError("unknown broker settings: %s" % ", ".join(sorted(unknown)))
-    enabled = raw.get("enabled", False)
-    if not isinstance(enabled, bool):
-        raise ConfigError("broker.enabled must be boolean")
-    quantity = raw.get("quantity", "0")
-    if not isinstance(quantity, str) or not re.fullmatch(
-        r"\d+(?:\.\d{1,6})?", quantity
-    ):
-        raise ConfigError("broker.quantity must be a non-negative decimal string")
-    account_env = raw.get("account_env", "TRADER_ROBINHOOD_ACCOUNT")
-    if not isinstance(account_env, str) or not re.fullmatch(
-        r"[A-Z_][A-Z0-9_]*", account_env
-    ):
-        raise ConfigError("broker.account_env must be an environment variable name")
-
-    symbols = {}
-    for key, default in (
-        ("target_ticker", "SNDK"),
-        ("long_symbol", "SNXX"),
-        ("short_symbol", "SNDQ"),
-    ):
-        value = raw.get(key, default)
-        symbol = value.strip().upper() if isinstance(value, str) else ""
-        if symbol not in tickers:
-            raise ConfigError("broker.%s must name a configured ticker" % key)
-        symbols[key] = symbol
-    if symbols["long_symbol"] == symbols["short_symbol"]:
-        raise ConfigError("broker long and short symbols must differ")
-    return BrokerSettings(
-        enabled=enabled,
-        quantity=quantity,
-        account_env=account_env,
-        target_ticker=symbols["target_ticker"],
-        long_symbol=symbols["long_symbol"],
-        short_symbol=symbols["short_symbol"],
-    )
 
 
 def _compile_dependencies(
@@ -442,7 +377,6 @@ def load_settings(
         signal_order=signal_order,
         algo_order=algo_order,
         algo_requirements=algo_requirements,
-        broker=_broker_settings(document, tuple(normalized)),
         content=_json(document),
     )
     return settings
@@ -697,17 +631,13 @@ def _normalize_opening_sentiment(
     _parameter_keys(
         parameters,
         {
-            "target_tickers",
             "market_tickers",
             "minutes",
             "min_market_move_pct",
-            "require_target_agreement",
+            "require_ticker_agreement",
         },
     )
     return {
-        "target_tickers": _configured_tickers(
-            parameters.get("target_tickers"), "target_tickers", tickers
-        ),
         "market_tickers": _configured_tickers(
             parameters.get("market_tickers"), "market_tickers", tickers
         ),
@@ -715,8 +645,8 @@ def _normalize_opening_sentiment(
         "min_market_move_pct": _number(
             parameters.get("min_market_move_pct"), "min_market_move_pct"
         ),
-        "require_target_agreement": _boolean(
-            parameters.get("require_target_agreement"), "require_target_agreement"
+        "require_ticker_agreement": _boolean(
+            parameters.get("require_ticker_agreement"), "require_ticker_agreement"
         ),
     }
 
@@ -1523,12 +1453,11 @@ def _signal_opening_sentiment(
     session = inputs["session"]
     if session is None:
         return None
-    targets = parameters["target_tickers"]
     markets = parameters["market_tickers"]
     minutes = int(parameters["minutes"])
     min_market_move = float(parameters["min_market_move_pct"])
-    require_agreement = bool(parameters["require_target_agreement"])
-    if ticker not in targets or int(session["minute"]) < minutes:
+    require_agreement = bool(parameters["require_ticker_agreement"])
+    if int(session["minute"]) < minutes:
         return None
 
     session_open = int(session["open_ts"])
@@ -1537,10 +1466,10 @@ def _signal_opening_sentiment(
         _session_return_pct(connection, market, session_open, opening_end)
         for market in markets
     ]
-    target_return = _session_return_pct(
+    ticker_return = _session_return_pct(
         connection, ticker, session_open, opening_end
     )
-    if target_return is None or any(
+    if ticker_return is None or any(
         value is None for value in market_opening_returns
     ):
         return None
@@ -1552,7 +1481,7 @@ def _signal_opening_sentiment(
         if market_return <= -min_market_move and market_return < 0.0
         else 0
     )
-    agreed = market_direction != 0 and target_return * market_direction > 0.0
+    agreed = market_direction != 0 and ticker_return * market_direction > 0.0
     direction = market_direction if agreed or not require_agreement else 0
 
     current_returns = [
@@ -1573,8 +1502,8 @@ def _signal_opening_sentiment(
         "direction": direction,
         "market_direction": market_direction,
         "market_return_pct": market_return,
-        "target_return_pct": target_return,
-        "target_agreed": agreed,
+        "ticker_return_pct": ticker_return,
+        "ticker_agreed": agreed,
         "current_market_return_pct": current_market_return,
         "pattern_valid": pattern_valid,
         "minutes": minutes,
@@ -1979,10 +1908,6 @@ def _algo_sentiment_pullback(context: AlgoContext) -> tuple[bool, bool, int]:
     return False, False, 0
 
 
-def _algo_target_enabled(context: AlgoContext) -> bool:
-    return context.ticker in context.parameters["target_tickers"]
-
-
 def _algo_has_session_entry(context: AlgoContext) -> bool:
     return any(
         _algo_output(row["output"])[0] for row in context.session_outputs
@@ -2075,8 +2000,7 @@ def _algo_momentum_continuation(
     entry_cutoff = float(context.parameters["entry_cutoff_minutes"])
     flat_minutes = float(context.parameters["flat_minutes"])
     if (
-        not _algo_target_enabled(context)
-        or session is None
+        session is None
         or first30 is None
         or atr_session is None
         or rvol is None
@@ -2133,8 +2057,7 @@ def _algo_failed_gap(context: AlgoContext) -> tuple[bool, bool, int]:
     entry_cutoff = float(context.parameters["entry_cutoff_minutes"])
     flat_minutes = float(context.parameters["flat_minutes"])
     if (
-        not _algo_target_enabled(context)
-        or session is None
+        session is None
         or prior is None
         or atr_session is None
         or price is None
@@ -2210,8 +2133,7 @@ def _algo_gap_continuation(context: AlgoContext) -> tuple[bool, bool, int]:
     entry_cutoff = float(context.parameters["entry_cutoff_minutes"])
     flat_minutes = float(context.parameters["flat_minutes"])
     if (
-        not _algo_target_enabled(context)
-        or session is None
+        session is None
         or prior is None
         or opening_range is None
         or atr_session is None
@@ -2333,8 +2255,7 @@ def _algo_extreme_fade(context: AlgoContext) -> tuple[bool, bool, int]:
     entry_cutoff = float(context.parameters["entry_cutoff_minutes"])
     flat_minutes = float(context.parameters["flat_minutes"])
     if (
-        not _algo_target_enabled(context)
-        or session is None
+        session is None
         or extremes is None
         or atr_session is None
         or rvol is None
@@ -2458,18 +2379,13 @@ def _normalize_sentiment_pullback(
     }
 
 
-def _normalize_targeted_window(
+def _normalize_algo_window(
     parameters: Mapping[str, Any],
     tickers: tuple[str, ...],
     float_names: tuple[str, ...],
 ) -> dict[str, Any]:
-    _parameter_keys(
-        parameters, {"target_tickers", "minute_min", "minute_max", *float_names}
-    )
+    _parameter_keys(parameters, {"minute_min", "minute_max", *float_names})
     result: dict[str, Any] = {
-        "target_tickers": _configured_tickers(
-            parameters.get("target_tickers"), "target_tickers", tickers
-        ),
         "minute_min": require_int(
             parameters.get("minute_min"),
             "minute_min",
@@ -2491,7 +2407,7 @@ def _normalize_targeted_window(
 def _normalize_momentum_continuation(
     parameters: Mapping[str, Any], tickers: tuple[str, ...]
 ) -> Mapping[str, Any]:
-    return _normalize_targeted_window(
+    return _normalize_algo_window(
         parameters,
         tickers,
         (
@@ -2508,7 +2424,7 @@ def _normalize_momentum_continuation(
 def _normalize_failed_gap(
     parameters: Mapping[str, Any], tickers: tuple[str, ...]
 ) -> Mapping[str, Any]:
-    return _normalize_targeted_window(
+    return _normalize_algo_window(
         parameters,
         tickers,
         (
@@ -2524,7 +2440,7 @@ def _normalize_failed_gap(
 def _normalize_gap_continuation(
     parameters: Mapping[str, Any], tickers: tuple[str, ...]
 ) -> Mapping[str, Any]:
-    return _normalize_targeted_window(
+    return _normalize_algo_window(
         parameters,
         tickers,
         (
@@ -2543,7 +2459,7 @@ def _normalize_extreme_fade(
 ) -> Mapping[str, Any]:
     base_parameters = dict(parameters)
     confirmation_bars = base_parameters.pop("confirmation_bars", None)
-    result = _normalize_targeted_window(
+    result = _normalize_algo_window(
         base_parameters,
         tickers,
         (
@@ -3337,11 +3253,6 @@ def _report_alert_failure(config_path: Path, reason: str) -> None:
     _best_effort_log(config_path, "error", message)
 
 
-def _report_broker_result(config_path: Path, level: str, message: str) -> None:
-    getattr(logging, level)(message)
-    _best_effort_log(config_path, level, message)
-
-
 def cycle(
     config_path: Path,
     stop_event: Optional[threading.Event] = None,
@@ -3432,19 +3343,6 @@ def cycle(
                         config_path, reason
                     ),
                 )
-                if settings.broker.enabled:
-                    send_broker_orders(
-                        live_records,
-                        config_path=config_path,
-                        account_env=settings.broker.account_env,
-                        quantity=settings.broker.quantity,
-                        target_ticker=settings.broker.target_ticker,
-                        long_symbol=settings.broker.long_symbol,
-                        short_symbol=settings.broker.short_symbol,
-                        on_result=lambda level, message: _report_broker_result(
-                            config_path, level, message
-                        ),
-                    )
             if stats["pairs"] % CYCLE_PROGRESS_INTERVAL == 0:
                 progress = "cycle progress pairs=%d outputs=%d entries=%d exits=%d" % (
                     stats["pairs"], stats["outputs"], stats["entries"], stats["exits"]

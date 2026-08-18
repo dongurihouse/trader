@@ -79,14 +79,7 @@ class DashboardData:
         config = self.config()
         configured_tickers = [str(item) for item in config.get("tickers", [])]
         with self.connection() as connection:
-            database_tickers = [
-                row[0]
-                for row in connection.execute(
-                    "SELECT DISTINCT ticker FROM bars ORDER BY ticker"
-                )
-            ]
-            tickers = list(dict.fromkeys(configured_tickers + database_tickers))
-            quotes = [self._quote(connection, ticker) for ticker in tickers]
+            quotes = [self._quote(connection, ticker) for ticker in configured_tickers]
             if compact:
                 services = []
                 problems = []
