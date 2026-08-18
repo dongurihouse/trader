@@ -126,7 +126,6 @@ function renderRollup(payload) {
   $("#algo-return").textContent = returnPoints(totals.return);
   $("#algo-return").className = valueClass(totals.return);
   $("#algo-win-rate").textContent = totals.closed ? rate((totals.wins / totals.closed) * 100) : "—";
-  $("#return-basis").textContent = payload.return_basis;
 }
 
 function renderDefinition(algo) {

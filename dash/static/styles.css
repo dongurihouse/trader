@@ -1810,14 +1810,6 @@ pre {
   letter-spacing: -0.025em;
 }
 
-.algo-return-basis {
-  margin: 0;
-  color: var(--subtle);
-  font-family: var(--mono);
-  font-size: 0.55rem;
-  line-height: 1.5;
-}
-
 .algo-switcher {
   min-width: 0;
   padding: 10px;
