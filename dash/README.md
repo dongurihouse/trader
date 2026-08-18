@@ -52,7 +52,7 @@ the loopback ports configured by `bars.api_port` and `algo.api_port`.
 - Automatic entry and exit markers for the configured trading algo, read from `trades`.
 - Up/down marker direction for long and short actions, with action details on hover.
 - Hover inspection and click-locked bar focus update price, change, time, and shape probabilities.
-- Time zoom with the mouse wheel.
+- Time zoom with the mouse wheel or a two-finger pinch on touch screens.
 - Horizontal wheel, trackpad, Shift+wheel, and drag panning across the loaded minute history.
 - Ticker switching from the configured ticker list.
 - Automatic refresh every 30 seconds.
