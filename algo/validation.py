@@ -1,41 +1,14 @@
-"""Small shared value validators for the dependency-free services."""
+"""Compatibility imports for the repository-wide value validators."""
 
 from __future__ import annotations
 
-import math
-from typing import Any, Optional, Type
+import sys
+from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-def require_int(
-    value: Any,
-    name: str,
-    minimum: int = 1,
-    *,
-    error: Type[Exception] = ValueError,
-) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-        raise error("%s must be an integer >= %d" % (name, minimum))
-    return value
+from common.validation import require_float, require_int  # noqa: E402,F401
 
-
-def require_float(
-    value: Any,
-    name: str,
-    *,
-    minimum: Optional[float] = None,
-    nullable: bool = False,
-    error: Type[Exception] = ValueError,
-) -> Optional[float]:
-    if value is None and nullable:
-        return None
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(float(value))
-    ):
-        suffix = " or null" if nullable else ""
-        raise error("%s must be a finite number%s" % (name, suffix))
-    number = float(value)
-    if minimum is not None and number < minimum:
-        raise error("%s must be finite and >= %g" % (name, minimum))
-    return number
+__all__ = ("require_float", "require_int")

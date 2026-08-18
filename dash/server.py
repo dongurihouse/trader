@@ -10,6 +10,7 @@ import math
 import mimetypes
 import re
 import sqlite3
+import sys
 from contextlib import contextmanager
 from datetime import datetime, time, timedelta
 from http import HTTPStatus
@@ -20,11 +21,17 @@ from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import urlopen
 from zoneinfo import ZoneInfo
 
+DASH_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = DASH_ROOT.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from common.validation import normalize_symbol
+
 
 EASTERN = ZoneInfo("America/New_York")
 UTC = ZoneInfo("UTC")
-STATIC_DIR = Path(__file__).resolve().parent / "static"
-SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,24}$")
+STATIC_DIR = DASH_ROOT / "static"
 SERVICE_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 CHART_HISTORY_START = int(datetime(2026, 7, 6, tzinfo=EASTERN).timestamp())
 
@@ -1321,9 +1328,11 @@ class DashboardData:
 
     @staticmethod
     def _valid_symbol(value: str) -> str:
-        if not SYMBOL_PATTERN.fullmatch(value):
-            raise DashboardError("Invalid ticker")
-        return value.upper()
+        return normalize_symbol(
+            value,
+            error=DashboardError,
+            message="Invalid ticker",
+        )
 
 
 class DashboardHandler(BaseHTTPRequestHandler):

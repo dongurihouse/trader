@@ -24,7 +24,8 @@ token.
 - Store every Robinhood bar and record its `interpolated` flag.
 - Require a result block for every requested ticker before advancing work.
 - Upsert by `(ticker, ts)`, so every repeated fetch is safe.
-- Keep backfill and scheduled-sweep progress in `bar_jobs`, not log text.
+- Keep per-ticker backfill and scheduled-sweep progress in `bar_jobs`, not log
+  text. Mark a scheduled sweep complete only after its metadata refresh succeeds.
 - During each sweep, fetch configured provider indicators and upsert them into
   `bar_metadata`. The minute poll does not fetch indicators.
 - Serve process health and current operation at

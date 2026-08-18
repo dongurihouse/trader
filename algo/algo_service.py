@@ -12,6 +12,7 @@ import re
 import signal
 import sqlite3
 import statistics
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -24,42 +25,32 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
+ROOT = Path(__file__).resolve().parent
+REPO_ROOT = ROOT.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from common.metadata import normalize_provider_indicator
+from common.validation import (
+    normalize_symbol,
+    require_clock,
+    require_float,
+    require_int,
+)
+
 from broker import send_broker_orders
 from notify import send_trade_alerts
 from shape_signal import clear_shape_cache, normalize_shape_parameters, shape_v1
-from validation import require_float, require_int
 
 
-ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG = ROOT.parent / "config" / "config.json"
 SCHEMA = ROOT.parent / "config" / "schema.sql"
 UTC = timezone.utc
 EASTERN = ZoneInfo("America/New_York")
-SYMBOL = re.compile(r"^[A-Z][A-Z0-9.-]{0,14}$")
 BAR_FIELDS = {"open", "high", "low", "close", "volume"}
 CYCLE_PAIR_LIMIT = 2_000
 CYCLE_PROGRESS_INTERVAL = 1_000
 ALERT_CLOSE_GRACE_SECONDS = 5 * 60
-METADATA_DEFAULTS = {
-    "ema": {"period": 9},
-    "sma": {"period": 9},
-    "rsi": {"period": 14},
-    "momentum": {"period": 12},
-    "roc": {"period": 14},
-    "cci": {"period": 14},
-    "williams_r": {"period": 10},
-    "atr": {"period": 14},
-    "mfi": {"period": 14},
-    "adx": {"period": 10},
-    "donchian_channels": {"period": 20},
-    "bollinger_bands": {"period": 20, "num_std": 2},
-    "macd": {"fast_period": 12, "slow_period": 26, "signal_period": 9},
-    "keltner_channels": {"period": 20, "multiplier": 2},
-    "supertrend": {"period": 10, "multiplier": 3},
-    "vwap": {},
-    "obv": {},
-    "pivot_points": {"method": "classic"},
-}
 _RVOL_BASELINES: dict[
     tuple[str, str, date, int, int], Optional[tuple[float, ...]]
 ] = {}
@@ -167,18 +158,6 @@ class AlgoContext:
     ]
 
 
-def _clock(value: Any, name: str) -> clock_time:
-    if not isinstance(value, str):
-        raise ConfigError("%s must be HH:MM" % name)
-    try:
-        parsed = clock_time.fromisoformat(value)
-    except ValueError as exc:
-        raise ConfigError("%s must be HH:MM" % name) from exc
-    if parsed.second or parsed.microsecond:
-        raise ConfigError("%s must be precise to the minute" % name)
-    return parsed
-
-
 def _nodes(document: Mapping[str, Any], key: str) -> dict[str, Mapping[str, Any]]:
     raw = document.get(key, {})
     if not isinstance(raw, dict):
@@ -256,12 +235,12 @@ def _broker_settings(
         mapping: dict[str, str] = {}
         for direction in ("long", "short"):
             value = raw_mapping[direction]
-            symbol = value.strip().upper() if isinstance(value, str) else ""
-            if not SYMBOL.fullmatch(symbol):
-                raise ConfigError(
-                    "broker.execution_tickers.%s.%s must be a ticker"
-                    % (ticker, direction)
-                )
+            symbol = normalize_symbol(
+                value,
+                error=ConfigError,
+                message="broker.execution_tickers.%s.%s must be a ticker"
+                % (ticker, direction),
+            )
             mapping[direction] = symbol
         if mapping["long"] == mapping["short"]:
             raise ConfigError(
@@ -343,9 +322,7 @@ def load_settings(
         raise ConfigError("tickers must be a non-empty list")
     normalized: list[str] = []
     for value in tickers:
-        ticker = value.strip().upper() if isinstance(value, str) else ""
-        if not SYMBOL.fullmatch(ticker):
-            raise ConfigError("invalid ticker: %r" % value)
+        ticker = normalize_symbol(value, error=ConfigError)
         if ticker not in normalized:
             normalized.append(ticker)
 
@@ -438,14 +415,20 @@ def load_settings(
         api_port=require_int(
             algo.get("api_port", 8791), "algo.api_port", 1024, error=ConfigError
         ),
-        regular_open=_clock(
-            polling.get("regular_open", "09:30"), "live_polling.regular_open"
+        regular_open=require_clock(
+            polling.get("regular_open", "09:30"),
+            "live_polling.regular_open",
+            error=ConfigError,
         ),
-        regular_close=_clock(
-            polling.get("regular_close", "16:00"), "live_polling.regular_close"
+        regular_close=require_clock(
+            polling.get("regular_close", "16:00"),
+            "live_polling.regular_close",
+            error=ConfigError,
         ),
-        early_close=_clock(
-            polling.get("early_close", "13:00"), "live_polling.early_close"
+        early_close=require_clock(
+            polling.get("early_close", "13:00"),
+            "live_polling.early_close",
+            error=ConfigError,
         ),
         early_close_days=early_close_days,
         signals=signals,
@@ -717,18 +700,8 @@ def _normalize_sma(
 def _normalize_metadata(
     parameters: Mapping[str, Any], tickers: tuple[str, ...]
 ) -> Mapping[str, Any]:
-    name = parameters.get("name")
-    if name not in METADATA_DEFAULTS:
-        raise ConfigError("name must be a supported provider indicator")
-    supplied = {key: value for key, value in parameters.items() if key != "name"}
-    unknown = set(supplied) - set(METADATA_DEFAULTS[name])
-    if unknown:
-        raise ConfigError(
-            "unsupported provider parameters: %s" % ", ".join(sorted(unknown))
-        )
-    normalized = dict(METADATA_DEFAULTS[name])
-    normalized.update(supplied)
-    return {"name": name, "query_key": _json(normalized)}
+    name, query_key = normalize_provider_indicator(parameters, error=ConfigError)
+    return {"name": name, "query_key": query_key}
 
 
 def _normalize_int_parameter(

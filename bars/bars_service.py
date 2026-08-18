@@ -5,12 +5,10 @@ import argparse
 import asyncio
 import csv
 import fcntl
-import io
 import json
 import logging
 import math
 import os
-import re
 import signal
 import sqlite3
 import sys
@@ -29,6 +27,19 @@ from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
+ROOT = Path(__file__).resolve().parent
+REPO_ROOT = ROOT.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from common.metadata import normalize_provider_indicator
+from common.validation import (
+    is_symbol,
+    normalize_symbol,
+    require_clock,
+    require_int,
+)
+
 import httpx2
 from mcp import ClientSession
 from mcp.client.auth import OAuthClientProvider, TokenStorage
@@ -41,34 +52,22 @@ from mcp.shared.auth import (
 )
 from pydantic import AnyUrl
 
-ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = ROOT.parent / "config" / "config.json"
 SCHEMA_PATH = ROOT.parent / "config" / "schema.sql"
 EASTERN = ZoneInfo("America/New_York")
 UTC = timezone.utc
-SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.-]{0,14}$")
 TECHNICAL_TOOL = "get_equity_technical_indicators"
 TECHNICAL_CHUNK_DAYS = 3
-TECHNICAL_DEFAULTS = {
-    "ema": {"period": 9},
-    "sma": {"period": 9},
-    "rsi": {"period": 14},
-    "momentum": {"period": 12},
-    "roc": {"period": 14},
-    "cci": {"period": 14},
-    "williams_r": {"period": 10},
-    "atr": {"period": 14},
-    "mfi": {"period": 14},
-    "adx": {"period": 10},
-    "donchian_channels": {"period": 20},
-    "bollinger_bands": {"period": 20, "num_std": 2},
-    "macd": {"fast_period": 12, "slow_period": 26, "signal_period": 9},
-    "keltner_channels": {"period": 20, "multiplier": 2},
-    "supertrend": {"period": 10, "multiplier": 3},
-    "vwap": {},
-    "obv": {},
-    "pivot_points": {"method": "classic"},
-}
+BAR_COLUMNS = (
+    "ticker",
+    "ts",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "interpolated",
+)
 LIVE_INT_FIELDS = (
     ("after_close_minutes", 240, 0),
     ("poll_seconds", 60, 30),
@@ -140,35 +139,20 @@ class Settings:
     technical_specs: Tuple[TechnicalSpec, ...]
 
 
-def _positive_int(value, name: str, minimum: int = 1) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-        raise ConfigError("%s must be an integer >= %d" % (name, minimum))
-    return value
-
-
 def _positive_int_fields(
     raw: dict,
     section: str,
     fields: Sequence[Tuple[str, int, int]],
 ) -> Dict[str, int]:
     return {
-        name: _positive_int(
-            raw.get(name, default), "%s.%s" % (section, name), minimum
+        name: require_int(
+            raw.get(name, default),
+            "%s.%s" % (section, name),
+            minimum,
+            error=ConfigError,
         )
         for name, default, minimum in fields
     }
-
-
-def _clock(value, name: str) -> clock_time:
-    if not isinstance(value, str):
-        raise ConfigError("%s must be HH:MM" % name)
-    try:
-        parsed = clock_time.fromisoformat(value)
-    except ValueError as exc:
-        raise ConfigError("%s must be HH:MM" % name) from exc
-    if parsed.second or parsed.microsecond:
-        raise ConfigError("%s must be precise to the minute" % name)
-    return parsed
 
 
 def _technical_specs(raw: dict) -> Tuple[TechnicalSpec, ...]:
@@ -183,48 +167,13 @@ def _technical_specs(raw: dict) -> Tuple[TechnicalSpec, ...]:
         configured = node.get("params")
         if not isinstance(configured, dict):
             raise ConfigError("signals.%s.params must be a JSON object" % signal_name)
-        name = configured.get("name")
-        if name not in TECHNICAL_DEFAULTS:
-            raise ConfigError(
-                "signals.%s.params.name is not a supported provider indicator"
-                % signal_name
+        try:
+            name, encoded = normalize_provider_indicator(
+                configured,
+                error=ConfigError,
             )
-        supplied = {key: value for key, value in configured.items() if key != "name"}
-        unknown = set(supplied) - set(TECHNICAL_DEFAULTS[name])
-        if unknown:
-            raise ConfigError(
-                "signals.%s has unsupported parameters: %s"
-                % (signal_name, ", ".join(sorted(unknown)))
-            )
-        parameters = dict(TECHNICAL_DEFAULTS[name])
-        parameters.update(supplied)
-        for key, value in parameters.items():
-            if key.endswith("period") or key == "period":
-                if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-                    raise ConfigError(
-                        "signals.%s.params.%s must be a positive integer"
-                        % (signal_name, key)
-                    )
-            elif key in ("num_std", "multiplier"):
-                if (
-                    isinstance(value, bool)
-                    or not isinstance(value, (int, float))
-                    or not math.isfinite(float(value))
-                    or value <= 0
-                ):
-                    raise ConfigError(
-                        "signals.%s.params.%s must be a positive number"
-                        % (signal_name, key)
-                    )
-            elif key == "method" and value != "classic":
-                raise ConfigError(
-                    "signals.%s.params.method must be 'classic'" % signal_name
-                )
-        if name == "macd" and parameters["fast_period"] >= parameters["slow_period"]:
-            raise ConfigError(
-                "signals.%s fast_period must be less than slow_period" % signal_name
-            )
-        encoded = json.dumps(parameters, separators=(",", ":"), sort_keys=True)
+        except ConfigError as exc:
+            raise ConfigError("signals.%s.params: %s" % (signal_name, exc)) from exc
         key = (name, encoded)
         if key not in seen:
             seen.add(key)
@@ -249,9 +198,7 @@ def load_settings(path: Path) -> Settings:
     for value in tickers_raw:
         if not isinstance(value, str):
             raise ConfigError("every ticker must be a string")
-        ticker = value.strip().upper()
-        if not SYMBOL_RE.fullmatch(ticker):
-            raise ConfigError("invalid ticker: %r" % value)
+        ticker = normalize_symbol(value, error=ConfigError)
         if ticker not in tickers:
             tickers.append(ticker)
 
@@ -306,14 +253,18 @@ def load_settings(path: Path) -> Settings:
 
     return Settings(
         tickers=tuple(tickers),
-        live_start=_clock(live.get("start", "04:00"), "live_polling.start"),
-        regular_close=_clock(
+        live_start=require_clock(
+            live.get("start", "04:00"), "live_polling.start", error=ConfigError
+        ),
+        regular_close=require_clock(
             live.get("regular_close", "16:00"),
             "live_polling.regular_close",
+            error=ConfigError,
         ),
-        early_close=_clock(
+        early_close=require_clock(
             live.get("early_close", "13:00"),
             "live_polling.early_close",
+            error=ConfigError,
         ),
         early_close_days=early_close_days,
         after_close_minutes=live_ints["after_close_minutes"],
@@ -430,7 +381,7 @@ class MetadataPoint:
 
 
 def _bar_row(ticker: str, raw: object) -> BarRow:
-    if not isinstance(ticker, str) or not SYMBOL_RE.fullmatch(ticker):
+    if not is_symbol(ticker):
         raise RelayError("Robinhood result has an invalid symbol")
     if not isinstance(raw, dict):
         raise RelayError("Robinhood returned a malformed bar")
@@ -470,7 +421,7 @@ def _bar_rows(
         if not isinstance(result, dict):
             raise RelayError("Robinhood result block is not an object")
         symbol = result.get("symbol")
-        if not isinstance(symbol, str) or not SYMBOL_RE.fullmatch(symbol):
+        if not is_symbol(symbol):
             raise RelayError("Robinhood result has an invalid symbol")
         bars = result.get("bars")
         if not isinstance(bars, list):
@@ -643,21 +594,36 @@ class _OAuthCallbackHandler(BaseHTTPRequestHandler):
 
 class BrowserOAuthCallbacks:
     def __init__(self, port: int):
-        self.server = HTTPServer(("127.0.0.1", port), _OAuthCallbackHandler)
-        self.server.timeout = 300
-        self.server.callback_path = None
+        self.port = port
+        self.server: Optional[HTTPServer] = None
+
+    def _server(self) -> HTTPServer:
+        if self.server is None:
+            self.server = HTTPServer(
+                ("127.0.0.1", self.port), _OAuthCallbackHandler
+            )
+            self.server.timeout = 300
+            self.server.callback_path = None
+        return self.server
+
+    def close(self) -> None:
+        if self.server is not None:
+            self.server.server_close()
+            self.server = None
 
     async def redirect(self, authorization_url: str) -> None:
+        self._server()
         print("Opening Robinhood authorization in your browser.")
         print(authorization_url)
         webbrowser.open(authorization_url)
 
     async def callback(self) -> AuthorizationCodeResult:
+        server = self._server()
         try:
-            await asyncio.to_thread(self.server.handle_request)
+            await asyncio.to_thread(server.handle_request)
         finally:
-            self.server.server_close()
-        callback_path = self.server.callback_path
+            self.close()
+        callback_path = server.callback_path
         if not callback_path:
             raise RelayAuthRequired("Robinhood authorization timed out; run: make auth")
         parameters = parse_qs(urlparse(callback_path).query)
@@ -734,7 +700,7 @@ class RobinhoodClient:
                     )
                 await asyncio.sleep(0.25)
 
-    def _oauth(self, interactive: bool) -> OAuthClientProvider:
+    def _oauth(self, interactive: bool):
         callbacks = (
             BrowserOAuthCallbacks(self.settings.oauth_callback_port)
             if interactive
@@ -743,26 +709,31 @@ class RobinhoodClient:
         callback_url = (
             "http://127.0.0.1:%d/callback" % self.settings.oauth_callback_port
         )
-        return OAuthClientProvider(
-            server_url=self.settings.url,
-            client_metadata=OAuthClientMetadata(
-                client_name="bars",
-                redirect_uris=[AnyUrl(callback_url)],
-                grant_types=["authorization_code", "refresh_token"],
-                response_types=["code"],
-                scope="internal",
-                token_endpoint_auth_method="none",
-                application_type="native",
+        return (
+            OAuthClientProvider(
+                server_url=self.settings.url,
+                client_metadata=OAuthClientMetadata(
+                    client_name="bars",
+                    redirect_uris=[AnyUrl(callback_url)],
+                    grant_types=["authorization_code", "refresh_token"],
+                    response_types=["code"],
+                    scope="internal",
+                    token_endpoint_auth_method="none",
+                    application_type="native",
+                ),
+                storage=self.storage,
+                redirect_handler=callbacks.redirect,
+                callback_handler=callbacks.callback,
             ),
-            storage=self.storage,
-            redirect_handler=callbacks.redirect,
-            callback_handler=callbacks.callback,
+            callbacks,
         )
 
     async def _open_session(
         self, stack: AsyncExitStack, interactive: bool
     ) -> ClientSession:
-        oauth = self._oauth(interactive)
+        oauth, callbacks = self._oauth(interactive)
+        if isinstance(callbacks, BrowserOAuthCallbacks):
+            stack.callback(callbacks.close)
         timeout = httpx2.Timeout(float(self.settings.timeout_seconds))
         http_client = await stack.enter_async_context(
             httpx2.AsyncClient(
@@ -959,9 +930,7 @@ class JobRef:
 
 @dataclass(frozen=True)
 class JobState:
-    kind: str
     scope: str
-    target: str
     window_start: int
     window_end: int
     progress_ts: Optional[int]
@@ -1024,7 +993,6 @@ class BarStore:
             raise ValueError("job and progress_ts must be supplied together")
         stats = {
             "received": len(bars),
-            "written": 0,
             "interpolated": sum(int(bar.interpolated) for bar in bars),
         }
         fetched_at = _epoch(datetime.now(UTC))
@@ -1065,7 +1033,6 @@ class BarStore:
                         for scope in job.scopes
                     ],
                 )
-        stats["written"] = len(rows)
         return stats
 
     def store_metadata(
@@ -1159,7 +1126,7 @@ class BarStore:
         placeholders = ",".join("?" for _ in scopes)
         rows = self.connection.execute(
             """
-            SELECT kind, scope, target, window_start, window_end, progress_ts
+            SELECT scope, window_start, window_end, progress_ts
             FROM bar_jobs
             WHERE kind=? AND target=? AND completed_at IS NULL
               AND scope IN (%s)
@@ -1211,17 +1178,20 @@ class BarStore:
             (limit,),
         ).fetchall()
 
-    def sweep_complete(self, day: date) -> bool:
+    def sweep_complete(self, day: date, tickers: Sequence[str]) -> bool:
+        if not tickers:
+            return False
+        scopes = tuple(dict.fromkeys(tickers))
+        placeholders = ",".join("?" for _ in scopes)
         row = self.connection.execute(
             """
-            SELECT 1 FROM bar_jobs
-            WHERE kind='sweep' AND scope='all' AND target=?
+            SELECT COUNT(DISTINCT scope) AS completed FROM bar_jobs
+            WHERE kind='sweep' AND target=? AND scope IN (%s)
               AND completed_at IS NOT NULL
-            LIMIT 1
-            """,
-            (day.isoformat(),),
+            """ % placeholders,
+            (day.isoformat(), *scopes),
         ).fetchone()
-        return row is not None
+        return int(row["completed"]) == len(scopes)
 
     def summary(self, tickers: Sequence[str]) -> List[sqlite3.Row]:
         placeholders = ",".join("?" for _ in tickers)
@@ -1250,8 +1220,8 @@ class BarStore:
             clauses.append("ts<=?")
             arguments.append(_query_epoch(end, end=True))
         query = (
-            "SELECT ticker, ts, open, high, low, close, volume, interpolated "
-            "FROM bars WHERE %s ORDER BY ts" % " AND ".join(clauses)
+            "SELECT %s FROM bars WHERE %s ORDER BY ts"
+            % (", ".join(BAR_COLUMNS), " AND ".join(clauses))
         )
         if limit:
             query += " LIMIT ?"
@@ -1265,6 +1235,36 @@ class Collector:
         self.store = store
         self.provider = provider or RobinhoodClient(settings.provider)
 
+    async def _fetch_range(
+        self,
+        session,
+        symbols: Sequence[str],
+        start: datetime,
+        end: datetime,
+        job: Optional[JobRef] = None,
+    ) -> Dict[str, int]:
+        total = Counter(received=0, interpolated=0)
+        start = start.astimezone(UTC)
+        end = end.astimezone(UTC)
+        for chunk_start, chunk_end in _collection_chunks(self.settings, start, end):
+            start_iso = _iso_utc(chunk_start)
+            end_iso = _iso_utc(chunk_end)
+            logging.info(
+                "fetching %s from %s through %s",
+                ",".join(symbols),
+                start_iso,
+                end_iso,
+            )
+            bars = await session.fetch_bars(symbols, start_iso, end_iso)
+            total.update(
+                self.store.store_bars(
+                    bars,
+                    job=job,
+                    progress_ts=_epoch(chunk_end) if job is not None else None,
+                )
+            )
+        return total
+
     async def fetch_range(
         self,
         symbols: Sequence[str],
@@ -1272,30 +1272,8 @@ class Collector:
         end: datetime,
         job: Optional[JobRef] = None,
     ) -> Dict[str, int]:
-        total = Counter(received=0, written=0, interpolated=0)
-        start = start.astimezone(UTC)
-        end = end.astimezone(UTC)
         async with self.provider.session() as session:
-            for chunk_start, chunk_end in _collection_chunks(
-                self.settings, start, end
-            ):
-                start_iso = _iso_utc(chunk_start)
-                end_iso = _iso_utc(chunk_end)
-                logging.info(
-                    "fetching %s from %s through %s",
-                    ",".join(symbols),
-                    start_iso,
-                    end_iso,
-                )
-                bars = await session.fetch_bars(symbols, start_iso, end_iso)
-                total.update(
-                    self.store.store_bars(
-                        bars,
-                        job=job,
-                        progress_ts=_epoch(chunk_end) if job is not None else None,
-                    )
-                )
-        return total
+            return await self._fetch_range(session, symbols, start, end, job)
 
     async def fetch_metadata_range(
         self, start: datetime, end: datetime, refreshed_after: int
@@ -1346,18 +1324,34 @@ class Collector:
         return total
 
     async def _run_jobs(
-        self, kind: str, target: str, jobs: Sequence[JobState]
+        self,
+        kind: str,
+        target: str,
+        jobs: Sequence[JobState],
+        complete: bool = True,
     ) -> Dict[str, int]:
-        total = Counter(received=0, written=0, interpolated=0)
+        total = Counter(received=0, interpolated=0)
         groups: Dict[Tuple[int, int, Optional[int]], List[str]] = {}
         for job in jobs:
             key = (job.window_start, job.window_end, job.progress_ts)
             groups.setdefault(key, []).append(job.scope)
+
+        pending = []
         for (window_start, window_end, progress_ts), scopes in groups.items():
             start_ts = window_start if progress_ts is None else progress_ts + 1
             if start_ts <= window_end:
+                pending.append((start_ts, window_end, scopes))
+            elif complete:
+                self.store.complete_jobs(kind, scopes, target)
+
+        if not pending:
+            return total
+
+        async with self.provider.session() as session:
+            for start_ts, window_end, scopes in pending:
                 total.update(
-                    await self.fetch_range(
+                    await self._fetch_range(
+                        session,
                         scopes,
                         datetime.fromtimestamp(start_ts, UTC),
                         datetime.fromtimestamp(window_end, UTC),
@@ -1368,7 +1362,8 @@ class Collector:
                         ),
                     )
                 )
-            self.store.complete_jobs(kind, scopes, target)
+                if complete:
+                    self.store.complete_jobs(kind, scopes, target)
         return total
 
     async def poll(self, now: Optional[datetime] = None) -> Dict[str, int]:
@@ -1384,14 +1379,15 @@ class Collector:
                 start_ts = _epoch(floor)
             groups.setdefault(start_ts, []).append(ticker)
 
-        total = Counter(received=0, written=0, interpolated=0)
-        for start_ts, tickers in sorted(groups.items()):
-            start = datetime.fromtimestamp(start_ts, UTC)
-            end = min(
-                current,
-                start + timedelta(days=self.settings.poll_catchup_days),
-            )
-            total.update(await self.fetch_range(tickers, start, end))
+        total = Counter(received=0, interpolated=0)
+        async with self.provider.session() as session:
+            for start_ts, tickers in sorted(groups.items()):
+                start = datetime.fromtimestamp(start_ts, UTC)
+                end = min(
+                    current,
+                    start + timedelta(days=self.settings.poll_catchup_days),
+                )
+                total.update(await self._fetch_range(session, tickers, start, end))
         self._record("poll complete", total)
         return total
 
@@ -1415,45 +1411,40 @@ class Collector:
             metadata_end = current
         else:
             target = scheduled_day.isoformat()
+            selected = tuple(self.settings.tickers)
             self.store.ensure_jobs(
                 "sweep",
-                ("all",),
+                selected,
                 target,
                 _epoch(start),
                 _epoch(current),
             )
-            jobs = self.store.incomplete_jobs("sweep", ("all",), target)
+            jobs = self.store.incomplete_jobs("sweep", selected, target)
             if not jobs:
-                return Counter(received=0, written=0, interpolated=0)
-            sweep_job = jobs[0]
-            selected = tuple(self.settings.tickers)
-            resume = (
-                sweep_job.window_start
-                if sweep_job.progress_ts is None
-                else sweep_job.progress_ts + 1
+                return Counter(received=0, interpolated=0)
+            stats = await self._run_jobs(
+                "sweep",
+                target,
+                jobs,
+                complete=False,
             )
-            if resume <= sweep_job.window_end:
-                stats = await self.fetch_range(
-                    selected,
-                    datetime.fromtimestamp(resume, UTC),
-                    datetime.fromtimestamp(sweep_job.window_end, UTC),
-                    job=JobRef(
-                        kind="sweep",
-                        target=target,
-                        scopes=("all",),
-                    ),
-                )
-            else:
-                stats = Counter(received=0, written=0, interpolated=0)
-            metadata_start = datetime.fromtimestamp(sweep_job.window_start, UTC)
-            metadata_end = datetime.fromtimestamp(sweep_job.window_end, UTC)
+            metadata_start = datetime.fromtimestamp(
+                min(job.window_start for job in jobs), UTC
+            )
+            metadata_end = datetime.fromtimestamp(
+                max(job.window_end for job in jobs), UTC
+            )
         metadata_stats = await self.fetch_metadata_range(
             metadata_start,
             metadata_end,
             metadata_refreshed_after,
         )
         if scheduled:
-            self.store.complete_jobs("sweep", ("all",), target)
+            self.store.complete_jobs(
+                "sweep",
+                tuple(job.scope for job in jobs),
+                target,
+            )
         prefix = "sweep complete"
         if scheduled_day is not None:
             prefix += " day=%s" % scheduled_day.isoformat()
@@ -1641,7 +1632,9 @@ class Service:
         if start <= now < final_at:
             await self.collector.poll(now)
             return self.settings.poll_seconds
-        if now >= final_at and not self.collector.store.sweep_complete(day):
+        if now >= final_at and not self.collector.store.sweep_complete(
+            day, self.settings.tickers
+        ):
             await self.collector.sweep(now, scheduled_day=day)
         return self.settings.idle_seconds
 
@@ -1828,25 +1821,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if arguments.format == "json":
                 print(json.dumps(objects, indent=2))
             else:
-                output = io.StringIO()
-                fields = (
-                    list(objects[0].keys())
-                    if objects
-                    else [
-                        "ticker",
-                        "ts",
-                        "open",
-                        "high",
-                        "low",
-                        "close",
-                        "volume",
-                        "interpolated",
-                    ]
-                )
-                writer = csv.DictWriter(output, fieldnames=fields)
+                writer = csv.DictWriter(sys.stdout, fieldnames=BAR_COLUMNS)
                 writer.writeheader()
                 writer.writerows(objects)
-                sys.stdout.write(output.getvalue())
         return 0
     except (ConfigError, RelayError, sqlite3.Error, OSError) as exc:
         logging.error("%s", exc)
