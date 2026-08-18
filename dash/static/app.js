@@ -732,15 +732,14 @@ class PriceChart {
       const pointX = x(index);
       const priceY = y(bar.close);
       const color = isEntry ? "#70d8dc" : "#ff7b73";
-      const actionText = isEntry ? "IN" : "OUT";
-      const actionWidth = isEntry ? 28 : 34;
+      const actionText = `${isEntry ? "IN" : "OUT"} ${isLong ? "↑" : "↓"}`;
+      ctx.font = "700 9px ui-monospace, SFMono-Regular, monospace";
+      const actionWidth = Math.ceil(ctx.measureText(actionText).width) + 12;
       const summary = isEntry ? null : exitSummaries.get(this.tradeKey(trade));
       const formattedReturn = formatTradeReturn(summary?.averageReturnPct);
       const returnText = formattedReturn
         ? `${summary.entryCount > 1 ? "AVG " : ""}${formattedReturn}`
         : null;
-
-      ctx.font = "700 9px ui-monospace, SFMono-Regular, monospace";
       const returnWidth = returnText ? Math.ceil(ctx.measureText(returnText).width) + 12 : 0;
       const badgeGap = returnText ? 4 : 0;
       const actionLeft = Math.max(
