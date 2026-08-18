@@ -7,6 +7,7 @@ import sqlite3
 import statistics
 from dataclasses import dataclass
 from datetime import date, datetime
+from functools import lru_cache
 from typing import Any, Callable, Mapping, Optional, Sequence
 from zoneinfo import ZoneInfo
 
@@ -82,6 +83,18 @@ def _template(name: str, x: float) -> float:
     return 0.0
 
 
+@lru_cache(maxsize=256)
+def _template_rows(
+    duration: int, sample_minutes: tuple[float, ...]
+) -> Mapping[str, tuple[float, ...]]:
+    scale = max(float(duration), 1.0)
+    return {
+        name: tuple(_template(name, minute / scale) for minute in sample_minutes)
+        for name in SHAPES
+        if name != "range"
+    }
+
+
 def classify_shape(
     minutes: Sequence[float],
     returns: Sequence[float],
@@ -107,11 +120,12 @@ def classify_shape(
     scale = max(max(abs(value) for value in centered), 1e-9)
     normalized = [value / scale for value in centered]
     candidates = [name for name in SHAPES if name != "range"]
+    templates = _template_rows(duration, tuple(sample_minutes))
 
     def mse(name: str) -> float:
         errors = [
-            (value - _template(name, minute / max(float(duration), 1.0))) ** 2
-            for minute, value in zip(sample_minutes, normalized)
+            (value - expected) ** 2
+            for value, expected in zip(normalized, templates[name])
         ]
         return sum(errors) / len(errors)
 
@@ -366,37 +380,56 @@ def _probabilities(values: Mapping[str, float]) -> dict[str, float]:
     return result
 
 
-def _parameters(parameters: Mapping[str, Any]) -> tuple[int, int, int, float, float, float]:
+def normalize_shape_parameters(
+    parameters: Mapping[str, Any], error: type[Exception] = ValueError
+) -> dict[str, Any]:
     unknown = set(parameters) - _PARAMETERS
     if unknown:
-        raise ValueError("unknown shape params: %s" % ", ".join(sorted(unknown)))
+        raise error("unknown shape params: %s" % ", ".join(sorted(unknown)))
 
-    history_sessions = require_int(parameters.get("history_sessions", 120), "history_sessions")
-    min_sessions = require_int(parameters.get("min_sessions", 8), "min_sessions")
-    stride_minutes = require_int(parameters.get("stride_minutes", 5), "stride_minutes")
+    history_sessions = require_int(
+        parameters.get("history_sessions", 120), "history_sessions", error=error
+    )
+    min_sessions = require_int(
+        parameters.get("min_sessions", 8), "min_sessions", error=error
+    )
+    stride_minutes = require_int(
+        parameters.get("stride_minutes", 5), "stride_minutes", error=error
+    )
     shape_base_rate_w = float(
-        require_float(parameters.get("shape_base_rate_w", 0.1), "shape_base_rate_w", minimum=0.0)
+        require_float(
+            parameters.get("shape_base_rate_w", 0.1),
+            "shape_base_rate_w",
+            minimum=0.0,
+            error=error,
+        )
     )
     if shape_base_rate_w > 1.0:
-        raise ValueError("shape_base_rate_w must be <= 1")
+        raise error("shape_base_rate_w must be <= 1")
     age_halflife_days = float(
         require_float(
             parameters.get("age_halflife_days", 365.0),
             "age_halflife_days",
             minimum=1e-9,
+            error=error,
         )
     )
     support_k = float(
-        require_float(parameters.get("support_k", 8.0), "support_k", minimum=1e-9)
+        require_float(
+            parameters.get("support_k", 8.0),
+            "support_k",
+            minimum=1e-9,
+            error=error,
+        )
     )
-    return (
-        history_sessions,
-        min_sessions,
-        stride_minutes,
-        shape_base_rate_w,
-        age_halflife_days,
-        support_k,
-    )
+    return {
+        "history_sessions": history_sessions,
+        "min_sessions": min_sessions,
+        "stride_minutes": stride_minutes,
+        "shape_base_rate_w": shape_base_rate_w,
+        "age_halflife_days": age_halflife_days,
+        "support_k": support_k,
+    }
 
 
 def _preopen_shape(
@@ -481,14 +514,12 @@ def _shape_v1(
     session_window: Callable[[Any, int], tuple[date, int, int]],
     session_bars: Callable[..., Sequence[sqlite3.Row]],
 ) -> Optional[dict[str, Any]]:
-    (
-        history_sessions,
-        min_sessions,
-        stride_minutes,
-        shape_base_rate_w,
-        age_halflife_days,
-        support_k,
-    ) = _parameters(parameters)
+    history_sessions = int(parameters["history_sessions"])
+    min_sessions = int(parameters["min_sessions"])
+    stride_minutes = int(parameters["stride_minutes"])
+    shape_base_rate_w = float(parameters["shape_base_rate_w"])
+    age_halflife_days = float(parameters["age_halflife_days"])
+    support_k = float(parameters["support_k"])
     today, session_open, session_close = session_window(settings, ts)
     if ts >= session_close:
         return None

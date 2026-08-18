@@ -21,7 +21,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
-from shape_signal import clear_shape_cache, shape_v1
+from shape_signal import clear_shape_cache, normalize_shape_parameters, shape_v1
 from validation import require_float, require_int
 
 
@@ -120,12 +120,14 @@ def _json(value: Any) -> str:
 class SignalSpec:
     function: Callable[..., Any]
     inputs: tuple[str, ...]
+    normalize: Callable[[Mapping[str, Any], tuple[str, ...]], Mapping[str, Any]]
 
 
 @dataclass(frozen=True)
 class AlgoSpec:
     function: Callable[..., tuple[bool, bool, int]]
     input_count: int
+    normalize: Callable[[Mapping[str, Any], tuple[str, ...]], Mapping[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -298,28 +300,30 @@ def load_settings(
             "unknown functions: %s" % ", ".join(sorted(unknown_signals | unknown_algos))
         )
     for name, node in signals.items():
-        required = SIGNAL_FUNCTIONS[node["function"]].inputs
+        spec = SIGNAL_FUNCTIONS[node["function"]]
+        required = spec.inputs
         if tuple(node["inputs"]) != required:
             raise ConfigError(
                 "signals.%s inputs must be %s" % (name, list(required))
             )
+        try:
+            params = spec.normalize(node["params"], tuple(normalized))
+        except ConfigError as exc:
+            raise ConfigError("signals.%s.params: %s" % (name, exc)) from exc
+        signals[name] = {**node, "params": params}
     for name, node in algos.items():
-        required = ALGO_FUNCTIONS[node["function"]].input_count
+        spec = ALGO_FUNCTIONS[node["function"]]
+        required = spec.input_count
         if len(node["inputs"]) != required:
             raise ConfigError(
                 "algos.%s inputs must contain %d nodes" % (name, required)
             )
-        targets = node["params"].get("target_tickers")
-        if targets is not None:
-            if (
-                not isinstance(targets, list)
-                or not targets
-                or any(target not in normalized for target in targets)
-            ):
-                raise ConfigError(
-                    "algos.%s.params.target_tickers must name configured tickers"
-                    % name
-                )
+        try:
+            params = spec.normalize(node["params"], tuple(normalized))
+        except ConfigError as exc:
+            raise ConfigError("algos.%s.params: %s" % (name, exc)) from exc
+        algos[name] = {**node, "params": params}
+    for name, node in algos.items():
         if node["function"] == "gap_continuation":
             range_name = node["inputs"][2]
             range_node = signals.get(range_name)
@@ -457,22 +461,210 @@ def _session_bars(
     ).fetchall()
 
 
-def _bar_parameters(parameters: Mapping[str, Any]) -> tuple[str, int, bool]:
+def _parameter_keys(parameters: Mapping[str, Any], allowed: set[str]) -> None:
+    unknown = set(parameters) - allowed
+    if unknown:
+        raise ConfigError("unknown parameters: %s" % ", ".join(sorted(unknown)))
+
+
+def _no_parameters(
+    parameters: Mapping[str, Any], tickers: tuple[str, ...]
+) -> Mapping[str, Any]:
+    _parameter_keys(parameters, set())
+    return {}
+
+
+def _configured_tickers(
+    value: Any, name: str, tickers: tuple[str, ...]
+) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        raise ConfigError("%s must be a non-empty ticker list" % name)
+    result: list[str] = []
+    for item in value:
+        ticker = item.strip().upper() if isinstance(item, str) else ""
+        if ticker not in tickers:
+            raise ConfigError("%s contains an unconfigured ticker: %r" % (name, item))
+        if ticker not in result:
+            result.append(ticker)
+    return tuple(result)
+
+
+def _boolean(value: Any, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ConfigError("%s must be boolean" % name)
+    return value
+
+
+def _number(value: Any, name: str, minimum: float = 0.0) -> float:
+    return float(require_float(value, name, minimum=minimum, error=ConfigError))
+
+
+def _normalize_sma(
+    parameters: Mapping[str, Any], tickers: tuple[str, ...]
+) -> Mapping[str, Any]:
+    _parameter_keys(parameters, {"field", "period", "include_interpolated"})
     field = parameters.get("field")
     period = parameters.get("period")
     include = parameters.get("include_interpolated")
     if field not in BAR_FIELDS:
-        raise EvaluationError("field must name a stored bar field")
-    period = require_int(period, "period", error=EvaluationError)
-    if not isinstance(include, bool):
-        raise EvaluationError("include_interpolated must be boolean")
-    return field, period, include
+        raise ConfigError("field must name a stored bar field")
+    return {
+        "field": field,
+        "period": require_int(period, "period", error=ConfigError),
+        "include_interpolated": _boolean(include, "include_interpolated"),
+    }
+
+
+def _normalize_metadata(
+    parameters: Mapping[str, Any], tickers: tuple[str, ...]
+) -> Mapping[str, Any]:
+    name = parameters.get("name")
+    if name not in METADATA_DEFAULTS:
+        raise ConfigError("name must be a supported provider indicator")
+    supplied = {key: value for key, value in parameters.items() if key != "name"}
+    unknown = set(supplied) - set(METADATA_DEFAULTS[name])
+    if unknown:
+        raise ConfigError(
+            "unsupported provider parameters: %s" % ", ".join(sorted(unknown))
+        )
+    normalized = dict(METADATA_DEFAULTS[name])
+    normalized.update(supplied)
+    return {"name": name, "query_key": _json(normalized)}
+
+
+def _normalize_int_parameter(
+    parameters: Mapping[str, Any], name: str, minimum: int = 1
+) -> Mapping[str, Any]:
+    _parameter_keys(parameters, {name})
+    return {name: require_int(parameters.get(name), name, minimum, error=ConfigError)}
+
+
+def _normalize_last_close(
+    parameters: Mapping[str, Any], tickers: tuple[str, ...]
+) -> Mapping[str, Any]:
+    _parameter_keys(parameters, {"include_interpolated"})
+    return {
+        "include_interpolated": _boolean(
+            parameters.get("include_interpolated"), "include_interpolated"
+        )
+    }
+
+
+def _normalize_rvol(
+    parameters: Mapping[str, Any], tickers: tuple[str, ...]
+) -> Mapping[str, Any]:
+    _parameter_keys(parameters, {"cap_bars", "baseline_sessions"})
+    return {
+        "cap_bars": require_int(
+            parameters.get("cap_bars"), "cap_bars", error=ConfigError
+        ),
+        "baseline_sessions": require_int(
+            parameters.get("baseline_sessions"),
+            "baseline_sessions",
+            error=ConfigError,
+        ),
+    }
+
+
+def _normalize_opening_sentiment(
+    parameters: Mapping[str, Any], tickers: tuple[str, ...]
+) -> Mapping[str, Any]:
+    _parameter_keys(
+        parameters,
+        {
+            "target_tickers",
+            "market_tickers",
+            "minutes",
+            "min_market_move_pct",
+            "require_target_agreement",
+        },
+    )
+    return {
+        "target_tickers": _configured_tickers(
+            parameters.get("target_tickers"), "target_tickers", tickers
+        ),
+        "market_tickers": _configured_tickers(
+            parameters.get("market_tickers"), "market_tickers", tickers
+        ),
+        "minutes": require_int(parameters.get("minutes"), "minutes", error=ConfigError),
+        "min_market_move_pct": _number(
+            parameters.get("min_market_move_pct"), "min_market_move_pct"
+        ),
+        "require_target_agreement": _boolean(
+            parameters.get("require_target_agreement"), "require_target_agreement"
+        ),
+    }
+
+
+def _normalize_pullback(
+    parameters: Mapping[str, Any], tickers: tuple[str, ...]
+) -> Mapping[str, Any]:
+    names = {
+        "early_minutes",
+        "early_window_minutes",
+        "late_window_minutes",
+        "entry_cutoff_minutes",
+        "baseline_sessions",
+        "min_baseline_sessions",
+        "percentile",
+        "min_extreme_distance_pct",
+    }
+    _parameter_keys(parameters, names)
+    result: dict[str, Any] = {
+        "early_minutes": require_int(
+            parameters.get("early_minutes"), "early_minutes", error=ConfigError
+        ),
+        "early_window_minutes": require_int(
+            parameters.get("early_window_minutes"),
+            "early_window_minutes",
+            error=ConfigError,
+        ),
+        "late_window_minutes": require_int(
+            parameters.get("late_window_minutes"),
+            "late_window_minutes",
+            error=ConfigError,
+        ),
+        "entry_cutoff_minutes": require_int(
+            parameters.get("entry_cutoff_minutes"),
+            "entry_cutoff_minutes",
+            minimum=0,
+            error=ConfigError,
+        ),
+        "baseline_sessions": require_int(
+            parameters.get("baseline_sessions"),
+            "baseline_sessions",
+            error=ConfigError,
+        ),
+        "min_baseline_sessions": require_int(
+            parameters.get("min_baseline_sessions"),
+            "min_baseline_sessions",
+            error=ConfigError,
+        ),
+        "percentile": _number(parameters.get("percentile"), "percentile"),
+        "min_extreme_distance_pct": _number(
+            parameters.get("min_extreme_distance_pct"),
+            "min_extreme_distance_pct",
+        ),
+    }
+    if result["min_baseline_sessions"] > result["baseline_sessions"]:
+        raise ConfigError("min_baseline_sessions cannot exceed baseline_sessions")
+    if result["percentile"] > 1.0:
+        raise ConfigError("percentile must be <= 1")
+    return result
+
+
+def _normalize_shape(
+    parameters: Mapping[str, Any], tickers: tuple[str, ...]
+) -> Mapping[str, Any]:
+    return normalize_shape_parameters(parameters, ConfigError)
 
 
 def _signal_sma(
     connection, ticker, ts, parameters, inputs, settings=None
 ) -> Optional[float]:
-    field, period, include = _bar_parameters(parameters)
+    field = str(parameters["field"])
+    period = int(parameters["period"])
+    include = bool(parameters["include_interpolated"])
     rows = _bars(connection, ticker, ts, period, include)
     if len(rows) < period:
         return None
@@ -482,23 +674,13 @@ def _signal_sma(
 def _signal_metadata(
     connection, ticker, ts, parameters, inputs, settings=None
 ) -> Any:
-    name = parameters.get("name")
-    if name not in METADATA_DEFAULTS:
-        raise EvaluationError("name must be a supported provider indicator")
-    supplied = {key: value for key, value in parameters.items() if key != "name"}
-    unknown = set(supplied) - set(METADATA_DEFAULTS[name])
-    if unknown:
-        raise EvaluationError(
-            "unsupported provider parameters: %s" % ", ".join(sorted(unknown))
-        )
-    normalized = dict(METADATA_DEFAULTS[name])
-    normalized.update(supplied)
+    name = parameters["name"]
     row = connection.execute(
         """
         SELECT value FROM bar_metadata
         WHERE ticker=? AND ts=? AND name=? AND params=?
         """,
-        (ticker, ts, name, _json(normalized)),
+        (ticker, ts, name, parameters["query_key"]),
     ).fetchone()
     return json.loads(row["value"]) if row else None
 
@@ -522,8 +704,6 @@ def _session_window(settings: Settings, ts: int) -> tuple[date, int, int]:
 def _signal_session(
     connection, ticker, ts, parameters, inputs, settings
 ) -> Optional[dict[str, Any]]:
-    if parameters:
-        raise EvaluationError("session takes no params")
     local_day, session_open, session_close = _session_window(settings, ts)
     if ts < session_open or ts >= session_close:
         return None
@@ -607,9 +787,7 @@ def _prior_complete_session_summaries(
 def _signal_atr_session(
     connection, ticker, ts, parameters, inputs, settings
 ) -> Optional[float]:
-    sessions = require_int(
-        parameters.get("sessions"), "sessions", error=EvaluationError
-    )
+    sessions = int(parameters["sessions"])
     session = inputs["session"]
     if session is None:
         return None
@@ -644,8 +822,6 @@ def _signal_atr_session(
 def _signal_prior_session(
     connection, ticker, ts, parameters, inputs, settings
 ) -> Optional[dict[str, float]]:
-    if parameters:
-        raise EvaluationError("prior_session takes no params")
     session = inputs["session"]
     if session is None:
         return None
@@ -688,7 +864,7 @@ def _signal_prior_session(
 def _signal_first30_ret(
     connection, ticker, ts, parameters, inputs, settings
 ) -> Optional[float]:
-    bars = require_int(parameters.get("bars"), "bars", error=EvaluationError)
+    bars = int(parameters["bars"])
     session = inputs["session"]
     if session is None or int(session["minute"]) < bars - 1:
         return None
@@ -712,8 +888,6 @@ def _signal_first30_ret(
 def _signal_session_extremes(
     connection, ticker, ts, parameters, inputs, settings
 ) -> Optional[dict[str, Any]]:
-    if parameters:
-        raise EvaluationError("session_extremes takes no params")
     session = inputs["session"]
     atr_session = require_float(
         inputs["atr_session"],
@@ -752,7 +926,7 @@ def _signal_session_extremes(
 def _signal_opening_range(
     connection, ticker, ts, parameters, inputs, settings
 ) -> Optional[dict[str, float]]:
-    minutes = require_int(parameters.get("minutes"), "minutes", error=EvaluationError)
+    minutes = int(parameters["minutes"])
     session = inputs["session"]
     if session is None or session.get("minute", -1) < minutes:
         return None
@@ -818,12 +992,8 @@ def _prior_volume_baseline(
 
 
 def _signal_rvol_open(connection, ticker, ts, parameters, inputs, settings) -> Optional[float]:
-    cap_bars = require_int(
-        parameters.get("cap_bars"), "cap_bars", error=EvaluationError
-    )
-    baseline_sessions = require_int(
-        parameters.get("baseline_sessions"), "baseline_sessions", error=EvaluationError
-    )
+    cap_bars = int(parameters["cap_bars"])
+    baseline_sessions = int(parameters["baseline_sessions"])
     session = inputs["session"]
     if session is None:
         return None
@@ -850,9 +1020,7 @@ def _signal_rvol_open(connection, ticker, ts, parameters, inputs, settings) -> O
 
 
 def _signal_last_close(connection, ticker, ts, parameters, inputs, settings) -> Optional[float]:
-    include = parameters.get("include_interpolated")
-    if not isinstance(include, bool):
-        raise EvaluationError("include_interpolated must be boolean")
+    include = bool(parameters["include_interpolated"])
     quality = "" if include else "AND interpolated=0"
     row = connection.execute(
         "SELECT close FROM bars WHERE ticker=? AND ts<=? %s ORDER BY ts DESC LIMIT 1"
@@ -860,21 +1028,6 @@ def _signal_last_close(connection, ticker, ts, parameters, inputs, settings) -> 
         (ticker, ts),
     ).fetchone()
     return float(row["close"]) if row else None
-
-
-def _ticker_list(value: Any, name: str, settings: Settings) -> tuple[str, ...]:
-    if not isinstance(value, list) or not value:
-        raise EvaluationError("%s must be a non-empty ticker list" % name)
-    tickers: list[str] = []
-    for item in value:
-        ticker = item.strip().upper() if isinstance(item, str) else ""
-        if ticker not in settings.tickers:
-            raise EvaluationError(
-                "%s contains an unconfigured ticker: %r" % (name, item)
-            )
-        if ticker not in tickers:
-            tickers.append(ticker)
-    return tuple(tickers)
 
 
 def _session_return_pct(
@@ -902,26 +1055,11 @@ def _signal_opening_sentiment(
     session = inputs["session"]
     if session is None:
         return None
-    targets = _ticker_list(
-        parameters.get("target_tickers"), "target_tickers", settings
-    )
-    markets = _ticker_list(
-        parameters.get("market_tickers"), "market_tickers", settings
-    )
-    minutes = require_int(
-        parameters.get("minutes"), "minutes", error=EvaluationError
-    )
-    min_market_move = float(
-        require_float(
-            parameters.get("min_market_move_pct"),
-            "min_market_move_pct",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
-    require_agreement = parameters.get("require_target_agreement")
-    if not isinstance(require_agreement, bool):
-        raise EvaluationError("require_target_agreement must be boolean")
+    targets = parameters["target_tickers"]
+    markets = parameters["market_tickers"]
+    minutes = int(parameters["minutes"])
+    min_market_move = float(parameters["min_market_move_pct"])
+    require_agreement = bool(parameters["require_target_agreement"])
     if ticker not in targets or int(session["minute"]) < minutes:
         return None
 
@@ -1083,55 +1221,14 @@ def _signal_pullback(
     sentiment = inputs["opening_sentiment"]
     if session is None or sentiment is None:
         return None
-    early_minutes = require_int(
-        parameters.get("early_minutes"), "early_minutes", error=EvaluationError
-    )
-    early_window = require_int(
-        parameters.get("early_window_minutes"),
-        "early_window_minutes",
-        error=EvaluationError,
-    )
-    late_window = require_int(
-        parameters.get("late_window_minutes"),
-        "late_window_minutes",
-        error=EvaluationError,
-    )
-    entry_cutoff = require_int(
-        parameters.get("entry_cutoff_minutes"),
-        "entry_cutoff_minutes",
-        minimum=0,
-        error=EvaluationError,
-    )
-    baseline_sessions = require_int(
-        parameters.get("baseline_sessions"),
-        "baseline_sessions",
-        error=EvaluationError,
-    )
-    min_baseline_sessions = require_int(
-        parameters.get("min_baseline_sessions"),
-        "min_baseline_sessions",
-        error=EvaluationError,
-    )
-    if min_baseline_sessions > baseline_sessions:
-        raise EvaluationError("min_baseline_sessions cannot exceed baseline_sessions")
-    percentile = float(
-        require_float(
-            parameters.get("percentile"),
-            "percentile",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
-    if percentile > 1.0:
-        raise EvaluationError("percentile must be <= 1")
-    min_extreme_distance = float(
-        require_float(
-            parameters.get("min_extreme_distance_pct"),
-            "min_extreme_distance_pct",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
+    early_minutes = int(parameters["early_minutes"])
+    early_window = int(parameters["early_window_minutes"])
+    late_window = int(parameters["late_window_minutes"])
+    entry_cutoff = int(parameters["entry_cutoff_minutes"])
+    baseline_sessions = int(parameters["baseline_sessions"])
+    min_baseline_sessions = int(parameters["min_baseline_sessions"])
+    percentile = float(parameters["percentile"])
+    min_extreme_distance = float(parameters["min_extreme_distance_pct"])
     minute = int(session["minute"])
     direction = int(sentiment["direction"])
     regime = "early" if minute < early_minutes else "late"
@@ -1224,27 +1321,53 @@ def _signal_shape_v1(connection, ticker, ts, parameters, inputs, settings) -> An
 
 
 SIGNAL_FUNCTIONS: dict[str, SignalSpec] = {
-    "sma": SignalSpec(_signal_sma, ("bars",)),
-    "metadata": SignalSpec(_signal_metadata, ("bar_metadata",)),
-    "session": SignalSpec(_signal_session, ()),
-    "atr_session": SignalSpec(_signal_atr_session, ("bars", "session")),
-    "prior_session": SignalSpec(_signal_prior_session, ("bars", "session")),
+    "sma": SignalSpec(_signal_sma, ("bars",), _normalize_sma),
+    "metadata": SignalSpec(
+        _signal_metadata, ("bar_metadata",), _normalize_metadata
+    ),
+    "session": SignalSpec(_signal_session, (), _no_parameters),
+    "atr_session": SignalSpec(
+        _signal_atr_session,
+        ("bars", "session"),
+        lambda parameters, tickers: _normalize_int_parameter(
+            parameters, "sessions"
+        ),
+    ),
+    "prior_session": SignalSpec(
+        _signal_prior_session, ("bars", "session"), _no_parameters
+    ),
     "first30_ret": SignalSpec(
-        _signal_first30_ret, ("bars", "session")
+        _signal_first30_ret,
+        ("bars", "session"),
+        lambda parameters, tickers: _normalize_int_parameter(parameters, "bars"),
     ),
     "session_extremes": SignalSpec(
-        _signal_session_extremes, ("bars", "session", "atr_session")
+        _signal_session_extremes,
+        ("bars", "session", "atr_session"),
+        _no_parameters,
     ),
-    "opening_range": SignalSpec(_signal_opening_range, ("bars", "session")),
-    "rvol_open": SignalSpec(_signal_rvol_open, ("bars", "session")),
-    "last_close": SignalSpec(_signal_last_close, ("bars",)),
+    "opening_range": SignalSpec(
+        _signal_opening_range,
+        ("bars", "session"),
+        lambda parameters, tickers: _normalize_int_parameter(parameters, "minutes"),
+    ),
+    "rvol_open": SignalSpec(
+        _signal_rvol_open, ("bars", "session"), _normalize_rvol
+    ),
+    "last_close": SignalSpec(
+        _signal_last_close, ("bars",), _normalize_last_close
+    ),
     "opening_sentiment": SignalSpec(
-        _signal_opening_sentiment, ("bars", "session")
+        _signal_opening_sentiment,
+        ("bars", "session"),
+        _normalize_opening_sentiment,
     ),
     "pullback": SignalSpec(
-        _signal_pullback, ("bars", "session", "opening_sentiment")
+        _signal_pullback,
+        ("bars", "session", "opening_sentiment"),
+        _normalize_pullback,
     ),
-    "shape_v1": SignalSpec(_signal_shape_v1, ("bars",)),
+    "shape_v1": SignalSpec(_signal_shape_v1, ("bars",), _normalize_shape),
 }
 
 
@@ -1287,25 +1410,11 @@ def _algo_range_breakout(context: AlgoContext) -> tuple[bool, bool, int]:
     price = require_float(
         inputs[price_name], "last_close", nullable=True, error=EvaluationError
     )
-    direction_param = context.parameters.get("direction")
-    if direction_param not in ("both", "long", "short"):
-        raise EvaluationError("direction must be both, long, or short")
-    target_r = float(require_float(
-        context.parameters.get("target_r"), "target_r", minimum=0.0,
-        error=EvaluationError,
-    ))
-    min_rvol = float(require_float(
-        context.parameters.get("min_rvol"), "min_rvol", minimum=0.0,
-        error=EvaluationError,
-    ))
-    entry_cutoff = float(require_float(
-        context.parameters.get("entry_cutoff_minutes"),
-        "entry_cutoff_minutes", minimum=0.0, error=EvaluationError,
-    ))
-    flat_minutes = float(require_float(
-        context.parameters.get("flat_minutes"), "flat_minutes", minimum=0.0,
-        error=EvaluationError,
-    ))
+    direction_param = context.parameters["direction"]
+    target_r = float(context.parameters["target_r"])
+    min_rvol = float(context.parameters["min_rvol"])
+    entry_cutoff = float(context.parameters["entry_cutoff_minutes"])
+    flat_minutes = float(context.parameters["flat_minutes"])
     if session is None or opening_range is None or rvol is None or price is None:
         return False, False, 0
 
@@ -1343,58 +1452,13 @@ def _algo_sentiment_pullback(context: AlgoContext) -> tuple[bool, bool, int]:
     price = require_float(
         context.inputs[price_name], "last_close", nullable=True, error=EvaluationError
     )
-    early_minutes = require_int(
-        context.parameters.get("early_minutes"),
-        "early_minutes",
-        error=EvaluationError,
-    )
-    early_hold = require_int(
-        context.parameters.get("early_hold_minutes"),
-        "early_hold_minutes",
-        error=EvaluationError,
-    )
-    late_hold = require_int(
-        context.parameters.get("late_hold_minutes"),
-        "late_hold_minutes",
-        error=EvaluationError,
-    )
-    take_profit = float(
-        require_float(
-            context.parameters.get("take_profit_pct"),
-            "take_profit_pct",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
-    stop_loss = float(
-        require_float(
-            context.parameters.get("stop_loss_pct"),
-            "stop_loss_pct",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
-    flat_minutes = float(
-        require_float(
-            context.parameters.get("flat_minutes"),
-            "flat_minutes",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
-    capital_fraction = float(
-        require_float(
-            context.parameters.get("capital_fraction"),
-            "capital_fraction",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
-    if capital_fraction <= 0.0 or capital_fraction > 0.5:
-        raise EvaluationError("capital_fraction must be > 0 and <= 0.5")
-    pattern_exit = context.parameters.get("pattern_exit")
-    if not isinstance(pattern_exit, bool):
-        raise EvaluationError("pattern_exit must be boolean")
+    early_minutes = int(context.parameters["early_minutes"])
+    early_hold = int(context.parameters["early_hold_minutes"])
+    late_hold = int(context.parameters["late_hold_minutes"])
+    take_profit = float(context.parameters["take_profit_pct"])
+    stop_loss = float(context.parameters["stop_loss_pct"])
+    flat_minutes = float(context.parameters["flat_minutes"])
+    pattern_exit = bool(context.parameters["pattern_exit"])
     if session is None or price is None:
         return False, False, 0
 
@@ -1427,10 +1491,7 @@ def _algo_sentiment_pullback(context: AlgoContext) -> tuple[bool, bool, int]:
 
 
 def _algo_target_enabled(context: AlgoContext) -> bool:
-    targets = context.parameters.get("target_tickers")
-    if not isinstance(targets, list) or not targets:
-        raise EvaluationError("target_tickers must be a non-empty list")
-    return context.ticker in targets
+    return context.ticker in context.parameters["target_tickers"]
 
 
 def _algo_has_session_entry(context: AlgoContext) -> bool:
@@ -1516,66 +1577,14 @@ def _algo_momentum_continuation(
         nullable=True,
         error=EvaluationError,
     )
-    first30_min = float(
-        require_float(
-            context.parameters.get("first30_min_pct"),
-            "first30_min_pct",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
-    risk_fraction = float(
-        require_float(
-            context.parameters.get("risk_atr_frac"),
-            "risk_atr_frac",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
-    target_r = float(
-        require_float(
-            context.parameters.get("target_r"),
-            "target_r",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
-    min_rvol = float(
-        require_float(
-            context.parameters.get("min_rvol"),
-            "min_rvol",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
-    minute_min = require_int(
-        context.parameters.get("minute_min"),
-        "minute_min",
-        minimum=0,
-        error=EvaluationError,
-    )
-    minute_max = require_int(
-        context.parameters.get("minute_max"),
-        "minute_max",
-        minimum=1,
-        error=EvaluationError,
-    )
-    entry_cutoff = float(
-        require_float(
-            context.parameters.get("entry_cutoff_minutes"),
-            "entry_cutoff_minutes",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
-    flat_minutes = float(
-        require_float(
-            context.parameters.get("flat_minutes"),
-            "flat_minutes",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
+    first30_min = float(context.parameters["first30_min_pct"])
+    risk_fraction = float(context.parameters["risk_atr_frac"])
+    target_r = float(context.parameters["target_r"])
+    min_rvol = float(context.parameters["min_rvol"])
+    minute_min = int(context.parameters["minute_min"])
+    minute_max = int(context.parameters["minute_max"])
+    entry_cutoff = float(context.parameters["entry_cutoff_minutes"])
+    flat_minutes = float(context.parameters["flat_minutes"])
     if (
         not _algo_target_enabled(context)
         or session is None
@@ -1627,57 +1636,13 @@ def _algo_failed_gap(context: AlgoContext) -> tuple[bool, bool, int]:
         nullable=True,
         error=EvaluationError,
     )
-    gap_min = float(
-        require_float(
-            context.parameters.get("gap_min_pct"),
-            "gap_min_pct",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
-    risk_fraction = float(
-        require_float(
-            context.parameters.get("risk_atr_frac"),
-            "risk_atr_frac",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
-    target_r = float(
-        require_float(
-            context.parameters.get("target_r"),
-            "target_r",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
-    minute_min = require_int(
-        context.parameters.get("minute_min"),
-        "minute_min",
-        minimum=0,
-        error=EvaluationError,
-    )
-    minute_max = require_int(
-        context.parameters.get("minute_max"),
-        "minute_max",
-        error=EvaluationError,
-    )
-    entry_cutoff = float(
-        require_float(
-            context.parameters.get("entry_cutoff_minutes"),
-            "entry_cutoff_minutes",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
-    flat_minutes = float(
-        require_float(
-            context.parameters.get("flat_minutes"),
-            "flat_minutes",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
+    gap_min = float(context.parameters["gap_min_pct"])
+    risk_fraction = float(context.parameters["risk_atr_frac"])
+    target_r = float(context.parameters["target_r"])
+    minute_min = int(context.parameters["minute_min"])
+    minute_max = int(context.parameters["minute_max"])
+    entry_cutoff = float(context.parameters["entry_cutoff_minutes"])
+    flat_minutes = float(context.parameters["flat_minutes"])
     if (
         not _algo_target_enabled(context)
         or session is None
@@ -1747,65 +1712,14 @@ def _algo_gap_continuation(context: AlgoContext) -> tuple[bool, bool, int]:
         nullable=True,
         error=EvaluationError,
     )
-    gap_min = float(
-        require_float(
-            context.parameters.get("gap_min_pct"),
-            "gap_min_pct",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
-    risk_fraction = float(
-        require_float(
-            context.parameters.get("risk_atr_frac"),
-            "risk_atr_frac",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
-    target_r = float(
-        require_float(
-            context.parameters.get("target_r"),
-            "target_r",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
-    min_rvol = float(
-        require_float(
-            context.parameters.get("min_rvol"),
-            "min_rvol",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
-    minute_min = require_int(
-        context.parameters.get("minute_min"),
-        "minute_min",
-        minimum=0,
-        error=EvaluationError,
-    )
-    minute_max = require_int(
-        context.parameters.get("minute_max"),
-        "minute_max",
-        error=EvaluationError,
-    )
-    entry_cutoff = float(
-        require_float(
-            context.parameters.get("entry_cutoff_minutes"),
-            "entry_cutoff_minutes",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
-    flat_minutes = float(
-        require_float(
-            context.parameters.get("flat_minutes"),
-            "flat_minutes",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
+    gap_min = float(context.parameters["gap_min_pct"])
+    risk_fraction = float(context.parameters["risk_atr_frac"])
+    target_r = float(context.parameters["target_r"])
+    min_rvol = float(context.parameters["min_rvol"])
+    minute_min = int(context.parameters["minute_min"])
+    minute_max = int(context.parameters["minute_max"])
+    entry_cutoff = float(context.parameters["entry_cutoff_minutes"])
+    flat_minutes = float(context.parameters["flat_minutes"])
     if (
         not _algo_target_enabled(context)
         or session is None
@@ -1875,65 +1789,14 @@ def _algo_extreme_fade(context: AlgoContext) -> tuple[bool, bool, int]:
         nullable=True,
         error=EvaluationError,
     )
-    min_range_atr = float(
-        require_float(
-            context.parameters.get("min_range_atr"),
-            "min_range_atr",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
-    stop_fraction = float(
-        require_float(
-            context.parameters.get("stop_atr_frac"),
-            "stop_atr_frac",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
-    target_r = float(
-        require_float(
-            context.parameters.get("target_r"),
-            "target_r",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
-    min_rvol = float(
-        require_float(
-            context.parameters.get("min_rvol"),
-            "min_rvol",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
-    minute_min = require_int(
-        context.parameters.get("minute_min"),
-        "minute_min",
-        minimum=0,
-        error=EvaluationError,
-    )
-    minute_max = require_int(
-        context.parameters.get("minute_max"),
-        "minute_max",
-        error=EvaluationError,
-    )
-    entry_cutoff = float(
-        require_float(
-            context.parameters.get("entry_cutoff_minutes"),
-            "entry_cutoff_minutes",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
-    flat_minutes = float(
-        require_float(
-            context.parameters.get("flat_minutes"),
-            "flat_minutes",
-            minimum=0.0,
-            error=EvaluationError,
-        )
-    )
+    min_range_atr = float(context.parameters["min_range_atr"])
+    stop_fraction = float(context.parameters["stop_atr_frac"])
+    target_r = float(context.parameters["target_r"])
+    min_rvol = float(context.parameters["min_rvol"])
+    minute_min = int(context.parameters["minute_min"])
+    minute_max = int(context.parameters["minute_max"])
+    entry_cutoff = float(context.parameters["entry_cutoff_minutes"])
+    flat_minutes = float(context.parameters["flat_minutes"])
     if (
         not _algo_target_enabled(context)
         or session is None
@@ -1989,14 +1852,189 @@ def _algo_extreme_fade(context: AlgoContext) -> tuple[bool, bool, int]:
     return False, False, 0
 
 
+def _normalize_range_breakout(
+    parameters: Mapping[str, Any], tickers: tuple[str, ...]
+) -> Mapping[str, Any]:
+    names = {
+        "direction",
+        "target_r",
+        "min_rvol",
+        "entry_cutoff_minutes",
+        "flat_minutes",
+    }
+    _parameter_keys(parameters, names)
+    direction = parameters.get("direction")
+    if direction not in ("both", "long", "short"):
+        raise ConfigError("direction must be both, long, or short")
+    return {
+        "direction": direction,
+        "target_r": _number(parameters.get("target_r"), "target_r"),
+        "min_rvol": _number(parameters.get("min_rvol"), "min_rvol"),
+        "entry_cutoff_minutes": _number(
+            parameters.get("entry_cutoff_minutes"), "entry_cutoff_minutes"
+        ),
+        "flat_minutes": _number(parameters.get("flat_minutes"), "flat_minutes"),
+    }
+
+
+def _normalize_sentiment_pullback(
+    parameters: Mapping[str, Any], tickers: tuple[str, ...]
+) -> Mapping[str, Any]:
+    names = {
+        "early_minutes",
+        "early_hold_minutes",
+        "late_hold_minutes",
+        "take_profit_pct",
+        "stop_loss_pct",
+        "pattern_exit",
+        "flat_minutes",
+        "capital_fraction",
+    }
+    _parameter_keys(parameters, names)
+    capital_fraction = _number(
+        parameters.get("capital_fraction"), "capital_fraction"
+    )
+    if capital_fraction <= 0.0 or capital_fraction > 0.5:
+        raise ConfigError("capital_fraction must be > 0 and <= 0.5")
+    return {
+        "early_minutes": require_int(
+            parameters.get("early_minutes"), "early_minutes", error=ConfigError
+        ),
+        "early_hold_minutes": require_int(
+            parameters.get("early_hold_minutes"),
+            "early_hold_minutes",
+            error=ConfigError,
+        ),
+        "late_hold_minutes": require_int(
+            parameters.get("late_hold_minutes"),
+            "late_hold_minutes",
+            error=ConfigError,
+        ),
+        "take_profit_pct": _number(
+            parameters.get("take_profit_pct"), "take_profit_pct"
+        ),
+        "stop_loss_pct": _number(
+            parameters.get("stop_loss_pct"), "stop_loss_pct"
+        ),
+        "pattern_exit": _boolean(parameters.get("pattern_exit"), "pattern_exit"),
+        "flat_minutes": _number(parameters.get("flat_minutes"), "flat_minutes"),
+        "capital_fraction": capital_fraction,
+    }
+
+
+def _normalize_targeted_window(
+    parameters: Mapping[str, Any],
+    tickers: tuple[str, ...],
+    float_names: tuple[str, ...],
+) -> dict[str, Any]:
+    _parameter_keys(
+        parameters, {"target_tickers", "minute_min", "minute_max", *float_names}
+    )
+    result: dict[str, Any] = {
+        "target_tickers": _configured_tickers(
+            parameters.get("target_tickers"), "target_tickers", tickers
+        ),
+        "minute_min": require_int(
+            parameters.get("minute_min"),
+            "minute_min",
+            minimum=0,
+            error=ConfigError,
+        ),
+        "minute_max": require_int(
+            parameters.get("minute_max"), "minute_max", error=ConfigError
+        ),
+    }
+    if result["minute_min"] >= result["minute_max"]:
+        raise ConfigError("minute_min must be less than minute_max")
+    result.update(
+        (name, _number(parameters.get(name), name)) for name in float_names
+    )
+    return result
+
+
+def _normalize_momentum_continuation(
+    parameters: Mapping[str, Any], tickers: tuple[str, ...]
+) -> Mapping[str, Any]:
+    return _normalize_targeted_window(
+        parameters,
+        tickers,
+        (
+            "first30_min_pct",
+            "risk_atr_frac",
+            "target_r",
+            "min_rvol",
+            "entry_cutoff_minutes",
+            "flat_minutes",
+        ),
+    )
+
+
+def _normalize_failed_gap(
+    parameters: Mapping[str, Any], tickers: tuple[str, ...]
+) -> Mapping[str, Any]:
+    return _normalize_targeted_window(
+        parameters,
+        tickers,
+        (
+            "gap_min_pct",
+            "risk_atr_frac",
+            "target_r",
+            "entry_cutoff_minutes",
+            "flat_minutes",
+        ),
+    )
+
+
+def _normalize_gap_continuation(
+    parameters: Mapping[str, Any], tickers: tuple[str, ...]
+) -> Mapping[str, Any]:
+    return _normalize_targeted_window(
+        parameters,
+        tickers,
+        (
+            "gap_min_pct",
+            "risk_atr_frac",
+            "target_r",
+            "min_rvol",
+            "entry_cutoff_minutes",
+            "flat_minutes",
+        ),
+    )
+
+
+def _normalize_extreme_fade(
+    parameters: Mapping[str, Any], tickers: tuple[str, ...]
+) -> Mapping[str, Any]:
+    return _normalize_targeted_window(
+        parameters,
+        tickers,
+        (
+            "min_range_atr",
+            "stop_atr_frac",
+            "target_r",
+            "min_rvol",
+            "entry_cutoff_minutes",
+            "flat_minutes",
+        ),
+    )
+
+
 ALGO_FUNCTIONS: dict[str, AlgoSpec] = {
-    "crossover": AlgoSpec(_algo_crossover, 2),
-    "range_breakout": AlgoSpec(_algo_range_breakout, 4),
-    "sentiment_pullback": AlgoSpec(_algo_sentiment_pullback, 4),
-    "momentum_continuation": AlgoSpec(_algo_momentum_continuation, 5),
-    "failed_gap": AlgoSpec(_algo_failed_gap, 4),
-    "gap_continuation": AlgoSpec(_algo_gap_continuation, 6),
-    "extreme_fade": AlgoSpec(_algo_extreme_fade, 5),
+    "crossover": AlgoSpec(_algo_crossover, 2, _no_parameters),
+    "range_breakout": AlgoSpec(
+        _algo_range_breakout, 4, _normalize_range_breakout
+    ),
+    "sentiment_pullback": AlgoSpec(
+        _algo_sentiment_pullback, 4, _normalize_sentiment_pullback
+    ),
+    "momentum_continuation": AlgoSpec(
+        _algo_momentum_continuation, 5, _normalize_momentum_continuation
+    ),
+    "failed_gap": AlgoSpec(_algo_failed_gap, 4, _normalize_failed_gap),
+    "gap_continuation": AlgoSpec(
+        _algo_gap_continuation, 6, _normalize_gap_continuation
+    ),
+    "extreme_fade": AlgoSpec(_algo_extreme_fade, 5, _normalize_extreme_fade),
 }
 
 
@@ -2109,6 +2147,82 @@ def _output_state(
     return open_entries, prior
 
 
+@dataclass
+class _EvaluationState:
+    ticker: str
+    session_open: int
+    previous: dict[str, Any]
+    open_entries: dict[str, list[dict[str, Any]]]
+    session_outputs: dict[str, list[dict[str, Any]]]
+    last_ts: Optional[int] = None
+
+    def accepts(self, settings: Settings, ticker: str, ts: int) -> bool:
+        _, session_open, _ = _session_window(settings, ts)
+        return (
+            ticker == self.ticker
+            and session_open == self.session_open
+            and (self.last_ts is None or ts == self.last_ts + 60)
+        )
+
+    def advance(self, result: Mapping[str, Any]) -> None:
+        self.previous.update(result["signals"])
+        close = float(result["_bar_close"])
+        ts = int(result["ts"])
+        for name, output in result["algos"].items():
+            normalized = _algo_output(output)
+            self.previous[name] = list(normalized)
+            is_entry, is_close, direction = normalized
+            if not (is_entry or is_close):
+                continue
+            self.session_outputs[name].append(
+                {"ts": ts, "output": list(normalized)}
+            )
+            if is_close:
+                self.open_entries[name] = []
+            else:
+                self.open_entries[name].append(
+                    {"ts": ts, "price": close, "direction": direction}
+                )
+        self.last_ts = ts
+
+
+def _seed_evaluation_state(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    ticker: str,
+    ts: int,
+) -> _EvaluationState:
+    previous = {
+        str(row["kind"]): json.loads(row["output"])
+        for row in connection.execute(
+            """
+            SELECT kind,output FROM (
+                SELECT kind,output,
+                       ROW_NUMBER() OVER (PARTITION BY kind ORDER BY ts DESC) AS position
+                FROM outputs
+                WHERE ticker=? AND config=? AND ts<?
+            )
+            WHERE position=1
+            """,
+            (ticker, settings.version, ts),
+        ).fetchall()
+    }
+    open_entries: dict[str, list[dict[str, Any]]] = {}
+    session_outputs: dict[str, list[dict[str, Any]]] = {}
+    for name in settings.enabled_algos():
+        positions, outputs = _output_state(connection, settings, ticker, name, ts)
+        open_entries[name] = positions
+        session_outputs[name] = outputs
+    _, session_open, _ = _session_window(settings, ts)
+    return _EvaluationState(
+        ticker=ticker,
+        session_open=session_open,
+        previous=previous,
+        open_entries=open_entries,
+        session_outputs=session_outputs,
+    )
+
+
 def _context_bars(
     connection: sqlite3.Connection,
     ticker: str,
@@ -2139,14 +2253,21 @@ def run_core(
     ticker: str,
     ts: int,
     algos: Optional[Sequence[str]] = None,
+    state: Optional[_EvaluationState] = None,
 ) -> dict[str, Any]:
     ticker = ticker.strip().upper()
     if ticker not in settings.tickers:
         raise EvaluationError("ticker is not in config: %s" % ticker)
-    if connection.execute("SELECT 1 FROM bars WHERE ticker=? AND ts=?", (ticker, ts)).fetchone() is None:
+    bar = connection.execute(
+        "SELECT close FROM bars WHERE ticker=? AND ts=?", (ticker, ts)
+    ).fetchone()
+    if bar is None:
         raise EvaluationError("timestamp is not a stored bar: %s %s" % (ticker, ts))
+    if state is not None and not state.accepts(settings, ticker, ts):
+        raise EvaluationError("evaluation state does not precede %s %s" % (ticker, ts))
 
     signal_values: dict[str, Any] = {}
+    serialized: dict[str, str] = {}
     for name in settings.signal_order:
         node = settings.signals[name]
         inputs = {
@@ -2159,7 +2280,7 @@ def run_core(
             value = SIGNAL_FUNCTIONS[node["function"]].function(
                 connection, ticker, ts, node["params"], inputs, settings
             )
-            _json(value)
+            serialized[name] = _json(value)
         except Exception as exc:
             raise EvaluationError("signal %s failed: %s" % (name, exc)) from exc
         signal_values[name] = value
@@ -2179,17 +2300,29 @@ def run_core(
         node = settings.algos[name]
         inputs: dict[str, Any] = {}
         previous: dict[str, Any] = {
-            "_self": _prior_output(connection, ticker, ts, name, settings.version)
+            "_self": state.previous.get(name)
+            if state is not None
+            else _prior_output(connection, ticker, ts, name, settings.version)
         }
         for target in node["inputs"]:
             if target in settings.signals:
                 inputs[target] = signal_values[target]
             else:
                 inputs[target] = list(algo_values[target])
-            previous[target] = _prior_output(connection, ticker, ts, target, settings.version)
-        open_entries, session_outputs = _output_state(
-            connection, settings, ticker, name, ts
-        )
+            previous[target] = (
+                state.previous.get(target)
+                if state is not None
+                else _prior_output(
+                    connection, ticker, ts, target, settings.version
+                )
+            )
+        if state is None:
+            open_entries, session_outputs = _output_state(
+                connection, settings, ticker, name, ts
+            )
+        else:
+            open_entries = state.open_entries[name]
+            session_outputs = state.session_outputs[name]
         position = tuple(open_entries)
         algo_open_entries[name] = position
         try:
@@ -2224,6 +2357,7 @@ def run_core(
                 else (False, False, 0)
             )
         algo_values[name] = result
+        serialized[name] = _json(result)
 
     selected_values = {name: algo_values[name] for name in selected}
     selected_positions = {name: algo_open_entries[name] for name in selected}
@@ -2233,6 +2367,11 @@ def run_core(
         "signals": signal_values,
         "algos": selected_values,
         "_open_entries": selected_positions,
+        "_serialized": {
+            name: serialized[name]
+            for name in (*signal_values, *selected_values)
+        },
+        "_bar_close": float(bar["close"]),
     }
 
 
@@ -2345,9 +2484,27 @@ def _write_result(
     computed_at = int(time.time())
     rows = []
     for name, value in result["signals"].items():
-        rows.append((result["ticker"], result["ts"], name, settings.version, _json(value), computed_at))
+        rows.append(
+            (
+                result["ticker"],
+                result["ts"],
+                name,
+                settings.version,
+                result["_serialized"][name],
+                computed_at,
+            )
+        )
     for name, output in result["algos"].items():
-        rows.append((result["ticker"], result["ts"], name, settings.version, _json(output), computed_at))
+        rows.append(
+            (
+                result["ticker"],
+                result["ts"],
+                name,
+                settings.version,
+                result["_serialized"][name],
+                computed_at,
+            )
+        )
 
     stats = {"pairs": 1, "outputs": len(rows), "entries": 0, "exits": 0}
     connection.execute("BEGIN IMMEDIATE")
@@ -2407,6 +2564,8 @@ def cycle(
     _RVOL_BASELINES.clear()
     _PULLBACK_BASELINES.clear()
     _OUTPUT_SESSION_SEEDS.clear()
+    _SESSION_SUMMARIES.clear()
+    _ATR_SESSION_VALUES.clear()
     clear_shape_cache()
     config_path = config_path.resolve()
     current = load_settings(config_path)
@@ -2437,10 +2596,21 @@ def cycle(
         connection.commit()
 
         stats = {"pairs": 0, "outputs": 0, "entries": 0, "exits": 0}
+        states: dict[str, _EvaluationState] = {}
         for ticker, ts in _pending(connection, settings, stop_event=stop_event):
             if stop_event is not None and stop_event.is_set():
                 break
-            part = _write_result(connection, settings, run_core(connection, settings, ticker, ts))
+            state = states.get(ticker)
+            if state is None or not state.accepts(settings, ticker, ts):
+                state = _seed_evaluation_state(
+                    connection, settings, ticker, ts
+                )
+                states[ticker] = state
+            result = run_core(
+                connection, settings, ticker, ts, state=state
+            )
+            part = _write_result(connection, settings, result)
+            state.advance(result)
             for key in stats:
                 stats[key] += part[key]
             if stats["pairs"] % CYCLE_PROGRESS_INTERVAL == 0:

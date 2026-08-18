@@ -392,9 +392,10 @@ class DashboardData:
             )
             price = float(row["close"])
             group["last_price"] = price
-            is_entry, is_close, direction = self._output_action(
-                self._json_value(row["output"])
-            )
+            action = self._output_action(self._json_value(row["output"]))
+            if action is None:
+                continue
+            is_entry, is_close, direction = action
             if is_close:
                 for entry_price, entry_direction in group["open_units"]:
                     result = ((price / entry_price) - 1.0) * 100.0 * entry_direction
@@ -1211,22 +1212,22 @@ class DashboardData:
             return value
 
     @staticmethod
-    def _output_action(value: Any) -> tuple[bool, bool, int]:
-        if isinstance(value, (list, tuple)) and len(value) >= 2:
-            direction = value[2] if len(value) >= 3 else (1 if value[0] else 0)
-            return bool(value[0]), bool(value[1]), int(direction)
-        if isinstance(value, dict):
-            return (
-                bool(value.get("is_entry", value.get("entry", False))),
-                bool(value.get("is_close_all", value.get("close_all", False))),
-                int(
-                    value.get(
-                        "direction",
-                        1 if value.get("is_entry", value.get("entry", False)) else 0,
-                    )
-                ),
-            )
-        return False, False, 0
+    def _output_action(value: Any) -> tuple[bool, bool, int] | None:
+        if not isinstance(value, (list, tuple)) or len(value) != 3:
+            return None
+        is_entry, is_close, direction = value
+        if (
+            not isinstance(is_entry, bool)
+            or not isinstance(is_close, bool)
+            or (is_entry and is_close)
+            or isinstance(direction, bool)
+            or not isinstance(direction, int)
+            or direction not in (-1, 0, 1)
+            or ((is_entry or is_close) and direction == 0)
+            or (not (is_entry or is_close) and direction != 0)
+        ):
+            return None
+        return is_entry, is_close, direction
 
     @staticmethod
     def _valid_symbol(value: str) -> str:
