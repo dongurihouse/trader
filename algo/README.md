@@ -74,7 +74,9 @@ signals ignore interpolated bars. Relative volume uses the median volume for
 each elapsed opening slot across the configured number of complete prior data
 sessions.
 
-`relative_momentum` measures the signed return over its trailing window. Its
+`relative_momentum` measures the signed return over its trailing window. During
+the opening minutes, the trailing window grows from the available session data
+until it reaches the configured length. Its
 direction stays active while consecutive rolling returns keep the same sign
 and exceed `min_momentum_pct`; this supplies the causal trend duration. At each
 regular-session minute, it compares absolute return and duration with one
@@ -85,13 +87,16 @@ move or an unusually persistent move can qualify. The signal uses no current-
 session future bars and returns `null` outside regular hours or without enough
 complete history.
 
-After the longest alignment window is available, the signal also publishes a
-`persistence_score`. It combines 80% joint magnitude/duration strength with
-20% agreement between the current direction and trailing windows at one-half,
-two times, and three times `window_minutes`. This score measures evidence that
-the current direction will stay active; it does not claim that the future
-direction-adjusted return will be positive. `persistent` uses the same
-`strong_percentile` threshold as `strong`.
+The signal publishes a continuous `persistence_score` from the first regular-
+session minute. Before the full alignment horizons are available, each horizon
+is clamped to the available session length and duplicate horizons collapse.
+After 30 minutes, the configured 5-, 20-, and 30-minute horizons are all active.
+The score combines 80% joint magnitude/duration strength with 20% directional
+agreement across those horizons. Neutral momentum publishes a zero score
+instead of a gap. This score measures evidence that the current direction will
+stay active; it does not claim that the future direction-adjusted return will
+be positive. `persistent` uses the same `strong_percentile` threshold as
+`strong`.
 
 `atr_session` also accepts complete, uniform two- or five-minute archive
 sessions. It uses only the session high, low, and close, so lower-frequency

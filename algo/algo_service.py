@@ -77,6 +77,7 @@ _RELATIVE_MOMENTUM_BASELINES: dict[
     tuple[str, str, date, int, int, int, float, int],
     Optional[Mapping[int, tuple[tuple[float, ...], tuple[float, ...]]]],
 ] = {}
+_RELATIVE_MOMENTUM_REPAIR_ATTEMPTS: set[tuple[str, str, str, int]] = set()
 _INITIALIZED_DATABASES: set[Path] = set()
 _DATABASE_INIT_LOCK = threading.Lock()
 
@@ -1091,10 +1092,8 @@ def _relative_momentum_features(
     run_length = 0
     for index, row in enumerate(rows):
         elapsed = index + 1
-        if elapsed < window_minutes:
-            features.append(None)
-            continue
-        reference = prices[elapsed - window_minutes]
+        effective_window = min(window_minutes, elapsed)
+        reference = prices[elapsed - effective_window]
         price = float(row["close"])
         if reference <= 0.0 or price <= 0.0:
             features.append(None)
@@ -1110,7 +1109,9 @@ def _relative_momentum_features(
         else:
             run_length = 1
         previous_direction = direction
-        duration = window_minutes + run_length - 1 if direction else 0
+        duration = (
+            min(elapsed, effective_window + run_length - 1) if direction else 0
+        )
         if direction:
             start = elapsed - duration
             trend_move_pct = (price / prices[start] - 1.0) * 100.0
@@ -1149,8 +1150,10 @@ def _momentum_direction_alignment(
     windows: Sequence[int],
     min_momentum_pct: float,
 ) -> Optional[float]:
-    if direction == 0 or not rows or len(rows) < max(windows):
+    if not rows:
         return None
+    if direction == 0:
+        return 0.0
     prices = [float(rows[0]["open"])] + [float(row["close"]) for row in rows]
     elapsed = len(rows)
     aligned = 0
@@ -1300,8 +1303,6 @@ def _signal_relative_momentum(
         return None
     window_minutes = int(parameters["window_minutes"])
     session_minute = int(session["minute"])
-    if session_minute + 1 < window_minutes:
-        return None
     session_open = int(session["open_ts"])
     rows = _session_bars(
         connection,
@@ -1362,23 +1363,31 @@ def _signal_relative_momentum(
         window_minutes * 2,
         window_minutes * 3,
     )
+    alignment_windows = tuple(
+        sorted({min(window, len(rows)) for window in alignment_windows})
+    )
     direction_alignment = _momentum_direction_alignment(
         rows,
         direction_value,
         alignment_windows,
         float(parameters["min_momentum_pct"]),
     )
-    persistence_score = _momentum_persistence_score(
-        magnitude_percentile,
-        duration_percentile,
-        direction_alignment,
+    persistence_score = (
+        0.0
+        if direction_value == 0
+        else _momentum_persistence_score(
+            magnitude_percentile,
+            duration_percentile,
+            direction_alignment,
+        )
     )
     strong = (
         direction_value != 0
         and strength_percentile >= float(parameters["strong_percentile"])
     )
     persistent = (
-        persistence_score is not None
+        direction_value != 0
+        and persistence_score is not None
         and persistence_score >= float(parameters["strong_percentile"])
     )
     return {
@@ -2919,16 +2928,20 @@ def _warm_primary_relative_momentum(
         return ticker, 0
 
     stored = {
-        int(row["ts"])
+        int(row["ts"]): row["output"]
         for row in connection.execute(
             """
-            SELECT ts FROM outputs
+            SELECT ts,output FROM outputs
             WHERE ticker=? AND kind=? AND config=? AND ts>=? AND ts<?
             """,
             (ticker, kind, settings.version, session_open, session_close),
         )
     }
-    targets = [ts for ts in timestamps if ts not in stored]
+    targets = [
+        ts
+        for ts in timestamps
+        if ts not in stored or not _relative_momentum_has_score(stored[ts])
+    ]
     if not targets:
         return ticker, 0
 
@@ -2955,6 +2968,108 @@ def _warm_primary_relative_momentum(
         rows,
     )
     return ticker, len(rows)
+
+
+def _relative_momentum_has_score(output: str) -> bool:
+    try:
+        value = json.loads(output)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(value, Mapping):
+        return False
+    score = value.get("persistence_score")
+    return (
+        not isinstance(score, bool)
+        and isinstance(score, (int, float))
+        and math.isfinite(score)
+    )
+
+
+def _repair_relative_momentum_gaps(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    limit: int = 5_000,
+) -> int:
+    """Recompute stored regular-session gaps with the continuous score."""
+    momentum_entry = next(
+        (
+            (name, node)
+            for name, node in settings.signals.items()
+            if node["function"] == "relative_momentum"
+        ),
+        None,
+    )
+    if momentum_entry is None or limit < 1:
+        return 0
+
+    kind, node = momentum_entry
+    computed_at = int(time.time())
+    repaired_rows = []
+    evaluated = 0
+    database_key = str(settings.database)
+    for ticker in settings.tickers:
+        latest = connection.execute(
+            "SELECT MAX(ts) FROM bars WHERE ticker=?", (ticker,)
+        ).fetchone()[0]
+        if latest is None:
+            continue
+        candidates = connection.execute(
+            """
+            SELECT ts,output FROM outputs
+            WHERE ticker=? AND kind=? AND config=? AND ts>=?
+              AND (
+                output='null' OR NOT json_valid(output) OR
+                COALESCE(json_type(output, '$.persistence_score'), '')
+                  NOT IN ('integer', 'real')
+              )
+            ORDER BY ts DESC
+            """,
+            (
+                ticker,
+                kind,
+                settings.version,
+                int(latest) - settings.evaluation_days * 86_400,
+            ),
+        ).fetchall()
+        for row in candidates:
+            ts = int(row["ts"])
+            attempt = (database_key, settings.version, ticker, ts)
+            if attempt in _RELATIVE_MOMENTUM_REPAIR_ATTEMPTS:
+                continue
+            _RELATIVE_MOMENTUM_REPAIR_ATTEMPTS.add(attempt)
+            session = _signal_session(connection, ticker, ts, {}, {}, settings)
+            if session is None:
+                continue
+            value = _signal_relative_momentum(
+                connection,
+                ticker,
+                ts,
+                node["params"],
+                {"bars": None, "session": session},
+                settings,
+            )
+            evaluated += 1
+            serialized = _json(value)
+            if _relative_momentum_has_score(serialized):
+                repaired_rows.append(
+                    (ticker, ts, kind, settings.version, serialized, computed_at)
+                )
+            if evaluated >= limit:
+                break
+        if evaluated >= limit:
+            break
+
+    if repaired_rows:
+        connection.executemany(
+            """
+            INSERT INTO outputs(ticker,ts,kind,config,output,computed_at)
+            VALUES (?,?,?,?,?,?)
+            ON CONFLICT(ticker,ts,kind,config) DO UPDATE SET
+              output=excluded.output,computed_at=excluded.computed_at
+            """,
+            repaired_rows,
+        )
+    return len(repaired_rows)
 
 
 def _write_result(
@@ -3081,14 +3196,20 @@ def cycle(
         warm_ticker, warm_rows = _warm_primary_relative_momentum(
             connection, settings
         )
+        repaired_rows = _repair_relative_momentum_gaps(connection, settings)
         if warm_rows:
             message = "priority momentum warmup ticker=%s rows=%d" % (
                 warm_ticker,
                 warm_rows,
             )
             _log(connection, "info", message)
-            connection.commit()
             logging.info(message)
+        if repaired_rows:
+            message = "continuous momentum repair rows=%d" % repaired_rows
+            _log(connection, "info", message)
+            logging.info(message)
+        if warm_rows or repaired_rows:
+            connection.commit()
 
         stats = {"pairs": 0, "outputs": 0, "entries": 0, "exits": 0}
         states: dict[str, _EvaluationState] = {}
