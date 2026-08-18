@@ -272,7 +272,7 @@
       "params": {
         "gap_min_pct": 2.0,
         "risk_atr_frac": 0.25,
-        "target_r": 2.0,
+        "target_r": 0.75,
         "minute_min": 15,
         "minute_max": 120,
         "entry_cutoff_minutes": 10,
