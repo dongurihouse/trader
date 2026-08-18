@@ -643,6 +643,28 @@ def _session_bars(
     ).fetchall()
 
 
+def _rows_form_uniform_grid(
+    rows: Sequence[Mapping[str, Any]],
+    start: int,
+    end_exclusive: int,
+    accepted_cadences: Sequence[int],
+) -> bool:
+    duration = end_exclusive - start
+    if not rows or duration <= 0:
+        return False
+    timestamps = [int(row["ts"]) for row in rows]
+    return any(
+        cadence > 0
+        and duration % cadence == 0
+        and len(timestamps) == duration // cadence
+        and all(
+            timestamp == start + index * cadence
+            for index, timestamp in enumerate(timestamps)
+        )
+        for cadence in accepted_cadences
+    )
+
+
 def _parameter_keys(parameters: Mapping[str, Any], allowed: set[str]) -> None:
     unknown = set(parameters) - allowed
     if unknown:
@@ -681,19 +703,37 @@ def _number(value: Any, name: str, minimum: float = 0.0) -> float:
     return float(require_float(value, name, minimum=minimum, error=ConfigError))
 
 
+def _parameter_int(
+    parameters: Mapping[str, Any], name: str, minimum: int = 1
+) -> int:
+    return require_int(
+        parameters.get(name), name, minimum=minimum, error=ConfigError
+    )
+
+
+def _parameter_number(
+    parameters: Mapping[str, Any], name: str, minimum: float = 0.0
+) -> float:
+    return _number(parameters.get(name), name, minimum=minimum)
+
+
+def _parameter_bool(parameters: Mapping[str, Any], name: str) -> bool:
+    return _boolean(parameters.get(name), name)
+
+
 def _normalize_sma(
     parameters: Mapping[str, Any], tickers: tuple[str, ...]
 ) -> Mapping[str, Any]:
     _parameter_keys(parameters, {"field", "period", "include_interpolated"})
     field = parameters.get("field")
-    period = parameters.get("period")
-    include = parameters.get("include_interpolated")
     if field not in BAR_FIELDS:
         raise ConfigError("field must name a stored bar field")
     return {
         "field": field,
-        "period": require_int(period, "period", error=ConfigError),
-        "include_interpolated": _boolean(include, "include_interpolated"),
+        "period": _parameter_int(parameters, "period"),
+        "include_interpolated": _parameter_bool(
+            parameters, "include_interpolated"
+        ),
     }
 
 
@@ -708,7 +748,7 @@ def _normalize_int_parameter(
     parameters: Mapping[str, Any], name: str, minimum: int = 1
 ) -> Mapping[str, Any]:
     _parameter_keys(parameters, {name})
-    return {name: require_int(parameters.get(name), name, minimum, error=ConfigError)}
+    return {name: _parameter_int(parameters, name, minimum)}
 
 
 def _normalize_last_close(
@@ -716,8 +756,8 @@ def _normalize_last_close(
 ) -> Mapping[str, Any]:
     _parameter_keys(parameters, {"include_interpolated"})
     return {
-        "include_interpolated": _boolean(
-            parameters.get("include_interpolated"), "include_interpolated"
+        "include_interpolated": _parameter_bool(
+            parameters, "include_interpolated"
         )
     }
 
@@ -727,14 +767,8 @@ def _normalize_rvol(
 ) -> Mapping[str, Any]:
     _parameter_keys(parameters, {"cap_bars", "baseline_sessions"})
     return {
-        "cap_bars": require_int(
-            parameters.get("cap_bars"), "cap_bars", error=ConfigError
-        ),
-        "baseline_sessions": require_int(
-            parameters.get("baseline_sessions"),
-            "baseline_sessions",
-            error=ConfigError,
-        ),
+        "cap_bars": _parameter_int(parameters, "cap_bars"),
+        "baseline_sessions": _parameter_int(parameters, "baseline_sessions"),
     }
 
 
@@ -753,33 +787,14 @@ def _normalize_relative_momentum(
         },
     )
     result = {
-        "window_minutes": require_int(
-            parameters.get("window_minutes"),
-            "window_minutes",
-            error=ConfigError,
+        "window_minutes": _parameter_int(parameters, "window_minutes"),
+        "baseline_sessions": _parameter_int(parameters, "baseline_sessions"),
+        "min_sessions": _parameter_int(parameters, "min_sessions"),
+        "time_tolerance_minutes": _parameter_int(
+            parameters, "time_tolerance_minutes", minimum=0
         ),
-        "baseline_sessions": require_int(
-            parameters.get("baseline_sessions"),
-            "baseline_sessions",
-            error=ConfigError,
-        ),
-        "min_sessions": require_int(
-            parameters.get("min_sessions"),
-            "min_sessions",
-            error=ConfigError,
-        ),
-        "time_tolerance_minutes": require_int(
-            parameters.get("time_tolerance_minutes"),
-            "time_tolerance_minutes",
-            minimum=0,
-            error=ConfigError,
-        ),
-        "min_momentum_pct": _number(
-            parameters.get("min_momentum_pct"), "min_momentum_pct"
-        ),
-        "strong_percentile": _number(
-            parameters.get("strong_percentile"), "strong_percentile"
-        ),
+        "min_momentum_pct": _parameter_number(parameters, "min_momentum_pct"),
+        "strong_percentile": _parameter_number(parameters, "strong_percentile"),
     }
     if result["min_sessions"] > result["baseline_sessions"]:
         raise ConfigError("min_sessions cannot exceed baseline_sessions")
@@ -804,12 +819,12 @@ def _normalize_opening_sentiment(
         "market_tickers": _configured_tickers(
             parameters.get("market_tickers"), "market_tickers", tickers
         ),
-        "minutes": require_int(parameters.get("minutes"), "minutes", error=ConfigError),
-        "min_market_move_pct": _number(
-            parameters.get("min_market_move_pct"), "min_market_move_pct"
+        "minutes": _parameter_int(parameters, "minutes"),
+        "min_market_move_pct": _parameter_number(
+            parameters, "min_market_move_pct"
         ),
-        "require_ticker_agreement": _boolean(
-            parameters.get("require_ticker_agreement"), "require_ticker_agreement"
+        "require_ticker_agreement": _parameter_bool(
+            parameters, "require_ticker_agreement"
         ),
     }
 
@@ -831,48 +846,25 @@ def _normalize_pullback(
     }
     _parameter_keys(parameters, names)
     result: dict[str, Any] = {
-        "early_minutes": require_int(
-            parameters.get("early_minutes"), "early_minutes", error=ConfigError
+        "early_minutes": _parameter_int(parameters, "early_minutes"),
+        "early_window_minutes": _parameter_int(parameters, "early_window_minutes"),
+        "late_window_minutes": _parameter_int(parameters, "late_window_minutes"),
+        "late_market_strength_ratio": _parameter_number(
+            parameters, "late_market_strength_ratio"
         ),
-        "early_window_minutes": require_int(
-            parameters.get("early_window_minutes"),
-            "early_window_minutes",
-            error=ConfigError,
+        "max_threshold_ratio": _parameter_number(
+            parameters, "max_threshold_ratio", minimum=1.0
         ),
-        "late_window_minutes": require_int(
-            parameters.get("late_window_minutes"),
-            "late_window_minutes",
-            error=ConfigError,
+        "entry_cutoff_minutes": _parameter_int(
+            parameters, "entry_cutoff_minutes", minimum=0
         ),
-        "late_market_strength_ratio": _number(
-            parameters.get("late_market_strength_ratio"),
-            "late_market_strength_ratio",
+        "baseline_sessions": _parameter_int(parameters, "baseline_sessions"),
+        "min_baseline_sessions": _parameter_int(
+            parameters, "min_baseline_sessions"
         ),
-        "max_threshold_ratio": _number(
-            parameters.get("max_threshold_ratio"),
-            "max_threshold_ratio",
-            minimum=1.0,
-        ),
-        "entry_cutoff_minutes": require_int(
-            parameters.get("entry_cutoff_minutes"),
-            "entry_cutoff_minutes",
-            minimum=0,
-            error=ConfigError,
-        ),
-        "baseline_sessions": require_int(
-            parameters.get("baseline_sessions"),
-            "baseline_sessions",
-            error=ConfigError,
-        ),
-        "min_baseline_sessions": require_int(
-            parameters.get("min_baseline_sessions"),
-            "min_baseline_sessions",
-            error=ConfigError,
-        ),
-        "percentile": _number(parameters.get("percentile"), "percentile"),
-        "min_extreme_distance_pct": _number(
-            parameters.get("min_extreme_distance_pct"),
-            "min_extreme_distance_pct",
+        "percentile": _parameter_number(parameters, "percentile"),
+        "min_extreme_distance_pct": _parameter_number(
+            parameters, "min_extreme_distance_pct"
         ),
     }
     if result["min_baseline_sessions"] > result["baseline_sessions"]:
@@ -967,18 +959,8 @@ def _complete_session_summary(
         session_close - 1,
         include_interpolated=False,
     )
-    timestamps = [int(row["ts"]) for row in rows]
-    cadence = timestamps[1] - timestamps[0] if len(timestamps) > 1 else 0
-    expected = (session_close - session_open) // cadence if cadence else 0
-    if (
-        cadence not in (60, 120, 300)
-        or len(rows) != expected
-        or timestamps[0] != session_open
-        or timestamps[-1] != session_close - cadence
-        or any(
-            timestamp != session_open + index * cadence
-            for index, timestamp in enumerate(timestamps)
-        )
+    if not _rows_form_uniform_grid(
+        rows, session_open, session_close, (60, 120, 300)
     ):
         _SESSION_SUMMARIES[key] = None
         return None
@@ -1201,9 +1183,8 @@ def _prior_volume_baseline(
             limit=cap_bars,
             include_interpolated=False,
         )
-        if len(rows) == cap_bars and all(
-            int(row["ts"]) == session_open + slot * 60
-            for slot, row in enumerate(rows)
+        if _rows_form_uniform_grid(
+            rows, session_open, session_open + cap_bars * 60, (60,)
         ):
             sessions.append([float(row["volume"]) for row in rows])
             if len(sessions) == baseline_sessions:
@@ -1376,10 +1357,8 @@ def _complete_relative_momentum_session(
         session_close - 1,
         include_interpolated=False,
     )
-    expected = (session_close - session_open) // 60
-    if len(rows) != expected or any(
-        int(row["ts"]) != session_open + index * 60
-        for index, row in enumerate(rows)
+    if not _rows_form_uniform_grid(
+        rows, session_open, session_close, (60,)
     ):
         result = None
     else:
@@ -1481,9 +1460,11 @@ def _signal_relative_momentum(
         ts,
         include_interpolated=False,
     )
-    if len(rows) != session_minute + 1 or any(
-        int(row["ts"]) != session_open + index * 60
-        for index, row in enumerate(rows)
+    if not _rows_form_uniform_grid(
+        rows,
+        session_open,
+        session_open + (session_minute + 1) * 60,
+        (60,),
     ):
         return None
     current = _relative_momentum_features(
@@ -1742,10 +1723,8 @@ def _prior_pullback_baseline(
             session_close - 1,
             include_interpolated=False,
         )
-        expected = (session_close - session_open) // 60
-        continuous = len(rows) == expected and all(
-            int(row["ts"]) == session_open + index * 60
-            for index, row in enumerate(rows)
+        continuous = _rows_form_uniform_grid(
+            rows, session_open, session_close, (60,)
         )
         if continuous:
             early_stop = min(early_minutes, len(rows) - entry_cutoff)
@@ -2219,217 +2198,15 @@ def _fixed_atr_exit(
 def _algo_momentum_continuation(
     context: AlgoContext,
 ) -> tuple[bool, bool, int]:
-    session_name, first30_name, atr_name, rvol_name, price_name = context.inputs
-    session = context.inputs[session_name]
-    first30 = require_float(
-        context.inputs[first30_name],
-        "first30_ret",
-        nullable=True,
-        error=EvaluationError,
-    )
-    atr_session = require_float(
-        context.inputs[atr_name],
-        "atr_session",
-        nullable=True,
-        error=EvaluationError,
-    )
-    rvol = require_float(
-        context.inputs[rvol_name],
-        "rvol_open",
-        nullable=True,
-        error=EvaluationError,
-    )
-    price = require_float(
-        context.inputs[price_name],
-        "last_close",
-        nullable=True,
-        error=EvaluationError,
-    )
-    first30_min = float(context.parameters["first30_min_pct"])
-    risk_fraction = float(context.parameters["risk_atr_frac"])
-    target_r = float(context.parameters["target_r"])
-    min_rvol = float(context.parameters["min_rvol"])
-    minute_min = int(context.parameters["minute_min"])
-    minute_max = int(context.parameters["minute_max"])
-    entry_cutoff = float(context.parameters["entry_cutoff_minutes"])
-    flat_minutes = float(context.parameters["flat_minutes"])
-    if (
-        session is None
-        or first30 is None
-        or atr_session is None
-        or rvol is None
-        or price is None
-    ):
-        return False, False, 0
-    if context.open_entries:
-        return _fixed_atr_exit(
-            context,
-            session,
-            float(atr_session),
-            float(price),
-            risk_fraction,
-            target_r,
-            flat_minutes,
-        )
-    if _algo_has_session_entry(context):
-        return False, False, 0
-    window_min, window_max = _algo_window(session, minute_min, minute_max)
-    minute = int(session["minute"])
-    if (
-        minute < window_min
-        or minute >= window_max
-        or float(session["to_close"]) < entry_cutoff
-        or float(rvol) <= min_rvol
-        or abs(float(first30)) < first30_min
-        or float(first30) == 0.0
-    ):
-        return False, False, 0
-    return True, False, 1 if float(first30) > 0.0 else -1
+    return _algo_atr_strategy(context, "momentum_continuation")
 
 
 def _algo_failed_gap(context: AlgoContext) -> tuple[bool, bool, int]:
-    session_name, prior_name, atr_name, price_name = context.inputs
-    session = context.inputs[session_name]
-    prior = context.inputs[prior_name]
-    atr_session = require_float(
-        context.inputs[atr_name],
-        "atr_session",
-        nullable=True,
-        error=EvaluationError,
-    )
-    price = require_float(
-        context.inputs[price_name],
-        "last_close",
-        nullable=True,
-        error=EvaluationError,
-    )
-    gap_min = float(context.parameters["gap_min_pct"])
-    risk_fraction = float(context.parameters["risk_atr_frac"])
-    target_r = float(context.parameters["target_r"])
-    minute_min = int(context.parameters["minute_min"])
-    minute_max = int(context.parameters["minute_max"])
-    entry_cutoff = float(context.parameters["entry_cutoff_minutes"])
-    flat_minutes = float(context.parameters["flat_minutes"])
-    if (
-        session is None
-        or prior is None
-        or atr_session is None
-        or price is None
-    ):
-        return False, False, 0
-    if context.open_entries:
-        return _fixed_atr_exit(
-            context,
-            session,
-            float(atr_session),
-            float(price),
-            risk_fraction,
-            target_r,
-            flat_minutes,
-        )
-    if _algo_has_session_entry(context):
-        return False, False, 0
-    window_min, window_max = _algo_window(session, minute_min, minute_max)
-    minute = int(session["minute"])
-    if (
-        minute < window_min
-        or minute >= window_max
-        or float(session["to_close"]) < entry_cutoff
-    ):
-        return False, False, 0
-    gap = float(prior["gap_pct"])
-    if (
-        gap < -gap_min
-        and float(prior["open_vs_prior_low"]) < 0.0
-        and float(prior["price_vs_prior_low"]) > 0.0
-    ):
-        return True, False, 1
-    if (
-        gap > gap_min
-        and float(prior["open_vs_prior_high"]) > 0.0
-        and float(prior["price_vs_prior_high"]) < 0.0
-    ):
-        return True, False, -1
-    return False, False, 0
+    return _algo_atr_strategy(context, "failed_gap")
 
 
 def _algo_gap_continuation(context: AlgoContext) -> tuple[bool, bool, int]:
-    session_name, prior_name, range_name, atr_name, rvol_name, price_name = (
-        context.inputs
-    )
-    session = context.inputs[session_name]
-    prior = context.inputs[prior_name]
-    opening_range = context.inputs[range_name]
-    atr_session = require_float(
-        context.inputs[atr_name],
-        "atr_session",
-        nullable=True,
-        error=EvaluationError,
-    )
-    rvol = require_float(
-        context.inputs[rvol_name],
-        "rvol_open",
-        nullable=True,
-        error=EvaluationError,
-    )
-    price = require_float(
-        context.inputs[price_name],
-        "last_close",
-        nullable=True,
-        error=EvaluationError,
-    )
-    gap_min = float(context.parameters["gap_min_pct"])
-    risk_fraction = float(context.parameters["risk_atr_frac"])
-    target_r = float(context.parameters["target_r"])
-    min_rvol = float(context.parameters["min_rvol"])
-    minute_min = int(context.parameters["minute_min"])
-    minute_max = int(context.parameters["minute_max"])
-    entry_cutoff = float(context.parameters["entry_cutoff_minutes"])
-    flat_minutes = float(context.parameters["flat_minutes"])
-    if (
-        session is None
-        or prior is None
-        or opening_range is None
-        or atr_session is None
-        or rvol is None
-        or price is None
-    ):
-        return False, False, 0
-    if context.open_entries:
-        return _fixed_atr_exit(
-            context,
-            session,
-            float(atr_session),
-            float(price),
-            risk_fraction,
-            target_r,
-            flat_minutes,
-        )
-    if _algo_has_session_entry(context):
-        return False, False, 0
-    window_min, window_max = _algo_window(session, minute_min, minute_max)
-    minute = int(session["minute"])
-    if (
-        minute < window_min
-        or minute >= window_max
-        or float(session["to_close"]) < entry_cutoff
-        or float(rvol) <= min_rvol
-    ):
-        return False, False, 0
-    gap = float(prior["gap_pct"])
-    if (
-        gap > gap_min
-        and float(prior["open_vs_prior_high"]) > 0.0
-        and float(price) > float(opening_range["high"])
-    ):
-        return True, False, 1
-    if (
-        gap < -gap_min
-        and float(prior["open_vs_prior_low"]) < 0.0
-        and float(price) < float(opening_range["low"])
-    ):
-        return True, False, -1
-    return False, False, 0
+    return _algo_atr_strategy(context, "gap_continuation")
 
 
 def _confirmed_extreme_direction(
@@ -2477,72 +2254,148 @@ def _confirmed_extreme_direction(
     return 0
 
 
-def _algo_extreme_fade(context: AlgoContext) -> tuple[bool, bool, int]:
-    session_name, extremes_name, atr_name, rvol_name, price_name = context.inputs
-    session = context.inputs[session_name]
-    extremes = context.inputs[extremes_name]
-    atr_session = require_float(
-        context.inputs[atr_name],
-        "atr_session",
-        nullable=True,
-        error=EvaluationError,
+def _extreme_fade_exit(
+    context: AlgoContext,
+    session: Mapping[str, Any],
+    atr_session: float,
+    price: float,
+    stop_fraction: float,
+    target_r: float,
+    flat_minutes: float,
+) -> tuple[bool, bool, int]:
+    entry = context.open_entries[0]
+    direction = int(entry["direction"])
+    entry_price = float(entry["price"])
+    entry_rows = context.read_bars(
+        int(session["open_ts"]), int(entry["ts"])
     )
-    rvol = require_float(
-        context.inputs[rvol_name],
-        "rvol_open",
-        nullable=True,
-        error=EvaluationError,
-    )
-    price = require_float(
-        context.inputs[price_name],
-        "last_close",
-        nullable=True,
-        error=EvaluationError,
-    )
-    min_range_atr = float(context.parameters["min_range_atr"])
-    stop_fraction = float(context.parameters["stop_atr_frac"])
-    target_r = float(context.parameters["target_r"])
-    confirmation_bars = int(context.parameters["confirmation_bars"])
-    min_rvol = float(context.parameters["min_rvol"])
-    minute_min = int(context.parameters["minute_min"])
-    minute_max = int(context.parameters["minute_max"])
-    entry_cutoff = float(context.parameters["entry_cutoff_minutes"])
-    flat_minutes = float(context.parameters["flat_minutes"])
+    if not entry_rows:
+        return False, False, 0
+    offset = stop_fraction * atr_session * entry_price
+    entry_high = max(float(row["high"]) for row in entry_rows)
+    entry_low = min(float(row["low"]) for row in entry_rows)
+    stop = entry_low - offset if direction == 1 else entry_high + offset
+    risk = entry_price - stop if direction == 1 else stop - entry_price
+    target = entry_price + direction * target_r * risk
+    hit_stop = price <= stop if direction == 1 else price >= stop
+    hit_target = price >= target if direction == 1 else price <= target
     if (
-        session is None
-        or extremes is None
-        or atr_session is None
-        or rvol is None
-        or price is None
+        risk <= 0.0
+        or hit_stop
+        or hit_target
+        or float(session["to_close"]) <= flat_minutes
     ):
+        return False, True, direction
+    return False, False, 0
+
+
+def _algo_input_float(
+    inputs: Mapping[str, Any], name: str, label: str
+) -> Optional[float]:
+    return require_float(
+        inputs[name], label, nullable=True, error=EvaluationError
+    )
+
+
+def _algo_atr_strategy(
+    context: AlgoContext, strategy: str
+) -> tuple[bool, bool, int]:
+    inputs = context.inputs
+    parameters = context.parameters
+    names = tuple(inputs)
+    first30 = None
+    prior = None
+    opening_range = None
+    extremes = None
+    if strategy == "momentum_continuation":
+        session_name, first30_name, atr_name, rvol_name, price_name = names
+        first30 = _algo_input_float(inputs, first30_name, "first30_ret")
+        setup = [first30]
+    elif strategy == "failed_gap":
+        session_name, prior_name, atr_name, price_name = names
+        prior = inputs[prior_name]
+        rvol_name = None
+        setup = [prior]
+    elif strategy == "gap_continuation":
+        session_name, prior_name, range_name, atr_name, rvol_name, price_name = names
+        prior = inputs[prior_name]
+        opening_range = inputs[range_name]
+        setup = [prior, opening_range]
+    elif strategy == "extreme_fade":
+        session_name, extremes_name, atr_name, rvol_name, price_name = names
+        extremes = inputs[extremes_name]
+        setup = [extremes]
+    else:
+        raise EvaluationError("unsupported ATR strategy: %s" % strategy)
+
+    session = inputs[session_name]
+    atr_session = _algo_input_float(inputs, atr_name, "atr_session")
+    rvol = (
+        _algo_input_float(inputs, rvol_name, "rvol_open")
+        if rvol_name is not None
+        else None
+    )
+    price = _algo_input_float(inputs, price_name, "last_close")
+    first30_min = (
+        float(parameters["first30_min_pct"])
+        if strategy == "momentum_continuation"
+        else 0.0
+    )
+    gap_min = (
+        float(parameters["gap_min_pct"])
+        if strategy in ("failed_gap", "gap_continuation")
+        else 0.0
+    )
+    min_range_atr = (
+        float(parameters["min_range_atr"])
+        if strategy == "extreme_fade"
+        else 0.0
+    )
+    risk_fraction = float(
+        parameters[
+            "stop_atr_frac" if strategy == "extreme_fade" else "risk_atr_frac"
+        ]
+    )
+    target_r = float(parameters["target_r"])
+    confirmation_bars = (
+        int(parameters["confirmation_bars"])
+        if strategy == "extreme_fade"
+        else 0
+    )
+    min_rvol = (
+        float(parameters["min_rvol"])
+        if strategy != "failed_gap"
+        else None
+    )
+    minute_min = int(parameters["minute_min"])
+    minute_max = int(parameters["minute_max"])
+    entry_cutoff = float(parameters["entry_cutoff_minutes"])
+    flat_minutes = float(parameters["flat_minutes"])
+    required = [session, atr_session, price, *setup]
+    if rvol_name is not None:
+        required.append(rvol)
+    if any(value is None for value in required):
         return False, False, 0
     if context.open_entries:
-        entry = context.open_entries[0]
-        direction = int(entry["direction"])
-        entry_price = float(entry["price"])
-        entry_rows = context.read_bars(
-            int(session["open_ts"]), int(entry["ts"])
+        if strategy == "extreme_fade":
+            return _extreme_fade_exit(
+                context,
+                session,
+                float(atr_session),
+                float(price),
+                risk_fraction,
+                target_r,
+                flat_minutes,
+            )
+        return _fixed_atr_exit(
+            context,
+            session,
+            float(atr_session),
+            float(price),
+            risk_fraction,
+            target_r,
+            flat_minutes,
         )
-        if not entry_rows:
-            return False, False, 0
-        offset = stop_fraction * float(atr_session) * entry_price
-        entry_high = max(float(row["high"]) for row in entry_rows)
-        entry_low = min(float(row["low"]) for row in entry_rows)
-        stop = entry_low - offset if direction == 1 else entry_high + offset
-        risk = entry_price - stop if direction == 1 else stop - entry_price
-        target = entry_price + direction * target_r * risk
-        hit_stop = float(price) <= stop if direction == 1 else float(price) >= stop
-        hit_target = (
-            float(price) >= target if direction == 1 else float(price) <= target
-        )
-        if (
-            risk <= 0.0
-            or hit_stop
-            or hit_target
-            or float(session["to_close"]) <= flat_minutes
-        ):
-            return False, True, direction
-        return False, False, 0
     if _algo_has_session_entry(context):
         return False, False, 0
     window_min, window_max = _algo_window(session, minute_min, minute_max)
@@ -2551,8 +2404,46 @@ def _algo_extreme_fade(context: AlgoContext) -> tuple[bool, bool, int]:
         minute < window_min
         or minute >= window_max
         or float(session["to_close"]) < entry_cutoff
-        or float(rvol) <= min_rvol
+        or (
+            min_rvol is not None
+            and (rvol is None or float(rvol) <= min_rvol)
+        )
     ):
+        return False, False, 0
+
+    if strategy == "momentum_continuation":
+        if abs(float(first30)) < first30_min or float(first30) == 0.0:
+            return False, False, 0
+        return True, False, 1 if float(first30) > 0.0 else -1
+    if strategy == "failed_gap":
+        gap = float(prior["gap_pct"])
+        if (
+            gap < -gap_min
+            and float(prior["open_vs_prior_low"]) < 0.0
+            and float(prior["price_vs_prior_low"]) > 0.0
+        ):
+            return True, False, 1
+        if (
+            gap > gap_min
+            and float(prior["open_vs_prior_high"]) > 0.0
+            and float(prior["price_vs_prior_high"]) < 0.0
+        ):
+            return True, False, -1
+        return False, False, 0
+    if strategy == "gap_continuation":
+        gap = float(prior["gap_pct"])
+        if (
+            gap > gap_min
+            and float(prior["open_vs_prior_high"]) > 0.0
+            and float(price) > float(opening_range["high"])
+        ):
+            return True, False, 1
+        if (
+            gap < -gap_min
+            and float(prior["open_vs_prior_low"]) < 0.0
+            and float(price) < float(opening_range["low"])
+        ):
+            return True, False, -1
         return False, False, 0
     if (
         float(extremes["day_range_atr"]) >= min_range_atr
@@ -2568,9 +2459,11 @@ def _algo_extreme_fade(context: AlgoContext) -> tuple[bool, bool, int]:
         window_min,
         window_max,
     )
-    if direction:
-        return True, False, direction
-    return False, False, 0
+    return (True, False, direction) if direction else (False, False, 0)
+
+
+def _algo_extreme_fade(context: AlgoContext) -> tuple[bool, bool, int]:
+    return _algo_atr_strategy(context, "extreme_fade")
 
 
 def _normalize_range_breakout(
@@ -2589,12 +2482,12 @@ def _normalize_range_breakout(
         raise ConfigError("direction must be both, long, or short")
     return {
         "direction": direction,
-        "target_r": _number(parameters.get("target_r"), "target_r"),
-        "min_rvol": _number(parameters.get("min_rvol"), "min_rvol"),
-        "entry_cutoff_minutes": _number(
-            parameters.get("entry_cutoff_minutes"), "entry_cutoff_minutes"
+        "target_r": _parameter_number(parameters, "target_r"),
+        "min_rvol": _parameter_number(parameters, "min_rvol"),
+        "entry_cutoff_minutes": _parameter_number(
+            parameters, "entry_cutoff_minutes"
         ),
-        "flat_minutes": _number(parameters.get("flat_minutes"), "flat_minutes"),
+        "flat_minutes": _parameter_number(parameters, "flat_minutes"),
     }
 
 
@@ -2612,33 +2505,17 @@ def _normalize_sentiment_pullback(
         "capital_fraction",
     }
     _parameter_keys(parameters, names)
-    capital_fraction = _number(
-        parameters.get("capital_fraction"), "capital_fraction"
-    )
+    capital_fraction = _parameter_number(parameters, "capital_fraction")
     if capital_fraction <= 0.0 or capital_fraction > 0.5:
         raise ConfigError("capital_fraction must be > 0 and <= 0.5")
     return {
-        "early_minutes": require_int(
-            parameters.get("early_minutes"), "early_minutes", error=ConfigError
-        ),
-        "early_hold_minutes": require_int(
-            parameters.get("early_hold_minutes"),
-            "early_hold_minutes",
-            error=ConfigError,
-        ),
-        "late_hold_minutes": require_int(
-            parameters.get("late_hold_minutes"),
-            "late_hold_minutes",
-            error=ConfigError,
-        ),
-        "take_profit_pct": _number(
-            parameters.get("take_profit_pct"), "take_profit_pct"
-        ),
-        "stop_loss_pct": _number(
-            parameters.get("stop_loss_pct"), "stop_loss_pct"
-        ),
-        "pattern_exit": _boolean(parameters.get("pattern_exit"), "pattern_exit"),
-        "flat_minutes": _number(parameters.get("flat_minutes"), "flat_minutes"),
+        "early_minutes": _parameter_int(parameters, "early_minutes"),
+        "early_hold_minutes": _parameter_int(parameters, "early_hold_minutes"),
+        "late_hold_minutes": _parameter_int(parameters, "late_hold_minutes"),
+        "take_profit_pct": _parameter_number(parameters, "take_profit_pct"),
+        "stop_loss_pct": _parameter_number(parameters, "stop_loss_pct"),
+        "pattern_exit": _parameter_bool(parameters, "pattern_exit"),
+        "flat_minutes": _parameter_number(parameters, "flat_minutes"),
         "capital_fraction": capital_fraction,
     }
 
@@ -2650,20 +2527,13 @@ def _normalize_algo_window(
 ) -> dict[str, Any]:
     _parameter_keys(parameters, {"minute_min", "minute_max", *float_names})
     result: dict[str, Any] = {
-        "minute_min": require_int(
-            parameters.get("minute_min"),
-            "minute_min",
-            minimum=0,
-            error=ConfigError,
-        ),
-        "minute_max": require_int(
-            parameters.get("minute_max"), "minute_max", error=ConfigError
-        ),
+        "minute_min": _parameter_int(parameters, "minute_min", minimum=0),
+        "minute_max": _parameter_int(parameters, "minute_max"),
     }
     if result["minute_min"] >= result["minute_max"]:
         raise ConfigError("minute_min must be less than minute_max")
     result.update(
-        (name, _number(parameters.get(name), name)) for name in float_names
+        (name, _parameter_number(parameters, name)) for name in float_names
     )
     return result
 
@@ -3299,35 +3169,81 @@ def _recalculation_pairs(
     return pairs
 
 
-def _warm_primary_shape(
+def _upsert_output_rows(
+    connection: sqlite3.Connection,
+    rows: Sequence[tuple[str, int, str, str, int]],
+) -> None:
+    connection.executemany(
+        """
+        INSERT INTO outputs(ticker,ts,kind,output,computed_at)
+        VALUES (?,?,?,?,?)
+        ON CONFLICT(ticker,ts,kind) DO UPDATE SET
+          output=excluded.output,computed_at=excluded.computed_at
+        """,
+        rows,
+    )
+
+
+def _warm_primary(
     connection: sqlite3.Connection,
     settings: Settings,
+    function_name: str,
+    targets: Callable[
+        [sqlite3.Connection, Settings, str, int, str], Sequence[int]
+    ],
+    compute: Callable[[str, int, Mapping[str, Any]], Any],
 ) -> tuple[str, int]:
-    """Fill the primary ticker's current shape before deep history catches up."""
-    shape_entry = next(
+    signal_entry = next(
         (
             (name, node)
             for name, node in settings.signals.items()
-            if node["function"] == "shape_v1"
+            if node["function"] == function_name
         ),
         None,
     )
-    if shape_entry is None or not settings.tickers:
+    if signal_entry is None or not settings.tickers:
         return "", 0
 
-    kind, node = shape_entry
+    kind, node = signal_entry
     ticker = settings.tickers[0]
     latest = connection.execute(
         "SELECT MAX(ts) FROM bars WHERE ticker=?", (ticker,)
     ).fetchone()[0]
     if latest is None:
         return ticker, 0
-
-    _local_day, session_open, session_close = _session_window(settings, int(latest))
-    if int(latest) >= session_close:
+    target_timestamps = targets(
+        connection, settings, ticker, int(latest), kind
+    )
+    if not target_timestamps:
         return ticker, 0
-    if int(latest) < session_open:
-        timestamps = [int(latest)]
+
+    computed_at = int(time.time())
+    rows = [
+        (
+            ticker,
+            ts,
+            kind,
+            _json(compute(ticker, ts, node)),
+            computed_at,
+        )
+        for ts in target_timestamps
+    ]
+    _upsert_output_rows(connection, rows)
+    return ticker, len(rows)
+
+
+def _shape_warm_targets(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    ticker: str,
+    latest: int,
+    kind: str,
+) -> Sequence[int]:
+    _local_day, session_open, session_close = _session_window(settings, latest)
+    if latest >= session_close:
+        return ()
+    if latest < session_open:
+        timestamps = [latest]
     else:
         timestamps = [
             int(row["ts"])
@@ -3337,11 +3253,11 @@ def _warm_primary_shape(
                 WHERE ticker=? AND ts>=? AND ts<=?
                 ORDER BY ts
                 """,
-                (ticker, session_open, int(latest)),
+                (ticker, session_open, latest),
             )
         ]
     if not timestamps:
-        return ticker, 0
+        return ()
 
     stored = {
         int(row["ts"])
@@ -3353,58 +3269,33 @@ def _warm_primary_shape(
             (ticker, kind, timestamps[0], timestamps[-1]),
         )
     }
-    targets = [ts for ts in timestamps if ts not in stored]
-    if not targets:
-        return ticker, 0
-
-    computed_at = int(time.time())
-    rows = []
-    for ts in targets:
-        value = _signal_shape_v1(
-            connection,
-            ticker,
-            ts,
-            node["params"],
-            {"bars": None},
-            settings,
-        )
-        rows.append((ticker, ts, kind, _json(value), computed_at))
-    connection.executemany(
-        """
-        INSERT INTO outputs(ticker,ts,kind,output,computed_at)
-        VALUES (?,?,?,?,?)
-        ON CONFLICT(ticker,ts,kind) DO UPDATE SET
-          output=excluded.output,computed_at=excluded.computed_at
-        """,
-        rows,
-    )
-    return ticker, len(rows)
+    return [ts for ts in timestamps if ts not in stored]
 
 
-def _warm_primary_relative_momentum(
+def _warm_primary_shape(
     connection: sqlite3.Connection,
     settings: Settings,
 ) -> tuple[str, int]:
-    """Fill the primary ticker's latest session before deep history catches up."""
-    momentum_entry = next(
-        (
-            (name, node)
-            for name, node in settings.signals.items()
-            if node["function"] == "relative_momentum"
+    """Fill the primary ticker's current shape before deep history catches up."""
+    return _warm_primary(
+        connection,
+        settings,
+        "shape_v1",
+        _shape_warm_targets,
+        lambda ticker, ts, node: _signal_shape_v1(
+            connection, ticker, ts, node["params"], {"bars": None}, settings
         ),
-        None,
     )
-    if momentum_entry is None or not settings.tickers:
-        return "", 0
 
-    kind, node = momentum_entry
-    ticker = settings.tickers[0]
-    latest = connection.execute(
-        "SELECT MAX(ts) FROM bars WHERE ticker=?", (ticker,)
-    ).fetchone()[0]
-    if latest is None:
-        return ticker, 0
-    _local_day, session_open, session_close = _session_window(settings, int(latest))
+
+def _relative_momentum_warm_targets(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    ticker: str,
+    latest: int,
+    kind: str,
+) -> Sequence[int]:
+    _local_day, session_open, session_close = _session_window(settings, latest)
     timestamps = [
         int(row["ts"])
         for row in connection.execute(
@@ -3417,7 +3308,7 @@ def _warm_primary_relative_momentum(
         )
     ]
     if not timestamps:
-        return ticker, 0
+        return ()
 
     stored = {
         int(row["ts"]): row["output"]
@@ -3429,37 +3320,37 @@ def _warm_primary_relative_momentum(
             (ticker, kind, session_open, session_close),
         )
     }
-    targets = [
+    return [
         ts
         for ts in timestamps
         if ts not in stored or not _relative_momentum_has_score(stored[ts])
     ]
-    if not targets:
-        return ticker, 0
 
-    computed_at = int(time.time())
-    rows = []
-    for ts in targets:
-        session = _signal_session(connection, ticker, ts, {}, {}, settings)
-        value = _signal_relative_momentum(
+
+def _warm_primary_relative_momentum(
+    connection: sqlite3.Connection,
+    settings: Settings,
+) -> tuple[str, int]:
+    """Fill the primary ticker's latest session before deep history catches up."""
+    return _warm_primary(
+        connection,
+        settings,
+        "relative_momentum",
+        _relative_momentum_warm_targets,
+        lambda ticker, ts, node: _signal_relative_momentum(
             connection,
             ticker,
             ts,
             node["params"],
-            {"bars": None, "session": session},
+            {
+                "bars": None,
+                "session": _signal_session(
+                    connection, ticker, ts, {}, {}, settings
+                ),
+            },
             settings,
-        )
-        rows.append((ticker, ts, kind, _json(value), computed_at))
-    connection.executemany(
-        """
-        INSERT INTO outputs(ticker,ts,kind,output,computed_at)
-        VALUES (?,?,?,?,?)
-        ON CONFLICT(ticker,ts,kind) DO UPDATE SET
-          output=excluded.output,computed_at=excluded.computed_at
-        """,
-        rows,
+        ),
     )
-    return ticker, len(rows)
 
 
 def _relative_momentum_has_score(output: str) -> bool:
@@ -3551,15 +3442,7 @@ def _repair_relative_momentum_gaps(
             break
 
     if repaired_rows:
-        connection.executemany(
-            """
-            INSERT INTO outputs(ticker,ts,kind,output,computed_at)
-            VALUES (?,?,?,?,?)
-            ON CONFLICT(ticker,ts,kind) DO UPDATE SET
-              output=excluded.output,computed_at=excluded.computed_at
-            """,
-            repaired_rows,
-        )
+        _upsert_output_rows(connection, repaired_rows)
     return len(repaired_rows)
 
 
@@ -3615,15 +3498,7 @@ def _write_result(
     try:
         if replace_algos is not None:
             connection.execute("DELETE FROM outputs")
-        connection.executemany(
-            """
-            INSERT INTO outputs(ticker,ts,kind,output,computed_at)
-            VALUES (?,?,?,?,?)
-            ON CONFLICT(ticker,ts,kind) DO UPDATE SET
-              output=excluded.output,computed_at=excluded.computed_at
-            """,
-            rows,
-        )
+        _upsert_output_rows(connection, rows)
         replaced_names = set(replace_algos or ())
         if replace_algos is not None and replaced_names:
             placeholders = ",".join("?" for _ in replaced_names)
