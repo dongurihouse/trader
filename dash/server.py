@@ -544,6 +544,7 @@ class DashboardData:
 
     def algorithms(self) -> dict[str, Any]:
         config = self.config()
+        configured_tickers = {str(ticker) for ticker in config.get("tickers", [])}
         current_definitions = self._mapping(config.get("algos"))
         definitions: dict[str, dict[str, Any]] = {
             name: {
@@ -703,7 +704,8 @@ class DashboardData:
 
             ticker_rows = []
             tickers = sorted(
-                set(group["ticker_counts"])
+                configured_tickers
+                | set(group["ticker_counts"])
                 | {item["ticker"] for item in group["closed"]}
                 | {item["ticker"] for item in positions}
             )

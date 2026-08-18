@@ -66,12 +66,13 @@ the loopback ports configured by `bars.api_port` and `algo.api_port`.
 Open <http://127.0.0.1:8790/algos> for per-algorithm summaries calculated
 from stored trade actions and exact bar-close prices. The page shows gross
 unit return, win rate, profit factor, drawdown, holding time, per-ticker
-results, current marks, and all closed units. Use the horizontal algorithm
-scorecards to compare summaries and switch the detail view. Returns do not include
-position sizing, fees, or slippage, and trade rows are grouped by algorithm
-name. Select an instrument row to jump to and highlight its trades; all closed
-units remain visible. Select a closed unit to open the SNDK chart, its trading
-date, and all algorithm overlays.
+results for every configured ticker, current marks, and all closed units. A
+ticker without trades remains visible with zero or unavailable results. Use
+the horizontal algorithm scorecards to compare summaries and switch the detail
+view. Returns do not include position sizing, fees, or slippage, and trade rows
+are grouped by algorithm name. Select an instrument row to jump to and
+highlight its trades; all closed units remain visible. Select a closed unit to
+open the SNDK chart, its trading date, and all algorithm overlays.
 
 ## Logs
 
