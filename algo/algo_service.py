@@ -2880,6 +2880,83 @@ def _pending(
     return pending
 
 
+def _warm_primary_relative_momentum(
+    connection: sqlite3.Connection,
+    settings: Settings,
+) -> tuple[str, int]:
+    """Fill the primary ticker's latest session before deep history catches up."""
+    momentum_entry = next(
+        (
+            (name, node)
+            for name, node in settings.signals.items()
+            if node["function"] == "relative_momentum"
+        ),
+        None,
+    )
+    if momentum_entry is None or not settings.tickers:
+        return "", 0
+
+    kind, node = momentum_entry
+    ticker = settings.tickers[0]
+    latest = connection.execute(
+        "SELECT MAX(ts) FROM bars WHERE ticker=?", (ticker,)
+    ).fetchone()[0]
+    if latest is None:
+        return ticker, 0
+    _local_day, session_open, session_close = _session_window(settings, int(latest))
+    timestamps = [
+        int(row["ts"])
+        for row in connection.execute(
+            """
+            SELECT ts FROM bars
+            WHERE ticker=? AND ts>=? AND ts<?
+            ORDER BY ts
+            """,
+            (ticker, session_open, session_close),
+        )
+    ]
+    if not timestamps:
+        return ticker, 0
+
+    stored = {
+        int(row["ts"])
+        for row in connection.execute(
+            """
+            SELECT ts FROM outputs
+            WHERE ticker=? AND kind=? AND config=? AND ts>=? AND ts<?
+            """,
+            (ticker, kind, settings.version, session_open, session_close),
+        )
+    }
+    targets = [ts for ts in timestamps if ts not in stored]
+    if not targets:
+        return ticker, 0
+
+    computed_at = int(time.time())
+    rows = []
+    for ts in targets:
+        session = _signal_session(connection, ticker, ts, {}, {}, settings)
+        value = _signal_relative_momentum(
+            connection,
+            ticker,
+            ts,
+            node["params"],
+            {"bars": None, "session": session},
+            settings,
+        )
+        rows.append((ticker, ts, kind, settings.version, _json(value), computed_at))
+    connection.executemany(
+        """
+        INSERT INTO outputs(ticker,ts,kind,config,output,computed_at)
+        VALUES (?,?,?,?,?,?)
+        ON CONFLICT(ticker,ts,kind,config) DO UPDATE SET
+          output=excluded.output,computed_at=excluded.computed_at
+        """,
+        rows,
+    )
+    return ticker, len(rows)
+
+
 def _write_result(
     connection: sqlite3.Connection,
     settings: Settings,
@@ -3000,6 +3077,18 @@ def cycle(
                 once=True,
             )
         connection.commit()
+
+        warm_ticker, warm_rows = _warm_primary_relative_momentum(
+            connection, settings
+        )
+        if warm_rows:
+            message = "priority momentum warmup ticker=%s rows=%d" % (
+                warm_ticker,
+                warm_rows,
+            )
+            _log(connection, "info", message)
+            connection.commit()
+            logging.info(message)
 
         stats = {"pairs": 0, "outputs": 0, "entries": 0, "exits": 0}
         states: dict[str, _EvaluationState] = {}
