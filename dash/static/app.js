@@ -7,6 +7,7 @@ const state = {
   style: "line",
   algo: null,
   bars: null,
+  chartRevision: null,
   sessions: [],
   selectedDate: null,
   chartRequest: 0,
@@ -1065,7 +1066,12 @@ async function loadOverview({ quiet = false } = {}) {
       state.ticker = preferred?.ticker || overview.quotes.find((quote) => quote.available)?.ticker || overview.config.tickers[0];
     }
     renderOverview();
-    await loadBars({ quiet });
+    const quote = overview.quotes.find((item) => item.ticker === state.ticker);
+    const chartIsCurrent = quiet
+      && state.bars?.ticker === state.ticker
+      && state.chartRevision !== null
+      && Number(state.chartRevision) === Number(quote?.chart_revision);
+    if (!chartIsCurrent) await loadBars({ quiet });
   } catch (error) {
     showToast(error.message);
   }
@@ -1140,6 +1146,9 @@ async function loadBars({ quiet = false } = {}) {
     if (request !== state.chartRequest) return;
     const shouldFocusLatest = state.bars?.ticker !== payload.ticker;
     state.bars = payload;
+    state.chartRevision = state.overview?.quotes.find(
+      (item) => item.ticker === payload.ticker,
+    )?.chart_revision ?? null;
     renderAlgoOverlay();
     renderDateStrip(payload);
     chart.setData(payload);
@@ -1224,5 +1233,9 @@ document.addEventListener("keydown", (event) => {
   $("#trader-menu-button").focus();
 });
 
-loadOverview();
-setInterval(() => loadOverview({ quiet: true }), 30_000);
+async function scheduleRefresh() {
+  await loadOverview({ quiet: true });
+  setTimeout(scheduleRefresh, 30_000);
+}
+
+loadOverview().finally(() => setTimeout(scheduleRefresh, 30_000));

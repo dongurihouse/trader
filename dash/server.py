@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import math
 import mimetypes
@@ -776,6 +777,14 @@ class DashboardData:
         close = float(row["close"])
         change = close - baseline
         change_pct = (change / baseline * 100.0) if baseline else 0.0
+        output_row = connection.execute(
+            "SELECT MAX(computed_at) FROM outputs WHERE ticker = ? AND ts = ?",
+            (ticker, ts),
+        ).fetchone()
+        chart_revision = max(
+            int(row["fetched_at"]),
+            int(output_row[0] or 0),
+        )
         return {
             "ticker": ticker,
             "available": True,
@@ -788,6 +797,7 @@ class DashboardData:
             "low": session["low"],
             "volume": session["volume"],
             "fetched_at": row["fetched_at"],
+            "chart_revision": chart_revision,
         }
 
     def _services(self, connection: sqlite3.Connection, config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1082,20 +1092,26 @@ class DashboardData:
             stride_minutes = 5
 
         configured_version = str(config.get("version", ""))
+        # Start from the much smaller bar range so SQLite can probe outputs by
+        # the full (ticker, timestamp, kind) primary-key prefix.
         version_row = connection.execute(
             """
-            SELECT config, COUNT(*) AS usable_count
-            FROM outputs
-            WHERE ticker = ? AND kind = ?
-              AND ts >= ? AND ts <= ? AND output != 'null'
-            GROUP BY config
+            SELECT candidate.config, COUNT(*) AS usable_count
+            FROM bars AS chart_bar
+            CROSS JOIN outputs AS candidate
+              ON candidate.ticker = chart_bar.ticker
+             AND candidate.ts = chart_bar.ts
+            WHERE chart_bar.ticker = ?
+              AND chart_bar.ts >= ? AND chart_bar.ts <= ?
+              AND candidate.kind = ? AND candidate.output != 'null'
+            GROUP BY candidate.config
             ORDER BY usable_count DESC,
-                     CASE WHEN config = ? THEN 1 ELSE 0 END DESC,
-                     CAST(config AS INTEGER) DESC,
-                     config DESC
+                     CASE WHEN candidate.config = ? THEN 1 ELSE 0 END DESC,
+                     CAST(candidate.config AS INTEGER) DESC,
+                     candidate.config DESC
             LIMIT 1
             """,
-            (ticker, kind, start, end, configured_version),
+            (ticker, start, end, kind, configured_version),
         ).fetchone()
         selected_version = (
             str(version_row["config"]) if version_row is not None else configured_version
@@ -1104,18 +1120,23 @@ class DashboardData:
         snapshots = []
         for row in connection.execute(
             """
-            SELECT ts, output
-            FROM outputs
-            WHERE ticker = ? AND kind = ? AND config = ?
-              AND ts >= ? AND ts <= ? AND output != 'null'
-            ORDER BY ts
+            SELECT candidate.ts,
+                   CASE WHEN json_valid(candidate.output)
+                        THEN json_extract(candidate.output, '$.top_shapes')
+                        ELSE NULL END AS top_shapes
+            FROM bars AS chart_bar
+            CROSS JOIN outputs AS candidate
+              ON candidate.ticker = chart_bar.ticker
+             AND candidate.ts = chart_bar.ts
+            WHERE chart_bar.ticker = ?
+              AND chart_bar.ts >= ? AND chart_bar.ts <= ?
+              AND candidate.kind = ? AND candidate.config = ?
+              AND candidate.output != 'null'
+            ORDER BY candidate.ts
             """,
-            (ticker, kind, selected_version, start, end),
+            (ticker, start, end, kind, selected_version),
         ):
-            output = self._json_value(row["output"])
-            if not isinstance(output, dict):
-                continue
-            top_shapes = output.get("top_shapes")
+            top_shapes = self._json_value(row["top_shapes"])
             if not isinstance(top_shapes, list):
                 continue
             valid_shapes = []
@@ -1173,23 +1194,29 @@ class DashboardData:
             strong_threshold = 80.0
         strong_threshold = max(0.0, min(100.0, float(strong_threshold)))
         configured_version = str(config.get("version", ""))
+        # Avoid scanning every stored signal and config version in the chart
+        # window; each bar produces a narrow primary-key lookup instead.
         version_row = connection.execute(
             """
-            SELECT config, COUNT(*) AS usable_count
-            FROM outputs
-            WHERE ticker = ? AND kind = ?
-              AND ts >= ? AND ts <= ? AND output != 'null'
-              AND CASE WHEN json_valid(output)
-                       THEN json_type(output, '$.persistence_score')
+            SELECT candidate.config, COUNT(*) AS usable_count
+            FROM bars AS chart_bar
+            CROSS JOIN outputs AS candidate
+              ON candidate.ticker = chart_bar.ticker
+             AND candidate.ts = chart_bar.ts
+            WHERE chart_bar.ticker = ?
+              AND chart_bar.ts >= ? AND chart_bar.ts <= ?
+              AND candidate.kind = ? AND candidate.output != 'null'
+              AND CASE WHEN json_valid(candidate.output)
+                       THEN json_type(candidate.output, '$.persistence_score')
                        ELSE NULL END IN ('integer', 'real')
-            GROUP BY config
+            GROUP BY candidate.config
             ORDER BY usable_count DESC,
-                     CASE WHEN config = ? THEN 1 ELSE 0 END DESC,
-                     CAST(config AS INTEGER) DESC,
-                     config DESC
+                     CASE WHEN candidate.config = ? THEN 1 ELSE 0 END DESC,
+                     CAST(candidate.config AS INTEGER) DESC,
+                     candidate.config DESC
             LIMIT 1
             """,
-            (ticker, kind, start, end, configured_version),
+            (ticker, start, end, kind, configured_version),
         ).fetchone()
         selected_version = (
             str(version_row["config"]) if version_row is not None else configured_version
@@ -1198,19 +1225,30 @@ class DashboardData:
         snapshots = []
         for row in connection.execute(
             """
-            SELECT ts, output
-            FROM outputs
-            WHERE ticker = ? AND kind = ? AND config = ?
-              AND ts >= ? AND ts <= ? AND output != 'null'
-            ORDER BY ts
+            SELECT candidate.ts,
+                   CASE WHEN json_valid(candidate.output)
+                        THEN json_extract(candidate.output, '$.persistence_score')
+                        ELSE NULL END AS persistence_score,
+                   CASE WHEN json_valid(candidate.output)
+                        THEN json_extract(candidate.output, '$.signed_persistence')
+                        ELSE NULL END AS signed_persistence,
+                   CASE WHEN json_valid(candidate.output)
+                        THEN json_extract(candidate.output, '$.persistent')
+                        ELSE NULL END AS persistent
+            FROM bars AS chart_bar
+            CROSS JOIN outputs AS candidate
+              ON candidate.ticker = chart_bar.ticker
+             AND candidate.ts = chart_bar.ts
+            WHERE chart_bar.ticker = ?
+              AND chart_bar.ts >= ? AND chart_bar.ts <= ?
+              AND candidate.kind = ? AND candidate.config = ?
+              AND candidate.output != 'null'
+            ORDER BY candidate.ts
             """,
-            (ticker, kind, selected_version, start, end),
+            (ticker, start, end, kind, selected_version),
         ):
-            output = self._json_value(row["output"])
-            if not isinstance(output, dict):
-                continue
-            persistence_score = output.get("persistence_score")
-            signed_persistence = output.get("signed_persistence")
+            persistence_score = row["persistence_score"]
+            signed_persistence = row["signed_persistence"]
             if (
                 isinstance(persistence_score, bool)
                 or not isinstance(persistence_score, (int, float))
@@ -1226,7 +1264,7 @@ class DashboardData:
                     max(-100.0, min(100.0, float(signed_persistence) * 100.0)),
                     3,
                 ),
-                "persistent": bool(output.get("persistent", False)),
+                "persistent": bool(row["persistent"]),
             }
             snapshots.append(snapshot)
 
@@ -1256,10 +1294,6 @@ class DashboardData:
                         "low": min(item["low"] for item in bucket),
                         "close": bucket[-1]["close"],
                         "volume": sum(item["volume"] for item in bucket),
-                        "interpolated": int(any(item["interpolated"] for item in bucket)),
-                        "interpolated_count": sum(int(item["interpolated"]) for item in bucket),
-                        "fetched_at": max(item["fetched_at"] for item in bucket),
-                        "samples": len(bucket),
                     }
                 )
 
@@ -1425,9 +1459,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _json(self, payload: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
         content = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        accepts_gzip = "gzip" in self.headers.get("Accept-Encoding", "").lower()
+        compressed = accepts_gzip and len(content) >= 1024
+        if compressed:
+            content = gzip.compress(content, compresslevel=1)
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(content)))
+        if compressed:
+            self.send_header("Content-Encoding", "gzip")
+        self.send_header("Vary", "Accept-Encoding")
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
