@@ -802,12 +802,14 @@ class DashboardData:
     def health(self) -> dict[str, Any]:
         with self.connection() as connection:
             connection.execute("SELECT 1 FROM bars LIMIT 1").fetchone()
+        config = self.config()
         return {
             "ok": True,
             "database": "read-only",
+            "market": self._market_state(config),
             "services": {
-                "bars": self._service_health(self.config(), "bars", 8789),
-                "algo": self._service_health(self.config(), "algo", 8791),
+                "bars": self._service_health(config, "bars", 8789),
+                "algo": self._service_health(config, "algo", 8791),
             },
         }
 

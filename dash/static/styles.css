@@ -111,11 +111,6 @@ button.brand {
   align-items: center;
 }
 
-.brand-status {
-  position: relative;
-  display: inline-flex;
-}
-
 .market-status-copy {
   position: absolute;
   width: 1px;
@@ -145,7 +140,7 @@ button.brand {
   z-index: 30;
   top: calc(100% + 13px);
   left: 0;
-  width: 202px;
+  width: 212px;
   padding: 7px;
   background: rgba(16, 23, 33, 0.98);
   border: 1px solid var(--line-strong);
@@ -153,7 +148,7 @@ button.brand {
   box-shadow: 0 18px 45px rgba(0, 0, 0, 0.42);
 }
 
-.trader-menu-dropdown small {
+.trader-menu-dropdown > small {
   display: block;
   padding: 5px 8px 7px;
   color: var(--subtle);
@@ -167,6 +162,11 @@ button.brand {
   margin-top: 6px;
   padding-top: 10px;
   border-top: 1px solid var(--line);
+}
+
+.menu-health-list {
+  display: grid;
+  gap: 6px;
 }
 
 .trader-menu-dropdown button {
@@ -321,21 +321,6 @@ button.brand {
   outline-offset: 3px;
 }
 
-.live-refresh {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--acid);
-}
-
-.live-refresh i {
-  width: 6px;
-  height: 6px;
-  background: var(--acid);
-  border-radius: 50%;
-  box-shadow: 0 0 0 4px var(--acid-soft);
-}
-
 .logs-main {
   min-height: calc(100dvh - 76px);
   padding-block: 46px 70px;
@@ -378,14 +363,9 @@ button.brand {
 .log-counts .warn strong { color: var(--amber); }
 .log-counts .error strong { color: var(--red); }
 
-.topbar-health {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
 .health-indicator {
   display: inline-flex;
+  width: 100%;
   align-items: center;
   gap: 7px;
   min-height: 30px;
@@ -406,7 +386,9 @@ button.brand {
 
 .health-indicator-copy {
   display: inline-flex;
+  flex: 1;
   align-items: baseline;
+  justify-content: space-between;
   gap: 5px;
 }
 
@@ -2397,10 +2379,6 @@ a.algo-trade-row:focus-visible {
 }
 
 @media (max-width: 1100px) {
-  .logs-page .updated {
-    display: none;
-  }
-
   .log-toolbar {
     flex-wrap: wrap;
   }
@@ -2446,29 +2424,8 @@ a.algo-trade-row:focus-visible {
     padding-inline: 11px;
   }
 
-  .updated {
-    display: none;
-  }
-
   .topbar-meta {
     gap: 9px;
-  }
-
-  .live-refresh {
-    display: none;
-  }
-
-  .topbar-health {
-    gap: 4px;
-  }
-
-  .health-indicator {
-    gap: 6px;
-    padding-inline: 7px;
-  }
-
-  .health-indicator-copy strong {
-    display: none;
   }
 
   .topbar-nav a {

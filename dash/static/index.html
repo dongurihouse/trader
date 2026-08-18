@@ -7,6 +7,7 @@
     <meta name="description" content="A read-only minute-bar chart for the trader system." />
     <title>Trader — Market chart</title>
     <link rel="stylesheet" href="/styles.css" />
+    <script src="/header.js" defer></script>
     <script src="/app.js" defer></script>
   </head>
   <body>
@@ -14,14 +15,33 @@
 
     <header class="topbar">
       <div class="trader-menu">
-        <button class="brand" id="trader-menu-button" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="trader-menu-dropdown">
+        <button class="brand" id="trader-menu-button" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="trader-menu-dropdown">
           <span class="brand-mark market-status-mark" id="market-dot" aria-hidden="true"><i></i><i></i><i></i></span>
           <span>TRADER</span>
           <span class="brand-chevron" aria-hidden="true">⌄</span>
         </button>
         <span class="market-status-copy" id="market-status" role="status" aria-label="Checking market"></span>
-        <div class="trader-menu-dropdown" id="trader-menu-dropdown" role="menu" aria-label="Chart display" hidden>
-          <small>Chart style</small>
+        <div class="trader-menu-dropdown" id="trader-menu-dropdown" aria-label="Trader menu" hidden>
+          <small>Services</small>
+          <div class="menu-health-list" aria-label="Live service health">
+            <div class="health-indicator is-checking" id="health-bars">
+              <span class="health-indicator-dot" aria-hidden="true"></span>
+              <span class="health-indicator-copy">
+                <small>Bars</small>
+                <strong id="health-bars-status">Checking</strong>
+              </span>
+              <span class="health-indicator-detail" id="health-bars-detail" hidden>Waiting for response</span>
+            </div>
+            <div class="health-indicator is-checking" id="health-algo">
+              <span class="health-indicator-dot" aria-hidden="true"></span>
+              <span class="health-indicator-copy">
+                <small>Algo</small>
+                <strong id="health-algo-status">Checking</strong>
+              </span>
+              <span class="health-indicator-detail" id="health-algo-detail" hidden>Waiting for response</span>
+            </div>
+          </div>
+          <small class="menu-section-label">Chart style</small>
           <button type="button" role="menuitemradio" data-style="line" aria-checked="true">
             <span class="menu-style-icon line" aria-hidden="true"></span>
             Line

@@ -7,43 +7,48 @@
     <meta name="description" content="Live service logs for the trader system." />
     <title>Trader — Service logs</title>
     <link rel="stylesheet" href="/styles.css" />
+    <script src="/header.js" defer></script>
     <script src="/logs.js" defer></script>
   </head>
   <body class="logs-page">
     <a class="skip-link" href="#main">Skip to logs</a>
 
     <header class="topbar">
-      <a class="brand" href="/" aria-label="Trader dashboard home">
-        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-        <span>TRADER</span>
-      </a>
+      <div class="trader-menu">
+        <button class="brand" id="trader-menu-button" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="trader-menu-dropdown">
+          <span class="brand-mark market-status-mark" id="market-dot" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span>TRADER</span>
+          <span class="brand-chevron" aria-hidden="true">⌄</span>
+        </button>
+        <span class="market-status-copy" id="market-status" role="status" aria-label="Checking market"></span>
+        <div class="trader-menu-dropdown" id="trader-menu-dropdown" aria-label="Trader menu" hidden>
+          <small>Services</small>
+          <div class="menu-health-list" aria-label="Live service health">
+            <div class="health-indicator is-checking" id="health-bars">
+              <span class="health-indicator-dot" aria-hidden="true"></span>
+              <span class="health-indicator-copy">
+                <small>Bars</small>
+                <strong id="health-bars-status">Checking</strong>
+              </span>
+              <span class="health-indicator-detail" id="health-bars-detail" hidden>Waiting for response</span>
+            </div>
+            <div class="health-indicator is-checking" id="health-algo">
+              <span class="health-indicator-dot" aria-hidden="true"></span>
+              <span class="health-indicator-copy">
+                <small>Algo</small>
+                <strong id="health-algo-status">Checking</strong>
+              </span>
+              <span class="health-indicator-detail" id="health-algo-detail" hidden>Waiting for response</span>
+            </div>
+          </div>
+        </div>
+      </div>
       <nav class="topbar-nav" aria-label="Dashboard views">
         <a href="/">Chart</a>
         <a href="/algos">Algos</a>
         <a class="active" href="/logs" aria-current="page">Logs</a>
       </nav>
-      <div class="topbar-meta">
-        <span class="live-refresh"><i></i> Auto · 5s</span>
-        <div class="topbar-health" aria-label="Live service health">
-          <div class="health-indicator is-checking" id="health-bars">
-            <span class="health-indicator-dot" aria-hidden="true"></span>
-            <span class="health-indicator-copy">
-              <small>Bars</small>
-              <strong id="health-bars-status">Checking</strong>
-            </span>
-            <span class="health-indicator-detail" id="health-bars-detail" hidden>Waiting for response</span>
-          </div>
-          <div class="health-indicator is-checking" id="health-algo">
-            <span class="health-indicator-dot" aria-hidden="true"></span>
-            <span class="health-indicator-copy">
-              <small>Algo</small>
-              <strong id="health-algo-status">Checking</strong>
-            </span>
-            <span class="health-indicator-detail" id="health-algo-detail" hidden>Waiting for response</span>
-          </div>
-        </div>
-        <span class="updated" id="logs-updated">Connecting…</span>
-      </div>
+      <div class="topbar-meta" aria-hidden="true"></div>
     </header>
 
     <main id="main" class="logs-main">
