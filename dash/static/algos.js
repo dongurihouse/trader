@@ -117,16 +117,12 @@ function renderRollup(payload) {
   const totals = algos.reduce(
     (result, algo) => {
       result.closed += Number(algo.stats.closed_units) || 0;
-      result.open += Number(algo.stats.open_units) || 0;
       result.wins += Number(algo.stats.wins) || 0;
       result.return += Number(algo.stats.realized_return_pct) || 0;
       return result;
     },
-    { closed: 0, open: 0, wins: 0, return: 0 },
+    { closed: 0, wins: 0, return: 0 },
   );
-  $("#algo-count").textContent = numberFormat.format(algos.length);
-  $("#algo-closed").textContent = numberFormat.format(totals.closed);
-  $("#algo-open").textContent = numberFormat.format(totals.open);
   $("#algo-return").textContent = returnPoints(totals.return);
   $("#algo-return").className = valueClass(totals.return);
   $("#algo-win-rate").textContent = totals.closed ? rate((totals.wins / totals.closed) * 100) : "—";
