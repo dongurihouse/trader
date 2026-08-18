@@ -15,6 +15,8 @@ const easternDate = new Intl.DateTimeFormat("en-US", {
   day: "numeric",
   year: "numeric",
 });
+let algorithms = [];
+let selectedAlgorithmName = null;
 
 function createElement(tag, className, text) {
   const element = document.createElement(tag);
@@ -76,6 +78,10 @@ function factor(stats) {
   if (stats.profit_factor === null || stats.profit_factor === undefined) return "—";
   const value = Number(stats.profit_factor);
   return Number.isFinite(value) ? value.toFixed(2) : "—";
+}
+
+function algorithmStatus(algo) {
+  return algo.configured && algo.trades_enabled ? "Active" : algo.configured ? "Configured" : "Historical";
 }
 
 function duration(minutes) {
@@ -249,13 +255,16 @@ function renderOpenPositions(algo) {
   return section;
 }
 
-function renderAlgo(algo) {
+function renderAlgo(algo, tabId) {
   const card = createElement("article", "algo-card surface");
+  card.id = "algo-panel";
+  card.setAttribute("role", "tabpanel");
+  card.setAttribute("aria-labelledby", tabId);
   const header = createElement("header", "algo-card-header");
   const heading = createElement("div", "algo-heading");
   const titleRow = createElement("div", "algo-title-row");
   titleRow.append(createElement("h2", "", algo.name.toUpperCase()));
-  const status = algo.configured && algo.trades_enabled ? "Active" : algo.configured ? "Configured" : "Historical";
+  const status = algorithmStatus(algo);
   titleRow.append(createElement("span", `algo-status ${status.toLowerCase()}`, status));
   heading.append(
     titleRow,
@@ -298,13 +307,66 @@ function renderAlgo(algo) {
   return card;
 }
 
+function renderAlgorithmSwitcher() {
+  const switcher = $("#algo-switcher");
+  const strip = $("#algo-strip");
+  const previousScroll = strip.scrollLeft;
+  const fragment = document.createDocumentFragment();
+  algorithms.forEach((algo, index) => {
+    const selected = algo.name === selectedAlgorithmName;
+    const button = createElement("button", `algo-tab${selected ? " active" : ""}`);
+    button.type = "button";
+    button.id = `algo-tab-${index}`;
+    button.dataset.algoName = algo.name;
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-controls", "algo-panel");
+    button.setAttribute("aria-selected", String(selected));
+    button.tabIndex = selected ? 0 : -1;
+    button.append(
+      createElement("strong", "", algo.name.toUpperCase()),
+      createElement("span", "algo-tab-function", humanize(algo.function)),
+      createElement("span", `algo-tab-status ${algorithmStatus(algo).toLowerCase()}`, algorithmStatus(algo)),
+    );
+    fragment.append(button);
+  });
+  strip.replaceChildren(fragment);
+  strip.scrollLeft = previousScroll;
+  switcher.hidden = algorithms.length === 0;
+}
+
+function renderSelectedAlgorithm() {
+  const index = algorithms.findIndex((algo) => algo.name === selectedAlgorithmName);
+  const algo = algorithms[index];
+  if (!algo) return;
+  $("#algo-book").replaceChildren(renderAlgo(algo, `algo-tab-${index}`));
+}
+
+function selectAlgorithm(name, { focus = false } = {}) {
+  if (!algorithms.some((algo) => algo.name === name)) return;
+  selectedAlgorithmName = name;
+  $("#algo-strip").querySelectorAll("button[data-algo-name]").forEach((button) => {
+    const selected = button.dataset.algoName === name;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-selected", String(selected));
+    button.tabIndex = selected ? 0 : -1;
+  });
+  renderSelectedAlgorithm();
+  const selectedButton = [...$("#algo-strip").querySelectorAll("button[data-algo-name]")]
+    .find((button) => button.dataset.algoName === name);
+  selectedButton?.scrollIntoView({ block: "nearest", inline: "center" });
+  if (focus) selectedButton?.focus();
+}
+
 function render(payload) {
   renderRollup(payload);
   $("#market-status").setAttribute("aria-label", payload.market.label);
   $("#market-status").title = payload.market.label;
   $("#market-dot").classList.toggle("live", payload.market.state === "live");
   const book = $("#algo-book");
-  if (!(payload.algorithms || []).length) {
+  algorithms = payload.algorithms || [];
+  if (!algorithms.length) {
+    selectedAlgorithmName = null;
+    renderAlgorithmSwitcher();
     const empty = createElement("div", "algo-empty surface");
     empty.append(
       createElement("strong", "", "No algorithms configured"),
@@ -313,10 +375,42 @@ function render(payload) {
     book.replaceChildren(empty);
     return;
   }
-  const fragment = document.createDocumentFragment();
-  payload.algorithms.forEach((algo) => fragment.append(renderAlgo(algo)));
-  book.replaceChildren(fragment);
+  if (!algorithms.some((algo) => algo.name === selectedAlgorithmName)) {
+    selectedAlgorithmName = algorithms[0].name;
+  }
+  renderAlgorithmSwitcher();
+  renderSelectedAlgorithm();
 }
+
+$("#algo-strip").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-algo-name]");
+  if (!button) return;
+  selectAlgorithm(button.dataset.algoName);
+});
+
+$("#algo-strip").addEventListener("wheel", (event) => {
+  const strip = event.currentTarget;
+  if (strip.scrollWidth <= strip.clientWidth) return;
+  const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+  const maxScroll = strip.scrollWidth - strip.clientWidth;
+  const canScroll = (delta < 0 && strip.scrollLeft > 0) || (delta > 0 && strip.scrollLeft < maxScroll);
+  if (!canScroll) return;
+  strip.scrollLeft += delta;
+  event.preventDefault();
+}, { passive: false });
+
+$("#algo-strip").addEventListener("keydown", (event) => {
+  const button = event.target.closest("button[data-algo-name]");
+  if (!button || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  const buttons = [...event.currentTarget.querySelectorAll("button[data-algo-name]")];
+  let index = buttons.indexOf(button);
+  if (event.key === "Home") index = 0;
+  if (event.key === "End") index = buttons.length - 1;
+  if (event.key === "ArrowLeft") index = Math.max(0, index - 1);
+  if (event.key === "ArrowRight") index = Math.min(buttons.length - 1, index + 1);
+  selectAlgorithm(buttons[index].dataset.algoName, { focus: true });
+  event.preventDefault();
+});
 
 async function loadAlgorithms({ quiet = false } = {}) {
   try {
