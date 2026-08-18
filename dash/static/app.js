@@ -154,6 +154,7 @@ class PriceChart {
     this.style = "line";
     this.algo = null;
     this.payload = null;
+    this.momentumByTimestamp = new Map();
     this.hoverIndex = null;
     this.focusedTimestamp = null;
     this.bounds = null;
@@ -191,6 +192,12 @@ class PriceChart {
     const wasAtLatest = this.viewEnd >= previousBars.length - 1;
     const previousStartTime = previousBars[this.viewStart]?.ts;
     this.payload = payload;
+    this.momentumByTimestamp = new Map(
+      (payload?.relative_momentum?.snapshots || []).map((snapshot) => [
+        Number(snapshot.ts),
+        snapshot,
+      ]),
+    );
     this.wheelPanRemainder = 0;
     this.hoverIndex = null;
     if (!sameSeries) this.focusedTimestamp = null;
@@ -258,6 +265,10 @@ class PriceChart {
     return easternDateKey(snapshot.ts) === easternDateKey(timestamp) ? snapshot : null;
   }
 
+  momentumAt(timestamp) {
+    return this.momentumByTimestamp.get(Number(timestamp)) || null;
+  }
+
   focusedIndex() {
     if (this.focusedTimestamp === null) return null;
     const index = this.payload?.bars?.findIndex(
@@ -312,6 +323,7 @@ class PriceChart {
       change,
       changePct,
       shape: this.shapeAt(bar.ts),
+      momentum: this.momentumAt(bar.ts),
       mode: this.hoverIndex !== null ? "hover" : focused !== null ? "focused" : "latest",
     });
   }
@@ -325,10 +337,13 @@ class PriceChart {
     const overlayLabel = this.algo
       ? `, ${this.algo} overlay with ${actionCount.toLocaleString()} ${actionCount === 1 ? "action" : "actions"}`
       : "";
+    const momentumLabel = this.payload?.relative_momentum?.snapshots?.length
+      ? ", with relative momentum below volume"
+      : "";
     this.canvas.setAttribute(
       "aria-label",
       visible.length
-        ? `${this.payload.ticker} ${label} chart, ${visible.length.toLocaleString()} visible points from ${easternDateTime.format(dateFromEpoch(first.ts))} to ${easternDateTime.format(dateFromEpoch(last.ts))}${overlayLabel}`
+        ? `${this.payload.ticker} ${label} chart, ${visible.length.toLocaleString()} visible points from ${easternDateTime.format(dateFromEpoch(first.ts))} to ${easternDateTime.format(dateFromEpoch(last.ts))}${overlayLabel}${momentumLabel}`
         : `${this.payload?.ticker || "Ticker"} ${label} chart with no available bars`,
     );
   }
@@ -456,6 +471,115 @@ class PriceChart {
     ctx.restore();
   }
 
+  drawMomentumPanel(ctx, bars, x, margin, plotWidth, momentumTop, momentumBottom) {
+    const panelHeight = momentumBottom - momentumTop;
+    const momentumY = (value) => (
+      momentumTop + ((100 - Math.max(-100, Math.min(100, Number(value)))) / 200) * panelHeight
+    );
+    const configuredThreshold = Number(this.payload?.relative_momentum?.strong_threshold);
+    const threshold = Number.isFinite(configuredThreshold)
+      ? Math.max(0, Math.min(100, configuredThreshold))
+      : 80;
+    const positiveThresholdY = momentumY(threshold);
+    const negativeThresholdY = momentumY(-threshold);
+
+    ctx.save();
+    ctx.fillStyle = "rgba(216, 255, 114, 0.035)";
+    ctx.fillRect(margin.left, momentumTop, plotWidth, positiveThresholdY - momentumTop);
+    ctx.fillStyle = "rgba(255, 123, 115, 0.03)";
+    ctx.fillRect(margin.left, negativeThresholdY, plotWidth, momentumBottom - negativeThresholdY);
+
+    [threshold, 0, -threshold].forEach((value) => {
+      const lineY = Math.round(momentumY(value)) + 0.5;
+      ctx.beginPath();
+      ctx.strokeStyle = value === 0
+        ? "rgba(227, 235, 240, 0.18)"
+        : "rgba(227, 235, 240, 0.07)";
+      ctx.setLineDash(value === 0 ? [] : [3, 5]);
+      ctx.moveTo(margin.left, lineY);
+      ctx.lineTo(margin.left + plotWidth, lineY);
+      ctx.stroke();
+    });
+    ctx.setLineDash([]);
+
+    ctx.font = "9px ui-monospace, SFMono-Regular, monospace";
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "left";
+    ctx.fillStyle = "#75838e";
+    ctx.fillText("REL MOMENTUM", margin.left + 3, momentumTop + 8);
+    ctx.textAlign = "right";
+    ctx.fillStyle = "#5f6c77";
+    ctx.fillText("+100", margin.left + plotWidth + margin.right - 2, momentumTop + 5);
+    ctx.fillText("0", margin.left + plotWidth + margin.right - 2, momentumY(0));
+    ctx.fillText("-100", margin.left + plotWidth + margin.right - 2, momentumBottom - 5);
+
+    let previous = null;
+    let activeColor = null;
+    let activePath = false;
+    const flush = () => {
+      if (!activePath) return;
+      ctx.strokeStyle = activeColor;
+      ctx.lineWidth = 1.4;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.stroke();
+      activePath = false;
+    };
+
+    bars.forEach((bar, index) => {
+      const snapshot = this.momentumAt(bar.ts);
+      if (!snapshot || !Number.isFinite(Number(snapshot.value))) {
+        flush();
+        previous = null;
+        activeColor = null;
+        return;
+      }
+      const point = {
+        index,
+        ts: Number(bar.ts),
+        value: Number(snapshot.value),
+        x: x(index),
+        y: momentumY(snapshot.value),
+      };
+      const contiguous = previous
+        && point.index === previous.index + 1
+        && point.ts - previous.ts <= 90;
+      if (!contiguous) {
+        flush();
+        previous = point;
+        activeColor = null;
+        return;
+      }
+      const color = (point.value + previous.value) / 2 >= 0 ? "#d8ff72" : "#ff7b73";
+      if (!activePath || color !== activeColor) {
+        flush();
+        ctx.beginPath();
+        ctx.moveTo(previous.x, previous.y);
+        activePath = true;
+        activeColor = color;
+      }
+      ctx.lineTo(point.x, point.y);
+      previous = point;
+    });
+    flush();
+
+    const highlightedIndex = this.highlightedVisibleIndex();
+    if (highlightedIndex !== null) {
+      const index = Math.max(0, Math.min(bars.length - 1, highlightedIndex));
+      const snapshot = this.momentumAt(bars[index].ts);
+      if (snapshot && Number.isFinite(Number(snapshot.value))) {
+        ctx.beginPath();
+        ctx.fillStyle = Number(snapshot.value) >= 0 ? "#d8ff72" : "#ff7b73";
+        ctx.arc(x(index), momentumY(snapshot.value), this.hoverIndex === null ? 3.4 : 2.8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "#101721";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
   draw() {
     const { width, height } = this.size();
     const ctx = this.context;
@@ -465,7 +589,12 @@ class PriceChart {
 
     const margin = { top: 14, right: width < 500 ? 49 : 62, bottom: 32, left: 4 };
     const volumeHeight = 42;
-    const priceBottom = height - margin.bottom - volumeHeight - 18;
+    const momentumHeight = width < 500 ? 54 : 64;
+    const panelGap = 12;
+    const momentumBottom = height - margin.bottom;
+    const momentumTop = momentumBottom - momentumHeight;
+    const volumeBottom = momentumTop - panelGap;
+    const priceBottom = volumeBottom - volumeHeight - 18;
     const plotWidth = width - margin.left - margin.right;
     const plotHeight = priceBottom - margin.top;
     const lows = bars.map((bar) => Number(bar.low));
@@ -540,7 +669,7 @@ class PriceChart {
       const relativeVolume = Math.max(0, Number(bar.volume)) / maximumVolume;
       const barHeight = Math.max(1, Math.sqrt(relativeVolume) * volumeHeight);
       const barWidth = Math.max(1, Math.min(step, 3));
-      const top = height - margin.bottom - barHeight;
+      const top = volumeBottom - barHeight;
       const open = Number(bar.open);
       const close = Number(bar.close);
       const color = close > open ? "216, 255, 114" : close < open ? "255, 123, 115" : "112, 216, 220";
@@ -550,6 +679,22 @@ class PriceChart {
       ctx.fillStyle = `rgba(${color}, ${Math.min(1, opacity + 0.18)})`;
       ctx.fillRect(x(index), top, barWidth, Math.min(1.25, barHeight));
     });
+
+    ctx.font = "9px ui-monospace, SFMono-Regular, monospace";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#75838e";
+    ctx.fillText("VOLUME", margin.left + 3, priceBottom + 8);
+
+    this.drawMomentumPanel(
+      ctx,
+      bars,
+      x,
+      margin,
+      plotWidth,
+      momentumTop,
+      momentumBottom,
+    );
 
     const rising = Number(bars.at(-1).close) >= Number(bars[0].open);
     const color = rising ? "#d8ff72" : "#ff7b73";
@@ -655,6 +800,17 @@ class PriceChart {
       createElement("span", "", `L ${formatPrice(bar.low)} · C ${formatPrice(bar.close)}`),
       createElement("span", "", `Vol ${compactFormat.format(bar.volume)}`),
     ];
+    const momentum = this.momentumAt(bar.ts);
+    if (momentum) {
+      const state = momentum.persistent ? "persistent" : "developing";
+      contents.push(
+        createElement(
+          "span",
+          Number(momentum.value) >= 0 ? "momentum-up" : "momentum-down",
+          `Rel momentum ${formatSigned(momentum.value)} · ${state}`,
+        ),
+      );
+    }
     this.tradesAt(bar.ts).forEach((trade) => {
       const action = trade.action === "exit_all" ? "exit" : "entry";
       const direction = Number(trade.direction) < 0 ? "Short" : "Long";

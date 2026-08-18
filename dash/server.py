@@ -166,6 +166,9 @@ class DashboardData:
                     "shape_forecast": self._shape_forecast(
                         connection, config, ticker, 0, 0
                     ),
+                    "relative_momentum": self._relative_momentum(
+                        connection, config, ticker, 0, 0
+                    ),
                     "algo_overlays": self._algo_overlays([], config),
                     "source_count": 0,
                     "interpolated_count": 0,
@@ -217,6 +220,9 @@ class DashboardData:
             shape_forecast = self._shape_forecast(
                 connection, config, ticker, start, int(latest)
             )
+            relative_momentum = self._relative_momentum(
+                connection, config, ticker, start, int(latest)
+            )
 
         return {
             "ticker": ticker,
@@ -229,6 +235,7 @@ class DashboardData:
             "trades": trades,
             "events": events,
             "shape_forecast": shape_forecast,
+            "relative_momentum": relative_momentum,
             "algo_overlays": self._algo_overlays(rows, config),
         }
 
@@ -1132,6 +1139,101 @@ class DashboardData:
             "kind": kind,
             "config": selected_version,
             "stride_minutes": stride_minutes,
+            "snapshots": snapshots,
+        }
+
+    def _relative_momentum(
+        self,
+        connection: sqlite3.Connection,
+        config: dict[str, Any],
+        ticker: str,
+        start: int,
+        end: int,
+    ) -> dict[str, Any] | None:
+        momentum_entry = next(
+            (
+                (name, definition)
+                for name, definition in self._mapping(config.get("signals")).items()
+                if isinstance(definition, dict)
+                and definition.get("function", name) == "relative_momentum"
+            ),
+            None,
+        )
+        if momentum_entry is None:
+            return None
+
+        kind, definition = momentum_entry
+        params = self._mapping(definition.get("params"))
+        strong_threshold = params.get("strong_percentile", 80.0)
+        if (
+            isinstance(strong_threshold, bool)
+            or not isinstance(strong_threshold, (int, float))
+            or not math.isfinite(strong_threshold)
+        ):
+            strong_threshold = 80.0
+        strong_threshold = max(0.0, min(100.0, float(strong_threshold)))
+        configured_version = str(config.get("version", ""))
+        version_row = connection.execute(
+            """
+            SELECT config, COUNT(*) AS usable_count
+            FROM outputs
+            WHERE ticker = ? AND kind = ?
+              AND ts >= ? AND ts <= ? AND output != 'null'
+              AND CASE WHEN json_valid(output)
+                       THEN json_type(output, '$.persistence_score')
+                       ELSE NULL END IN ('integer', 'real')
+            GROUP BY config
+            ORDER BY usable_count DESC,
+                     CASE WHEN config = ? THEN 1 ELSE 0 END DESC,
+                     CAST(config AS INTEGER) DESC,
+                     config DESC
+            LIMIT 1
+            """,
+            (ticker, kind, start, end, configured_version),
+        ).fetchone()
+        selected_version = (
+            str(version_row["config"]) if version_row is not None else configured_version
+        )
+
+        snapshots = []
+        for row in connection.execute(
+            """
+            SELECT ts, output
+            FROM outputs
+            WHERE ticker = ? AND kind = ? AND config = ?
+              AND ts >= ? AND ts <= ? AND output != 'null'
+            ORDER BY ts
+            """,
+            (ticker, kind, selected_version, start, end),
+        ):
+            output = self._json_value(row["output"])
+            if not isinstance(output, dict):
+                continue
+            persistence_score = output.get("persistence_score")
+            signed_persistence = output.get("signed_persistence")
+            if (
+                isinstance(persistence_score, bool)
+                or not isinstance(persistence_score, (int, float))
+                or not math.isfinite(persistence_score)
+                or isinstance(signed_persistence, bool)
+                or not isinstance(signed_persistence, (int, float))
+                or not math.isfinite(signed_persistence)
+            ):
+                continue
+            snapshot = {
+                "ts": int(row["ts"]),
+                "value": round(
+                    max(-100.0, min(100.0, float(signed_persistence) * 100.0)),
+                    3,
+                ),
+                "persistent": bool(output.get("persistent", False)),
+            }
+            snapshots.append(snapshot)
+
+        return {
+            "kind": kind,
+            "config": selected_version,
+            "strong_threshold": strong_threshold,
             "snapshots": snapshots,
         }
 

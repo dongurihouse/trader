@@ -1121,6 +1121,14 @@ h1 em {
   color: var(--red);
 }
 
+.chart-tooltip .momentum-up {
+  color: var(--acid);
+}
+
+.chart-tooltip .momentum-down {
+  color: var(--red);
+}
+
 .chart-loading,
 .chart-empty {
   position: absolute;
