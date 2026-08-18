@@ -14,8 +14,8 @@ without a separate backtest path.
 Every entry or exit produced by an algo with `"trades": true` writes a trade,
 whether the evaluated bar is historical or new. Other algos write outputs only.
 
-The default config enables the two-sided `orb5` opening-range breakout and the
-read-only `shape` path forecast.
+The default config enables `orb5`, `sentiment_pullback`, and four SNDK-only
+migrations from the DT roster. The `shape` path forecast remains read-only.
 
 The service exposes read-only process health at
 `http://127.0.0.1:8791/health` for Dash. A non-empty cycle logs progress every
@@ -55,7 +55,11 @@ The service has these signal functions:
 | function | params | output |
 | --- | --- | --- |
 | `sma` | `field`, `period`, `include_interpolated` | number or `null` |
-| `session` | none | `{date, minute, to_close, ts, open_ts}` or `null` |
+| `session` | none | `{date, minute, to_close, total, ts, open_ts}` or `null` |
+| `atr_session` | `sessions` | mean regular-session true range as a fraction of prior close, or `null` |
+| `prior_session` | none | prior close/high/low, opening gap, and live price versus the prior range |
+| `first30_ret` | `bars` | return from the prior close through the configured opening bars, or `null` |
+| `session_extremes` | none | running high/low, fresh-extreme flags, and range in session ATRs |
 | `opening_range` | `minutes` | `{high, low, range}` or `null` |
 | `rvol_open` | `cap_bars`, `baseline_sessions` | number or `null` |
 | `last_close` | `include_interpolated` | number or `null` |
@@ -84,6 +88,10 @@ It has these algo functions:
 | `crossover` | `fast`, `slow` | none |
 | `range_breakout` | `session`, `opening_range`, `rvol_open`, `last_close` | `direction`, `target_r`, `min_rvol`, `entry_cutoff_minutes`, `flat_minutes` |
 | `sentiment_pullback` | `session`, `opening_sentiment`, `pullback`, `last_close` | `early_minutes`, `early_hold_minutes`, `late_hold_minutes`, `take_profit_pct`, `stop_loss_pct`, `pattern_exit`, `flat_minutes`, `capital_fraction` |
+| `momentum_continuation` | `session`, `first30_ret`, `atr_session`, `rvol_open`, `last_close` | `target_tickers`, `first30_min_pct`, `risk_atr_frac`, `target_r`, `min_rvol`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
+| `failed_gap` | `session`, `prior_session`, `atr_session`, `last_close` | `target_tickers`, `gap_min_pct`, `risk_atr_frac`, `target_r`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
+| `gap_continuation` | `session`, `prior_session`, `opening_range`, `atr_session`, `rvol_open`, `last_close` | `target_tickers`, `gap_min_pct`, `risk_atr_frac`, `target_r`, `min_rvol`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
+| `extreme_fade` | `session`, `session_extremes`, `atr_session`, `rvol_open`, `last_close` | `target_tickers`, `min_range_atr`, `stop_atr_frac`, `target_r`, `min_rvol`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
 
 Every algo output is `[is_entry, is_close_all, direction]`. Direction is `1`
 for long, `-1` for short, and `0` when quiet. Both actions cannot be true. A
@@ -105,6 +113,16 @@ only complete prior sessions. It enters at most once per session, never adds to
 an open unit, and exits on its configured close-based profit, close-based loss,
 time, market-pattern, or end-of-session rule. One unit maps to at most 50% of
 capital; this signal service does not place or size brokerage orders.
+
+The four migrated algorithms also trade SNDK only and enter at most once per
+regular session. `lateday_momentum` follows a large first-half-hour move late
+in the session. `failed_gap_reversal` fades a gap after price returns inside the
+prior range. `gap_play` follows a gap through the fifteen-minute opening range.
+`day_extreme_reversal` fades a fresh high or low after a one-ATR session range.
+Their brackets use the entry price and the day-constant fourteen-session ATR.
+All exits use the minute close. The algo context exposes regular bars through a
+read-only accessor capped at the evaluation timestamp; the extreme fade uses
+it to freeze the session extreme that existed when the position opened.
 
 Example:
 

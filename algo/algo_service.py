@@ -64,6 +64,10 @@ _PULLBACK_BASELINES: dict[
 _OUTPUT_SESSION_SEEDS: dict[
     tuple[str, str, str, str, int], tuple[tuple[int, float, int], ...]
 ] = {}
+_SESSION_SUMMARIES: dict[
+    tuple[str, str, date], Optional[Mapping[str, float]]
+] = {}
+_ATR_SESSION_VALUES: dict[tuple[str, str, date, int], Optional[float]] = {}
 _INITIALIZED_DATABASES: set[Path] = set()
 _DATABASE_INIT_LOCK = threading.Lock()
 
@@ -126,11 +130,16 @@ class AlgoSpec:
 
 @dataclass(frozen=True)
 class AlgoContext:
+    ticker: str
+    ts: int
     parameters: Mapping[str, Any]
     inputs: Mapping[str, Any]
     previous: Mapping[str, Any]
     open_entries: tuple[Mapping[str, Any], ...]
     session_outputs: tuple[Mapping[str, Any], ...]
+    read_bars: Callable[
+        [int, Optional[int]], tuple[Mapping[str, Any], ...]
+    ]
 
 
 def _clock(value: Any, name: str) -> clock_time:
@@ -300,6 +309,30 @@ def load_settings(
             raise ConfigError(
                 "algos.%s inputs must contain %d nodes" % (name, required)
             )
+        targets = node["params"].get("target_tickers")
+        if targets is not None:
+            if (
+                not isinstance(targets, list)
+                or not targets
+                or any(target not in normalized for target in targets)
+            ):
+                raise ConfigError(
+                    "algos.%s.params.target_tickers must name configured tickers"
+                    % name
+                )
+        if node["function"] == "gap_continuation":
+            range_name = node["inputs"][2]
+            range_node = signals.get(range_name)
+            if range_node is None or range_node["function"] != "opening_range":
+                raise ConfigError(
+                    "algos.%s third input must be an opening_range signal" % name
+                )
+            if node["params"].get("minute_min") != range_node["params"].get(
+                "minutes"
+            ):
+                raise ConfigError(
+                    "algos.%s minute_min must equal %s minutes" % (name, range_name)
+                )
     signal_order, algo_order, algo_requirements = _compile_dependencies(
         signals, algos
     )
@@ -498,8 +531,213 @@ def _signal_session(
         "date": local_day.isoformat(),
         "minute": int((ts - session_open) // 60),
         "to_close": (session_close - ts) / 60.0,
+        "total": int((session_close - session_open) // 60),
         "ts": ts,
         "open_ts": session_open,
+    }
+
+
+def _complete_session_summary(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    ticker: str,
+    local_day: date,
+) -> Optional[Mapping[str, float]]:
+    key = (str(settings.database), ticker, local_day)
+    if key in _SESSION_SUMMARIES:
+        return _SESSION_SUMMARIES[key]
+    probe = int(
+        datetime.combine(local_day, clock_time(12), tzinfo=EASTERN).timestamp()
+    )
+    _, session_open, session_close = _session_window(settings, probe)
+    rows = _session_bars(
+        connection,
+        ticker,
+        session_open,
+        session_close,
+        session_close - 1,
+        include_interpolated=False,
+    )
+    expected = (session_close - session_open) // 60
+    if len(rows) != expected or any(
+        int(row["ts"]) != session_open + index * 60
+        for index, row in enumerate(rows)
+    ):
+        _SESSION_SUMMARIES[key] = None
+        return None
+    summary: Mapping[str, float] = {
+        "open": float(rows[0]["open"]),
+        "high": max(float(row["high"]) for row in rows),
+        "low": min(float(row["low"]) for row in rows),
+        "close": float(rows[-1]["close"]),
+    }
+    _SESSION_SUMMARIES[key] = summary
+    return summary
+
+
+def _prior_complete_session_summaries(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    ticker: str,
+    local_day: date,
+    count: int,
+) -> list[Mapping[str, float]]:
+    summaries: list[Mapping[str, float]] = []
+    candidate = local_day - timedelta(days=1)
+    for _ in range(count * 4 + 60):
+        summary = _complete_session_summary(
+            connection, settings, ticker, candidate
+        )
+        if summary is not None:
+            summaries.append(summary)
+            if len(summaries) == count:
+                break
+        candidate -= timedelta(days=1)
+    return summaries
+
+
+def _signal_atr_session(
+    connection, ticker, ts, parameters, inputs, settings
+) -> Optional[float]:
+    sessions = require_int(
+        parameters.get("sessions"), "sessions", error=EvaluationError
+    )
+    session = inputs["session"]
+    if session is None:
+        return None
+    local_day = date.fromisoformat(session["date"])
+    key = (str(settings.database), ticker, local_day, sessions)
+    if key in _ATR_SESSION_VALUES:
+        return _ATR_SESSION_VALUES[key]
+    summaries = _prior_complete_session_summaries(
+        connection, settings, ticker, local_day, sessions + 1
+    )
+    if len(summaries) < sessions + 1:
+        _ATR_SESSION_VALUES[key] = None
+        return None
+    ordered = list(reversed(summaries))
+    ranges: list[float] = []
+    for previous, current in zip(ordered, ordered[1:]):
+        previous_close = float(previous["close"])
+        if previous_close <= 0.0:
+            _ATR_SESSION_VALUES[key] = None
+            return None
+        true_range = max(
+            float(current["high"]) - float(current["low"]),
+            abs(float(current["high"]) - previous_close),
+            abs(float(current["low"]) - previous_close),
+        )
+        ranges.append(true_range / previous_close)
+    value = float(statistics.mean(ranges))
+    _ATR_SESSION_VALUES[key] = value
+    return value
+
+
+def _signal_prior_session(
+    connection, ticker, ts, parameters, inputs, settings
+) -> Optional[dict[str, float]]:
+    if parameters:
+        raise EvaluationError("prior_session takes no params")
+    session = inputs["session"]
+    if session is None:
+        return None
+    local_day = date.fromisoformat(session["date"])
+    summaries = _prior_complete_session_summaries(
+        connection, settings, ticker, local_day, 1
+    )
+    if not summaries:
+        return None
+    opening = connection.execute(
+        "SELECT open FROM bars WHERE ticker=? AND ts=? AND interpolated=0",
+        (ticker, int(session["open_ts"])),
+    ).fetchone()
+    current = connection.execute(
+        "SELECT close FROM bars WHERE ticker=? AND ts=? AND interpolated=0",
+        (ticker, ts),
+    ).fetchone()
+    if opening is None or current is None:
+        return None
+    previous = summaries[0]
+    previous_close = float(previous["close"])
+    if previous_close <= 0.0:
+        return None
+    session_open = float(opening["open"])
+    price = float(current["close"])
+    previous_high = float(previous["high"])
+    previous_low = float(previous["low"])
+    return {
+        "prev_close": previous_close,
+        "prev_high": previous_high,
+        "prev_low": previous_low,
+        "gap_pct": (session_open / previous_close - 1.0) * 100.0,
+        "open_vs_prior_high": session_open - previous_high,
+        "open_vs_prior_low": session_open - previous_low,
+        "price_vs_prior_high": price - previous_high,
+        "price_vs_prior_low": price - previous_low,
+    }
+
+
+def _signal_first30_ret(
+    connection, ticker, ts, parameters, inputs, settings
+) -> Optional[float]:
+    bars = require_int(parameters.get("bars"), "bars", error=EvaluationError)
+    session = inputs["session"]
+    if session is None or int(session["minute"]) < bars - 1:
+        return None
+    local_day = date.fromisoformat(session["date"])
+    summaries = _prior_complete_session_summaries(
+        connection, settings, ticker, local_day, 1
+    )
+    if not summaries or float(summaries[0]["close"]) <= 0.0:
+        return None
+    closing = connection.execute(
+        "SELECT close FROM bars WHERE ticker=? AND ts=? AND interpolated=0",
+        (ticker, int(session["open_ts"]) + (bars - 1) * 60),
+    ).fetchone()
+    if closing is None:
+        return None
+    return (
+        float(closing["close"]) / float(summaries[0]["close"]) - 1.0
+    ) * 100.0
+
+
+def _signal_session_extremes(
+    connection, ticker, ts, parameters, inputs, settings
+) -> Optional[dict[str, Any]]:
+    if parameters:
+        raise EvaluationError("session_extremes takes no params")
+    session = inputs["session"]
+    atr_session = require_float(
+        inputs["atr_session"],
+        "atr_session",
+        nullable=True,
+        error=EvaluationError,
+    )
+    if session is None or atr_session is None:
+        return None
+    rows = _session_bars(
+        connection,
+        ticker,
+        int(session["open_ts"]),
+        int(session["open_ts"]) + int(session["total"]) * 60,
+        ts,
+        include_interpolated=False,
+    )
+    if not rows or int(rows[-1]["ts"]) != ts:
+        return None
+    current = rows[-1]
+    day_high = max(float(row["high"]) for row in rows)
+    day_low = min(float(row["low"]) for row in rows)
+    price = float(current["close"])
+    denominator = float(atr_session) * price
+    return {
+        "day_high": day_high,
+        "day_low": day_low,
+        "new_day_high": float(current["high"]) >= day_high,
+        "new_day_low": float(current["low"]) <= day_low,
+        "day_range_atr": (day_high - day_low) / denominator
+        if denominator > 0.0
+        else 0.0,
     }
 
 
@@ -978,6 +1216,14 @@ SIGNAL_FUNCTIONS: dict[str, SignalSpec] = {
     "sma": SignalSpec(_signal_sma, ("bars",)),
     "metadata": SignalSpec(_signal_metadata, ("bar_metadata",)),
     "session": SignalSpec(_signal_session, ()),
+    "atr_session": SignalSpec(_signal_atr_session, ("bars", "session")),
+    "prior_session": SignalSpec(_signal_prior_session, ("bars", "session")),
+    "first30_ret": SignalSpec(
+        _signal_first30_ret, ("bars", "session")
+    ),
+    "session_extremes": SignalSpec(
+        _signal_session_extremes, ("bars", "session", "atr_session")
+    ),
     "opening_range": SignalSpec(_signal_opening_range, ("bars", "session")),
     "rvol_open": SignalSpec(_signal_rvol_open, ("bars", "session")),
     "last_close": SignalSpec(_signal_last_close, ("bars",)),
@@ -1169,10 +1415,577 @@ def _algo_sentiment_pullback(context: AlgoContext) -> tuple[bool, bool, int]:
     return False, False, 0
 
 
+def _algo_target_enabled(context: AlgoContext) -> bool:
+    targets = context.parameters.get("target_tickers")
+    if not isinstance(targets, list) or not targets:
+        raise EvaluationError("target_tickers must be a non-empty list")
+    return context.ticker in targets
+
+
+def _algo_has_session_entry(context: AlgoContext) -> bool:
+    return any(
+        _algo_output(row["output"])[0] for row in context.session_outputs
+    )
+
+
+def _algo_window(
+    session: Mapping[str, Any], minute_min: int, minute_max: int
+) -> tuple[int, int]:
+    total = int(session["total"])
+    if total == 390:
+        return minute_min, minute_max
+    start = (
+        minute_min
+        if minute_min <= 120
+        else round(
+            120 + (total - 120) * (minute_min - 120) / (390 - 120)
+        )
+    )
+    end = (
+        minute_max
+        if minute_max <= 120
+        else total - (390 - minute_max)
+    )
+    return max(0, start), min(total, end)
+
+
+def _fixed_atr_exit(
+    context: AlgoContext,
+    session: Mapping[str, Any],
+    atr_session: float,
+    price: float,
+    risk_atr_frac: float,
+    target_r: float,
+    flat_minutes: float,
+) -> tuple[bool, bool, int]:
+    entry = context.open_entries[0]
+    direction = int(entry["direction"])
+    entry_price = float(entry["price"])
+    risk = risk_atr_frac * atr_session * entry_price
+    stop = entry_price - direction * risk
+    target = entry_price + direction * target_r * risk
+    hit_stop = price <= stop if direction == 1 else price >= stop
+    hit_target = price >= target if direction == 1 else price <= target
+    if (
+        risk <= 0.0
+        or hit_stop
+        or hit_target
+        or float(session["to_close"]) <= flat_minutes
+    ):
+        return False, True, direction
+    return False, False, 0
+
+
+def _algo_momentum_continuation(
+    context: AlgoContext,
+) -> tuple[bool, bool, int]:
+    session_name, first30_name, atr_name, rvol_name, price_name = context.inputs
+    session = context.inputs[session_name]
+    first30 = require_float(
+        context.inputs[first30_name],
+        "first30_ret",
+        nullable=True,
+        error=EvaluationError,
+    )
+    atr_session = require_float(
+        context.inputs[atr_name],
+        "atr_session",
+        nullable=True,
+        error=EvaluationError,
+    )
+    rvol = require_float(
+        context.inputs[rvol_name],
+        "rvol_open",
+        nullable=True,
+        error=EvaluationError,
+    )
+    price = require_float(
+        context.inputs[price_name],
+        "last_close",
+        nullable=True,
+        error=EvaluationError,
+    )
+    first30_min = float(
+        require_float(
+            context.parameters.get("first30_min_pct"),
+            "first30_min_pct",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    risk_fraction = float(
+        require_float(
+            context.parameters.get("risk_atr_frac"),
+            "risk_atr_frac",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    target_r = float(
+        require_float(
+            context.parameters.get("target_r"),
+            "target_r",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    min_rvol = float(
+        require_float(
+            context.parameters.get("min_rvol"),
+            "min_rvol",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    minute_min = require_int(
+        context.parameters.get("minute_min"),
+        "minute_min",
+        minimum=0,
+        error=EvaluationError,
+    )
+    minute_max = require_int(
+        context.parameters.get("minute_max"),
+        "minute_max",
+        minimum=1,
+        error=EvaluationError,
+    )
+    entry_cutoff = float(
+        require_float(
+            context.parameters.get("entry_cutoff_minutes"),
+            "entry_cutoff_minutes",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    flat_minutes = float(
+        require_float(
+            context.parameters.get("flat_minutes"),
+            "flat_minutes",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    if (
+        not _algo_target_enabled(context)
+        or session is None
+        or first30 is None
+        or atr_session is None
+        or rvol is None
+        or price is None
+    ):
+        return False, False, 0
+    if context.open_entries:
+        return _fixed_atr_exit(
+            context,
+            session,
+            float(atr_session),
+            float(price),
+            risk_fraction,
+            target_r,
+            flat_minutes,
+        )
+    if _algo_has_session_entry(context):
+        return False, False, 0
+    window_min, window_max = _algo_window(session, minute_min, minute_max)
+    minute = int(session["minute"])
+    if (
+        minute < window_min
+        or minute >= window_max
+        or float(session["to_close"]) < entry_cutoff
+        or float(rvol) <= min_rvol
+        or abs(float(first30)) < first30_min
+        or float(first30) == 0.0
+    ):
+        return False, False, 0
+    return True, False, 1 if float(first30) > 0.0 else -1
+
+
+def _algo_failed_gap(context: AlgoContext) -> tuple[bool, bool, int]:
+    session_name, prior_name, atr_name, price_name = context.inputs
+    session = context.inputs[session_name]
+    prior = context.inputs[prior_name]
+    atr_session = require_float(
+        context.inputs[atr_name],
+        "atr_session",
+        nullable=True,
+        error=EvaluationError,
+    )
+    price = require_float(
+        context.inputs[price_name],
+        "last_close",
+        nullable=True,
+        error=EvaluationError,
+    )
+    gap_min = float(
+        require_float(
+            context.parameters.get("gap_min_pct"),
+            "gap_min_pct",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    risk_fraction = float(
+        require_float(
+            context.parameters.get("risk_atr_frac"),
+            "risk_atr_frac",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    target_r = float(
+        require_float(
+            context.parameters.get("target_r"),
+            "target_r",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    minute_min = require_int(
+        context.parameters.get("minute_min"),
+        "minute_min",
+        minimum=0,
+        error=EvaluationError,
+    )
+    minute_max = require_int(
+        context.parameters.get("minute_max"),
+        "minute_max",
+        error=EvaluationError,
+    )
+    entry_cutoff = float(
+        require_float(
+            context.parameters.get("entry_cutoff_minutes"),
+            "entry_cutoff_minutes",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    flat_minutes = float(
+        require_float(
+            context.parameters.get("flat_minutes"),
+            "flat_minutes",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    if (
+        not _algo_target_enabled(context)
+        or session is None
+        or prior is None
+        or atr_session is None
+        or price is None
+    ):
+        return False, False, 0
+    if context.open_entries:
+        return _fixed_atr_exit(
+            context,
+            session,
+            float(atr_session),
+            float(price),
+            risk_fraction,
+            target_r,
+            flat_minutes,
+        )
+    if _algo_has_session_entry(context):
+        return False, False, 0
+    window_min, window_max = _algo_window(session, minute_min, minute_max)
+    minute = int(session["minute"])
+    if (
+        minute < window_min
+        or minute >= window_max
+        or float(session["to_close"]) < entry_cutoff
+    ):
+        return False, False, 0
+    gap = float(prior["gap_pct"])
+    if (
+        gap < -gap_min
+        and float(prior["open_vs_prior_low"]) < 0.0
+        and float(prior["price_vs_prior_low"]) > 0.0
+    ):
+        return True, False, 1
+    if (
+        gap > gap_min
+        and float(prior["open_vs_prior_high"]) > 0.0
+        and float(prior["price_vs_prior_high"]) < 0.0
+    ):
+        return True, False, -1
+    return False, False, 0
+
+
+def _algo_gap_continuation(context: AlgoContext) -> tuple[bool, bool, int]:
+    session_name, prior_name, range_name, atr_name, rvol_name, price_name = (
+        context.inputs
+    )
+    session = context.inputs[session_name]
+    prior = context.inputs[prior_name]
+    opening_range = context.inputs[range_name]
+    atr_session = require_float(
+        context.inputs[atr_name],
+        "atr_session",
+        nullable=True,
+        error=EvaluationError,
+    )
+    rvol = require_float(
+        context.inputs[rvol_name],
+        "rvol_open",
+        nullable=True,
+        error=EvaluationError,
+    )
+    price = require_float(
+        context.inputs[price_name],
+        "last_close",
+        nullable=True,
+        error=EvaluationError,
+    )
+    gap_min = float(
+        require_float(
+            context.parameters.get("gap_min_pct"),
+            "gap_min_pct",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    risk_fraction = float(
+        require_float(
+            context.parameters.get("risk_atr_frac"),
+            "risk_atr_frac",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    target_r = float(
+        require_float(
+            context.parameters.get("target_r"),
+            "target_r",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    min_rvol = float(
+        require_float(
+            context.parameters.get("min_rvol"),
+            "min_rvol",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    minute_min = require_int(
+        context.parameters.get("minute_min"),
+        "minute_min",
+        minimum=0,
+        error=EvaluationError,
+    )
+    minute_max = require_int(
+        context.parameters.get("minute_max"),
+        "minute_max",
+        error=EvaluationError,
+    )
+    entry_cutoff = float(
+        require_float(
+            context.parameters.get("entry_cutoff_minutes"),
+            "entry_cutoff_minutes",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    flat_minutes = float(
+        require_float(
+            context.parameters.get("flat_minutes"),
+            "flat_minutes",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    if (
+        not _algo_target_enabled(context)
+        or session is None
+        or prior is None
+        or opening_range is None
+        or atr_session is None
+        or rvol is None
+        or price is None
+    ):
+        return False, False, 0
+    if context.open_entries:
+        return _fixed_atr_exit(
+            context,
+            session,
+            float(atr_session),
+            float(price),
+            risk_fraction,
+            target_r,
+            flat_minutes,
+        )
+    if _algo_has_session_entry(context):
+        return False, False, 0
+    window_min, window_max = _algo_window(session, minute_min, minute_max)
+    minute = int(session["minute"])
+    if (
+        minute < window_min
+        or minute >= window_max
+        or float(session["to_close"]) < entry_cutoff
+        or float(rvol) <= min_rvol
+    ):
+        return False, False, 0
+    gap = float(prior["gap_pct"])
+    if (
+        gap > gap_min
+        and float(prior["open_vs_prior_high"]) > 0.0
+        and float(price) > float(opening_range["high"])
+    ):
+        return True, False, 1
+    if (
+        gap < -gap_min
+        and float(prior["open_vs_prior_low"]) < 0.0
+        and float(price) < float(opening_range["low"])
+    ):
+        return True, False, -1
+    return False, False, 0
+
+
+def _algo_extreme_fade(context: AlgoContext) -> tuple[bool, bool, int]:
+    session_name, extremes_name, atr_name, rvol_name, price_name = context.inputs
+    session = context.inputs[session_name]
+    extremes = context.inputs[extremes_name]
+    atr_session = require_float(
+        context.inputs[atr_name],
+        "atr_session",
+        nullable=True,
+        error=EvaluationError,
+    )
+    rvol = require_float(
+        context.inputs[rvol_name],
+        "rvol_open",
+        nullable=True,
+        error=EvaluationError,
+    )
+    price = require_float(
+        context.inputs[price_name],
+        "last_close",
+        nullable=True,
+        error=EvaluationError,
+    )
+    min_range_atr = float(
+        require_float(
+            context.parameters.get("min_range_atr"),
+            "min_range_atr",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    stop_fraction = float(
+        require_float(
+            context.parameters.get("stop_atr_frac"),
+            "stop_atr_frac",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    target_r = float(
+        require_float(
+            context.parameters.get("target_r"),
+            "target_r",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    min_rvol = float(
+        require_float(
+            context.parameters.get("min_rvol"),
+            "min_rvol",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    minute_min = require_int(
+        context.parameters.get("minute_min"),
+        "minute_min",
+        minimum=0,
+        error=EvaluationError,
+    )
+    minute_max = require_int(
+        context.parameters.get("minute_max"),
+        "minute_max",
+        error=EvaluationError,
+    )
+    entry_cutoff = float(
+        require_float(
+            context.parameters.get("entry_cutoff_minutes"),
+            "entry_cutoff_minutes",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    flat_minutes = float(
+        require_float(
+            context.parameters.get("flat_minutes"),
+            "flat_minutes",
+            minimum=0.0,
+            error=EvaluationError,
+        )
+    )
+    if (
+        not _algo_target_enabled(context)
+        or session is None
+        or extremes is None
+        or atr_session is None
+        or rvol is None
+        or price is None
+    ):
+        return False, False, 0
+    if context.open_entries:
+        entry = context.open_entries[0]
+        direction = int(entry["direction"])
+        entry_price = float(entry["price"])
+        entry_rows = context.read_bars(
+            int(session["open_ts"]), int(entry["ts"])
+        )
+        if not entry_rows:
+            return False, False, 0
+        offset = stop_fraction * float(atr_session) * entry_price
+        entry_high = max(float(row["high"]) for row in entry_rows)
+        entry_low = min(float(row["low"]) for row in entry_rows)
+        stop = entry_low - offset if direction == 1 else entry_high + offset
+        risk = entry_price - stop if direction == 1 else stop - entry_price
+        target = entry_price + direction * target_r * risk
+        hit_stop = float(price) <= stop if direction == 1 else float(price) >= stop
+        hit_target = (
+            float(price) >= target if direction == 1 else float(price) <= target
+        )
+        if (
+            risk <= 0.0
+            or hit_stop
+            or hit_target
+            or float(session["to_close"]) <= flat_minutes
+        ):
+            return False, True, direction
+        return False, False, 0
+    if _algo_has_session_entry(context):
+        return False, False, 0
+    window_min, window_max = _algo_window(session, minute_min, minute_max)
+    minute = int(session["minute"])
+    if (
+        minute < window_min
+        or minute >= window_max
+        or float(session["to_close"]) < entry_cutoff
+        or float(rvol) <= min_rvol
+        or float(extremes["day_range_atr"]) < min_range_atr
+    ):
+        return False, False, 0
+    if bool(extremes["new_day_low"]):
+        return True, False, 1
+    if bool(extremes["new_day_high"]):
+        return True, False, -1
+    return False, False, 0
+
+
 ALGO_FUNCTIONS: dict[str, AlgoSpec] = {
     "crossover": AlgoSpec(_algo_crossover, 2),
     "range_breakout": AlgoSpec(_algo_range_breakout, 4),
     "sentiment_pullback": AlgoSpec(_algo_sentiment_pullback, 4),
+    "momentum_continuation": AlgoSpec(_algo_momentum_continuation, 5),
+    "failed_gap": AlgoSpec(_algo_failed_gap, 4),
+    "gap_continuation": AlgoSpec(_algo_gap_continuation, 6),
+    "extreme_fade": AlgoSpec(_algo_extreme_fade, 5),
 }
 
 
@@ -1285,6 +2098,30 @@ def _output_state(
     return open_entries, prior
 
 
+def _context_bars(
+    connection: sqlite3.Connection,
+    ticker: str,
+    evaluation_ts: int,
+    start_ts: int,
+    through_ts: Optional[int],
+) -> tuple[Mapping[str, Any], ...]:
+    through = evaluation_ts if through_ts is None else min(
+        evaluation_ts, through_ts
+    )
+    if start_ts > through:
+        return ()
+    rows = connection.execute(
+        """
+        SELECT ts,open,high,low,close,volume,interpolated
+        FROM bars
+        WHERE ticker=? AND ts>=? AND ts<=? AND interpolated=0
+        ORDER BY ts
+        """,
+        (ticker, start_ts, through),
+    ).fetchall()
+    return tuple(rows)
+
+
 def run_core(
     connection: sqlite3.Connection,
     settings: Settings,
@@ -1347,11 +2184,20 @@ def run_core(
         try:
             output = ALGO_FUNCTIONS[node["function"]].function(
                 AlgoContext(
+                    ticker=ticker,
+                    ts=ts,
                     parameters=node["params"],
                     inputs=inputs,
                     previous=previous,
                     open_entries=position,
                     session_outputs=tuple(session_outputs),
+                    read_bars=lambda start_ts, through_ts=None: _context_bars(
+                        connection,
+                        ticker,
+                        ts,
+                        start_ts,
+                        through_ts,
+                    ),
                 )
             )
         except Exception as exc:

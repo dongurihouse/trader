@@ -1,5 +1,5 @@
 {
-  "version": 6,
+  "version": 7,
   "database": "../data/trader.sqlite3",
   "tickers": ["SNDK", "SNXX", "SNDQ", "MU", "SPY", "QQQ", "SOXX"],
   "early_closes": ["2026-11-27", "2026-12-24"],
@@ -115,11 +115,38 @@
       "inputs": [],
       "params": {}
     },
+    "atr_session": {
+      "inputs": ["bars", "session"],
+      "params": {
+        "sessions": 14
+      }
+    },
+    "prior_session": {
+      "inputs": ["bars", "session"],
+      "params": {}
+    },
+    "first30_ret": {
+      "inputs": ["bars", "session"],
+      "params": {
+        "bars": 30
+      }
+    },
+    "session_extremes": {
+      "inputs": ["bars", "session", "atr_session"],
+      "params": {}
+    },
     "orb5_range": {
       "function": "opening_range",
       "inputs": ["bars", "session"],
       "params": {
         "minutes": 5
+      }
+    },
+    "or15": {
+      "function": "opening_range",
+      "inputs": ["bars", "session"],
+      "params": {
+        "minutes": 15
       }
     },
     "orb5_rvol": {
@@ -196,6 +223,88 @@
         "pattern_exit": true,
         "flat_minutes": 5,
         "capital_fraction": 0.5
+      },
+      "trades": true
+    },
+    "lateday_momentum": {
+      "function": "momentum_continuation",
+      "inputs": [
+        "session",
+        "first30_ret",
+        "atr_session",
+        "orb5_rvol",
+        "last_close"
+      ],
+      "params": {
+        "target_tickers": ["SNDK"],
+        "first30_min_pct": 1.0,
+        "risk_atr_frac": 0.15,
+        "target_r": 1.5,
+        "min_rvol": 1.0,
+        "minute_min": 315,
+        "minute_max": 380,
+        "entry_cutoff_minutes": 10,
+        "flat_minutes": 5
+      },
+      "trades": true
+    },
+    "failed_gap_reversal": {
+      "function": "failed_gap",
+      "inputs": ["session", "prior_session", "atr_session", "last_close"],
+      "params": {
+        "target_tickers": ["SNDK"],
+        "gap_min_pct": 2.0,
+        "risk_atr_frac": 0.25,
+        "target_r": 2.0,
+        "minute_min": 15,
+        "minute_max": 120,
+        "entry_cutoff_minutes": 10,
+        "flat_minutes": 5
+      },
+      "trades": true
+    },
+    "gap_play": {
+      "function": "gap_continuation",
+      "inputs": [
+        "session",
+        "prior_session",
+        "or15",
+        "atr_session",
+        "orb5_rvol",
+        "last_close"
+      ],
+      "params": {
+        "target_tickers": ["SNDK"],
+        "gap_min_pct": 2.0,
+        "risk_atr_frac": 0.15,
+        "target_r": 2.0,
+        "min_rvol": 1.0,
+        "minute_min": 15,
+        "minute_max": 60,
+        "entry_cutoff_minutes": 10,
+        "flat_minutes": 5
+      },
+      "trades": true
+    },
+    "day_extreme_reversal": {
+      "function": "extreme_fade",
+      "inputs": [
+        "session",
+        "session_extremes",
+        "atr_session",
+        "orb5_rvol",
+        "last_close"
+      ],
+      "params": {
+        "target_tickers": ["SNDK"],
+        "min_range_atr": 1.0,
+        "stop_atr_frac": 0.35,
+        "target_r": 1.5,
+        "min_rvol": 1.0,
+        "minute_min": 60,
+        "minute_max": 380,
+        "entry_cutoff_minutes": 10,
+        "flat_minutes": 5
       },
       "trades": true
     }
