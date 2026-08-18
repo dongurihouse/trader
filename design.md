@@ -19,7 +19,6 @@ through calls between services.
 | outputs      | algo                  | dashboard       |
 | signals      | algo                  | dashboard       |
 | algos        | algo                  | dashboard       |
-| algo_history | algo                  | dashboard       |
 | logs         | every service, own rows only | dashboard |
 
 One shared config file holds the ticker list, the signal and algo
@@ -187,9 +186,8 @@ algo; a list restricts the call to those algos.
   nothing.
 - The live `algos` table stores each current algorithm definition and its
   effective signal and algorithm dependencies. Live definitions have no ID.
-- `algo_history` mirrors the definition columns and adds `version_id` plus
-  the archive time. Database triggers archive an old live row before an update
-  or removal.
+- Git and `config/config.json` are the algorithm-definition history. The
+  database stores only the current effective definition.
 
 ### A change is a standard operation
 
@@ -197,11 +195,9 @@ Add a signal, add an algo, or change a parameter by editing the config file.
 The algo service reacts on its own:
 
 1. It validates and applies the new live definitions immediately.
-2. Before an existing algorithm changes or is removed, the database copies
-   its old definition to `algo_history` and assigns a new `version_id`.
-3. The service clears derived live outputs and affected trades, then refills
+2. The service clears derived live outputs and affected trades, then refills
    the evaluation window. The rows are keyed, so the run is resumable.
-4. The dashboard shows the current algorithm and its archived definitions.
+3. The dashboard shows the current algorithm definition and rebuilt results.
 
 Easy: one file edit, no deploy. Fast: the work is bounded by the
 evaluation window, never by the full history. 
@@ -210,8 +206,8 @@ evaluation window, never by the full history.
 
 Every evaluation is stored in outputs: one live row per signal or algorithm,
 keyed by ticker, timestamp, and name, and stamped with `computed_at`. A rerun
-updates that row in place. Definition history lives in `algo_history`, not in
-the live output cache. The dashboard reads the cache and never writes it.
+updates that row in place. Definition history lives in Git, not in the live
+database. The dashboard reads the cache and never writes it.
 
 Every enabled signal is evaluated and stored each tick, whether or not an
 algo reads it. A visual-aid signal, such as a shape forecast, is stored the
@@ -252,7 +248,6 @@ read-only health APIs.
 | entry and exit overlays on the bars        | trades, per algo                        |
 | click-through detail of a signal or algo   | outputs + current config                |
 | current algo performance                   | outputs and trades, priced by bars      |
-| archived algo definitions                  | algo_history                            |
 | visual-aid signals, e.g. a shape forecast  | outputs, like any signal                |
 | service status                             | local health APIs                       |
 | service history and problems               | logs                                    |
@@ -361,15 +356,6 @@ CREATE TABLE algos (
     active_from  INTEGER NOT NULL
 );
 
-CREATE TABLE algo_history (
-    version_id   INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-    name         TEXT    NOT NULL,
-    definition   TEXT    NOT NULL,
-    dependencies TEXT    NOT NULL,
-    active_from  INTEGER NOT NULL,
-    archived_at  INTEGER NOT NULL
-);
-
 CREATE TABLE logs (
     ts      INTEGER NOT NULL,  -- epoch seconds, UTC
     service TEXT    NOT NULL,  -- bars, events, algo
@@ -396,8 +382,7 @@ Notes:
   across algos. No price (recomputable) and no size (a row is one unit).
 - `outputs` grows fastest; `logs` grows steadily.
 - `algos` contains only live definitions and has no version column.
-- `algo_history.version_id` identifies only archived algorithm definitions.
-- `logs` is append-only. `logs` and `algo_history` have supporting indexes.
+- `logs` is append-only and has supporting indexes.
 - Config stays in files and is applied immediately after validation.
 
 ## Diagram
@@ -421,7 +406,6 @@ flowchart TB
         OUT[(outputs)]
         SIG[(signals)]
         ALG[(algos)]
-        AH[(algo_history)]
         LG[(logs)]
     end
 
@@ -436,7 +420,6 @@ flowchart TB
     LOOP --> OUT
     LOOP --> SIG
     LOOP --> ALG
-    LOOP --> AH
     BARS & EVENTS & LOOP --> LG
     DB -. read only .-> DASH[dashboard<br/>read-only webserver]
     BARS -. GET /health .-> DASH
@@ -448,12 +431,8 @@ flowchart TB
 1. No calendar table; the early-close days live in config.
 2. No backtest concept: the loop applies the core to timestamps, in bulk
    or in real time. Each live output updates in place.
-3. Live state has no version. Replaced algorithm definitions move to
-   `algo_history`, where the database assigns `version_id`.
+3. Live state has no version. Git and `config/config.json` are the source for
+   current and prior algorithm definitions.
 4. Bar metadata comes from bars, never from algo. The handoff is a table, not
    a call, so the core stays deterministic and each service restarts alone.
    Config declares what to pull; nothing requests a fetch.
-
-## Open
-
-1. The retention policy for archived algorithm definitions.

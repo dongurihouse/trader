@@ -90,39 +90,6 @@ CREATE TABLE IF NOT EXISTS algos (
     active_from   INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS algo_history (
-    version_id    INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-    name          TEXT    NOT NULL,
-    definition    TEXT    NOT NULL,
-    dependencies  TEXT    NOT NULL,
-    active_from   INTEGER NOT NULL,
-    archived_at   INTEGER NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS algo_history_name_version
-ON algo_history(name, version_id DESC);
-
-CREATE TRIGGER IF NOT EXISTS archive_algo_update
-BEFORE UPDATE OF definition, dependencies ON algos
-WHEN OLD.definition <> NEW.definition OR OLD.dependencies <> NEW.dependencies
-BEGIN
-    INSERT INTO algo_history(
-        name, definition, dependencies, active_from, archived_at
-    ) VALUES (
-        OLD.name, OLD.definition, OLD.dependencies, OLD.active_from, unixepoch()
-    );
-END;
-
-CREATE TRIGGER IF NOT EXISTS archive_algo_delete
-BEFORE DELETE ON algos
-BEGIN
-    INSERT INTO algo_history(
-        name, definition, dependencies, active_from, archived_at
-    ) VALUES (
-        OLD.name, OLD.definition, OLD.dependencies, OLD.active_from, unixepoch()
-    );
-END;
-
 CREATE TABLE IF NOT EXISTS logs (
     ts      INTEGER NOT NULL,
     service TEXT    NOT NULL,

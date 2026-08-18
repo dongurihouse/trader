@@ -536,60 +536,16 @@ def _algo_snapshots(
     return snapshots
 
 
-def _migrate_legacy_versions(connection: sqlite3.Connection) -> bool:
-    """Convert stored global configs into per-algo history, then remove them."""
-    if not _table_exists(connection, "configs"):
-        return False
-    config_rows = connection.execute(
-        "SELECT first_seen,content FROM configs ORDER BY first_seen,version"
-    ).fetchall()
-    existing_algos = connection.execute("SELECT COUNT(*) FROM algos").fetchone()[0]
-    existing_history = connection.execute(
-        "SELECT COUNT(*) FROM algo_history"
-    ).fetchone()[0]
-    if config_rows and not existing_algos and not existing_history:
-        active: dict[str, tuple[str, str, int]] = {}
-        for row in config_rows:
-            try:
-                document = json.loads(row["content"])
-            except (TypeError, json.JSONDecodeError) as exc:
-                raise ConfigError("stored config is invalid JSON") from exc
-            if not isinstance(document, Mapping):
-                raise ConfigError("stored config must be a JSON object")
-            observed_at = int(row["first_seen"])
-            snapshots = _algo_snapshots(document)
-            for name in sorted(set(active) | set(snapshots)):
-                previous = active.get(name)
-                current = snapshots.get(name)
-                if previous is not None and (
-                    current is None or previous[:2] != current
-                ):
-                    connection.execute(
-                        """
-                        INSERT INTO algo_history(
-                            name,definition,dependencies,active_from,archived_at
-                        ) VALUES (?,?,?,?,?)
-                        """,
-                        (name, previous[0], previous[1], previous[2], observed_at),
-                    )
-                if current is None:
-                    active.pop(name, None)
-                elif previous is None or previous[:2] != current:
-                    active[name] = (current[0], current[1], observed_at)
-        connection.executemany(
-            """
-            INSERT INTO algos(name,definition,dependencies,active_from)
-            VALUES (?,?,?,?)
-            """,
-            [
-                (name, definition, dependencies, active_from)
-                for name, (definition, dependencies, active_from) in sorted(
-                    active.items()
-                )
-            ],
-        )
-    connection.execute("DROP TABLE configs")
-    return True
+def _remove_definition_history(connection: sqlite3.Connection) -> bool:
+    """Remove database-backed config history retained by older releases."""
+    changed = _table_exists(connection, "algo_history") or _table_exists(
+        connection, "configs"
+    )
+    connection.execute("DROP TRIGGER IF EXISTS archive_algo_update")
+    connection.execute("DROP TRIGGER IF EXISTS archive_algo_delete")
+    connection.execute("DROP TABLE IF EXISTS algo_history")
+    connection.execute("DROP TABLE IF EXISTS configs")
+    return changed
 
 
 def _migrate_outputs(connection: sqlite3.Connection) -> bool:
@@ -637,13 +593,19 @@ def _init_database(path: Path) -> None:
                     "ALTER TABLE trades ADD COLUMN direction INTEGER NOT NULL DEFAULT 1 "
                     "CHECK(direction IN (-1, 1))"
                 )
-            migrated_versions = _migrate_legacy_versions(connection)
+            removed_history = _remove_definition_history(connection)
             migrated_outputs = _migrate_outputs(connection)
-            if migrated_versions or migrated_outputs:
+            if removed_history:
                 _log(
                     connection,
                     "info",
-                    "migrated live storage to unversioned outputs and per-algo history",
+                    "removed database definition history; config and git are authoritative",
+                )
+            if migrated_outputs:
+                _log(
+                    connection,
+                    "info",
+                    "migrated live storage to unversioned outputs",
                 )
             connection.commit()
         finally:
@@ -3196,7 +3158,7 @@ def _log(
 def _sync_live_definitions(
     connection: sqlite3.Connection, settings: Settings, now: int
 ) -> dict[str, Any]:
-    """Apply config immediately and archive each replaced live algo."""
+    """Apply current config definitions immediately."""
     try:
         document = json.loads(settings.content)
     except json.JSONDecodeError as exc:
@@ -3235,14 +3197,9 @@ def _sync_live_definitions(
         )
     }
     changed_algos: list[str] = []
-    archived: list[dict[str, Any]] = []
     for name in sorted(set(stored_algos) - set(configured_algos)):
         connection.execute("DELETE FROM algos WHERE name=?", (name,))
-        version_id = connection.execute(
-            "SELECT MAX(version_id) FROM algo_history WHERE name=?", (name,)
-        ).fetchone()[0]
         changed_algos.append(name)
-        archived.append({"name": name, "version_id": int(version_id)})
     for name, (definition, dependencies) in sorted(configured_algos.items()):
         previous = stored_algos.get(name)
         if previous is None:
@@ -3263,11 +3220,7 @@ def _sync_live_definitions(
                 """,
                 (definition, dependencies, now, name),
             )
-            version_id = connection.execute(
-                "SELECT MAX(version_id) FROM algo_history WHERE name=?", (name,)
-            ).fetchone()[0]
             changed_algos.append(name)
-            archived.append({"name": name, "version_id": int(version_id)})
 
     if signals_changed or changed_algos:
         connection.execute("DELETE FROM outputs")
@@ -3279,7 +3232,6 @@ def _sync_live_definitions(
     return {
         "signals_changed": signals_changed,
         "changed_algos": changed_algos,
-        "archived": archived,
     }
 
 
@@ -3750,14 +3702,6 @@ def cycle(
         now = int(time.time())
         settings = current
         definition_sync = _sync_live_definitions(connection, settings, now)
-        for archived in definition_sync["archived"]:
-            _log(
-                connection,
-                "info",
-                "archived algo definition name=%s version_id=%d"
-                % (archived["name"], archived["version_id"]),
-                now,
-            )
         if definition_sync["signals_changed"] or definition_sync["changed_algos"]:
             _log(
                 connection,

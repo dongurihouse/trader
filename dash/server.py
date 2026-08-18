@@ -109,7 +109,6 @@ class DashboardData:
                         "trades",
                         "outputs",
                         "algos",
-                        "algo_history",
                     )
                 }
 
@@ -361,66 +360,38 @@ class DashboardData:
             "has_more": len(rows) == row_limit,
         }
 
-    def node_detail(
-        self, ticker: str, kind: str, version_id: str | None
-    ) -> dict[str, Any]:
+    def node_detail(self, ticker: str, kind: str) -> dict[str, Any]:
         ticker = self._valid_symbol(ticker)
         if not kind or len(kind) > 120:
             raise DashboardError("A signal or algo name is required")
 
         with self.connection() as connection:
-            dependencies: Any = {}
-            archived_at = None
-            if version_id is None:
-                definition, node_type = self._node_definition(kind)
-                values = []
-                for row in connection.execute(
-                    """
-                    SELECT ts, output, computed_at
-                    FROM outputs
-                    WHERE ticker = ? AND kind = ?
-                    ORDER BY ts DESC
-                    LIMIT 240
-                    """,
-                    (ticker, kind),
-                ).fetchall():
-                    values.append(
-                        {
-                            "ts": row["ts"],
-                            "output": self._json_value(row["output"]),
-                            "computed_at": row["computed_at"],
-                        }
-                    )
-                values.reverse()
-            else:
-                try:
-                    requested_id = int(version_id)
-                except ValueError as exc:
-                    raise DashboardError("Historical version ID must be an integer") from exc
-                row = connection.execute(
-                    """
-                    SELECT definition,dependencies,archived_at
-                    FROM algo_history
-                    WHERE version_id=? AND name=?
-                    """,
-                    (requested_id, kind),
-                ).fetchone()
-                if row is None:
-                    raise DashboardError("Historical algorithm definition was not found")
-                definition = self._json_value(row["definition"])
-                dependencies = self._json_value(row["dependencies"])
-                archived_at = row["archived_at"]
-                node_type = "algo"
-                values = []
+            definition, node_type = self._node_definition(kind)
+            values = []
+            for row in connection.execute(
+                """
+                SELECT ts, output, computed_at
+                FROM outputs
+                WHERE ticker = ? AND kind = ?
+                ORDER BY ts DESC
+                LIMIT 240
+                """,
+                (ticker, kind),
+            ).fetchall():
+                values.append(
+                    {
+                        "ts": row["ts"],
+                        "output": self._json_value(row["output"]),
+                        "computed_at": row["computed_at"],
+                    }
+                )
+            values.reverse()
 
         return {
             "ticker": ticker,
             "kind": kind,
             "node_type": node_type,
-            "version_id": int(version_id) if version_id is not None else None,
-            "archived_at": archived_at,
             "definition": definition,
-            "dependencies": dependencies,
             "values": values,
         }
 
@@ -582,8 +553,6 @@ class DashboardData:
             }
             for name, definition in current_definitions.items()
         }
-        histories: dict[str, list[dict[str, Any]]] = {}
-
         with self.connection() as connection:
             for row in connection.execute(
                 "SELECT name,definition,active_from FROM algos ORDER BY name"
@@ -595,33 +564,6 @@ class DashboardData:
                     "configured": name in current_definitions,
                     "active_from": row["active_from"],
                 }
-            for row in connection.execute(
-                """
-                SELECT version_id,name,definition,dependencies,active_from,archived_at
-                FROM algo_history
-                ORDER BY name,version_id DESC
-                """
-            ):
-                name = str(row["name"])
-                definition = self._json_value(row["definition"])
-                histories.setdefault(name, []).append(
-                    {
-                        "version_id": int(row["version_id"]),
-                        "definition": definition if isinstance(definition, dict) else {},
-                        "dependencies": self._json_value(row["dependencies"]),
-                        "active_from": int(row["active_from"]),
-                        "archived_at": int(row["archived_at"]),
-                    }
-                )
-                definitions.setdefault(
-                    name,
-                    {
-                        "definition": definition if isinstance(definition, dict) else {},
-                        "configured": False,
-                        "active_from": None,
-                    },
-                )
-
             trade_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(trades)")
             }
@@ -797,7 +739,6 @@ class DashboardData:
                     "params": definition.get("params", {}),
                     "configured": definition_meta["configured"],
                     "active_from": definition_meta["active_from"],
-                    "history": histories.get(name, []),
                     "stats": stats,
                     "tickers": ticker_rows,
                     "recent_trades": sorted(
@@ -1425,7 +1366,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 payload = self.data.node_detail(
                     self._param(query, "ticker"),
                     self._param(query, "kind"),
-                    self._param(query, "version_id", None),
                 )
             elif path == "/api/performance":
                 payload = self.data.performance(self._param(query, "ticker"))

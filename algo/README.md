@@ -1,7 +1,7 @@
 # algo
 
 `algo` is the one writer for the shared database's `outputs`, `signals`,
-`algos`, `algo_history`, and `trades` rows. It reads minute bars, evaluates
+`algos`, and `trades` rows. It reads minute bars, evaluates
 every enabled signal and algo, and stores one unversioned live output per node.
 
 The service has no market clock. Every cycle takes at most 2,000 configured
@@ -220,13 +220,13 @@ loopback health API port.
 
 The service applies a valid config change immediately. The `algos` table holds
 each current definition with the signal and algo definitions it depends on.
-When an effective algorithm definition changes or is removed, a database
-trigger copies the old row to `algo_history`, assigns it an auto-incrementing
-`version_id`, and then lets the live row change. Live rows have no version ID.
+When an effective algorithm definition changes or is removed, the corresponding
+live row changes or is deleted. Git and `config/config.json` are the definition
+history; the database holds current state only.
 
 Any signal or algorithm definition change clears the derived live output cache.
 Trades for affected algorithms are also cleared before their current results
-are rebuilt. The historical definition stays readable from `algo_history`.
+are rebuilt.
 
 ## Operate
 
