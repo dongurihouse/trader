@@ -1,5 +1,5 @@
 {
-  "version": 8,
+  "version": 9,
   "database": "../data/trader.sqlite3",
   "tickers": ["SNDK", "SNXX", "SNDQ", "MU", "SPY", "QQQ", "SOXX"],
   "early_closes": ["2026-11-27", "2026-12-24"],
@@ -114,6 +114,17 @@
     "session": {
       "inputs": [],
       "params": {}
+    },
+    "relative_momentum": {
+      "inputs": ["bars", "session"],
+      "params": {
+        "window_minutes": 10,
+        "baseline_sessions": 20,
+        "min_sessions": 8,
+        "time_tolerance_minutes": 5,
+        "min_momentum_pct": 0.05,
+        "strong_percentile": 80.0
+      }
     },
     "atr_session": {
       "inputs": ["bars", "session"],

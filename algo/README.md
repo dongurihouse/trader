@@ -62,6 +62,7 @@ The service has these signal functions:
 | `session_extremes` | none | running high/low, fresh-extreme flags, and range in session ATRs |
 | `opening_range` | `minutes` | `{high, low, range}` or `null` |
 | `rvol_open` | `cap_bars`, `baseline_sessions` | number or `null` |
+| `relative_momentum` | `window_minutes`, `baseline_sessions`, `min_sessions`, `time_tolerance_minutes`, `min_momentum_pct`, `strong_percentile` | direction, current move and duration, relative percentiles, and strength |
 | `last_close` | `include_interpolated` | number or `null` |
 | `opening_sentiment` | `target_tickers`, `market_tickers`, `minutes`, `min_market_move_pct`, `require_target_agreement` | fixed opening direction, target agreement, and live pattern validity |
 | `pullback` | `early_minutes`, `early_window_minutes`, `late_window_minutes`, `entry_cutoff_minutes`, `baseline_sessions`, `min_baseline_sessions`, `percentile`, `min_extreme_distance_pct` | current countertrend move, prior-session threshold, and entry trigger |
@@ -72,6 +73,17 @@ is at or before the evaluation timestamp. Opening-range and relative-volume
 signals ignore interpolated bars. Relative volume uses the median volume for
 each elapsed opening slot across the configured number of complete prior data
 sessions.
+
+`relative_momentum` measures the signed return over its trailing window. Its
+direction stays active while consecutive rolling returns keep the same sign
+and exceed `min_momentum_pct`; this supplies the causal trend duration. At each
+regular-session minute, it compares absolute return and duration with one
+median observation from the same minute plus or minus
+`time_tolerance_minutes` in each complete prior session. The overall strength
+is the larger of the magnitude and duration percentiles, so an unusually large
+move or an unusually persistent move can qualify. The signal uses no current-
+session future bars and returns `null` outside regular hours or without enough
+complete history.
 
 `atr_session` also accepts complete, uniform two- or five-minute archive
 sessions. It uses only the session high, low, and close, so lower-frequency

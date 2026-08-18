@@ -68,6 +68,14 @@ _SESSION_SUMMARIES: dict[
     tuple[str, str, date], Optional[Mapping[str, float]]
 ] = {}
 _ATR_SESSION_VALUES: dict[tuple[str, str, date, int], Optional[float]] = {}
+_RELATIVE_MOMENTUM_SESSION_FEATURES: dict[
+    tuple[str, str, date, int, float],
+    Optional[tuple[Optional[Mapping[str, float]], ...]],
+] = {}
+_RELATIVE_MOMENTUM_BASELINES: dict[
+    tuple[str, str, date, int, int, int, float, int],
+    Optional[Mapping[int, tuple[tuple[float, ...], tuple[float, ...]]]],
+] = {}
 _INITIALIZED_DATABASES: set[Path] = set()
 _DATABASE_INIT_LOCK = threading.Lock()
 
@@ -566,6 +574,56 @@ def _normalize_rvol(
     }
 
 
+def _normalize_relative_momentum(
+    parameters: Mapping[str, Any], tickers: tuple[str, ...]
+) -> Mapping[str, Any]:
+    _parameter_keys(
+        parameters,
+        {
+            "window_minutes",
+            "baseline_sessions",
+            "min_sessions",
+            "time_tolerance_minutes",
+            "min_momentum_pct",
+            "strong_percentile",
+        },
+    )
+    result = {
+        "window_minutes": require_int(
+            parameters.get("window_minutes"),
+            "window_minutes",
+            error=ConfigError,
+        ),
+        "baseline_sessions": require_int(
+            parameters.get("baseline_sessions"),
+            "baseline_sessions",
+            error=ConfigError,
+        ),
+        "min_sessions": require_int(
+            parameters.get("min_sessions"),
+            "min_sessions",
+            error=ConfigError,
+        ),
+        "time_tolerance_minutes": require_int(
+            parameters.get("time_tolerance_minutes"),
+            "time_tolerance_minutes",
+            minimum=0,
+            error=ConfigError,
+        ),
+        "min_momentum_pct": _number(
+            parameters.get("min_momentum_pct"), "min_momentum_pct"
+        ),
+        "strong_percentile": _number(
+            parameters.get("strong_percentile"), "strong_percentile"
+        ),
+    }
+    if result["min_sessions"] > result["baseline_sessions"]:
+        raise ConfigError("min_sessions cannot exceed baseline_sessions")
+    if result["strong_percentile"] > 100.0:
+        raise ConfigError("strong_percentile must be <= 100")
+    return result
+
+
 def _normalize_opening_sentiment(
     parameters: Mapping[str, Any], tickers: tuple[str, ...]
 ) -> Mapping[str, Any]:
@@ -1019,6 +1077,277 @@ def _signal_rvol_open(connection, ticker, ts, parameters, inputs, settings) -> O
     return actual / expected
 
 
+def _relative_momentum_features(
+    rows: Sequence[Mapping[str, Any]],
+    window_minutes: int,
+    min_momentum_pct: float,
+) -> tuple[Optional[Mapping[str, float]], ...]:
+    if not rows:
+        return ()
+    prices = [float(rows[0]["open"])] + [float(row["close"]) for row in rows]
+    features: list[Optional[Mapping[str, float]]] = []
+    previous_direction = 0
+    run_length = 0
+    for index, row in enumerate(rows):
+        elapsed = index + 1
+        if elapsed < window_minutes:
+            features.append(None)
+            continue
+        reference = prices[elapsed - window_minutes]
+        price = float(row["close"])
+        if reference <= 0.0 or price <= 0.0:
+            features.append(None)
+            previous_direction = 0
+            run_length = 0
+            continue
+        momentum_pct = (price / reference - 1.0) * 100.0
+        direction = (
+            1
+            if momentum_pct >= min_momentum_pct
+            else -1
+            if momentum_pct <= -min_momentum_pct
+            else 0
+        )
+        if direction == 0:
+            run_length = 0
+        elif direction == previous_direction:
+            run_length += 1
+        else:
+            run_length = 1
+        previous_direction = direction
+        duration = window_minutes + run_length - 1 if direction else 0
+        if direction:
+            start = elapsed - duration
+            trend_move_pct = (price / prices[start] - 1.0) * 100.0
+            path = sum(
+                abs(prices[position] - prices[position - 1])
+                for position in range(start + 1, elapsed + 1)
+            )
+            efficiency = abs(price - prices[start]) / path if path else 0.0
+        else:
+            trend_move_pct = 0.0
+            efficiency = 0.0
+        features.append(
+            {
+                "direction": float(direction),
+                "momentum_pct": momentum_pct,
+                "magnitude_pct": abs(momentum_pct),
+                "duration_minutes": float(duration),
+                "trend_move_pct": trend_move_pct,
+                "efficiency": efficiency,
+            }
+        )
+    return tuple(features)
+
+
+def _complete_relative_momentum_session(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    ticker: str,
+    local_day: date,
+    window_minutes: int,
+    min_momentum_pct: float,
+) -> Optional[tuple[Optional[Mapping[str, float]], ...]]:
+    key = (
+        str(settings.database),
+        ticker,
+        local_day,
+        window_minutes,
+        min_momentum_pct,
+    )
+    if key in _RELATIVE_MOMENTUM_SESSION_FEATURES:
+        return _RELATIVE_MOMENTUM_SESSION_FEATURES[key]
+    probe = int(
+        datetime.combine(local_day, clock_time(12), tzinfo=EASTERN).timestamp()
+    )
+    _, session_open, session_close = _session_window(settings, probe)
+    rows = _session_bars(
+        connection,
+        ticker,
+        session_open,
+        session_close,
+        session_close - 1,
+        include_interpolated=False,
+    )
+    expected = (session_close - session_open) // 60
+    if len(rows) != expected or any(
+        int(row["ts"]) != session_open + index * 60
+        for index, row in enumerate(rows)
+    ):
+        result = None
+    else:
+        result = _relative_momentum_features(
+            rows, window_minutes, min_momentum_pct
+        )
+    _RELATIVE_MOMENTUM_SESSION_FEATURES[key] = result
+    return result
+
+
+def _relative_momentum_baseline(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    ticker: str,
+    local_day: date,
+    window_minutes: int,
+    baseline_sessions: int,
+    time_tolerance_minutes: int,
+    min_momentum_pct: float,
+    target_minutes: int,
+) -> Optional[Mapping[int, tuple[tuple[float, ...], tuple[float, ...]]]]:
+    key = (
+        str(settings.database),
+        ticker,
+        local_day,
+        window_minutes,
+        baseline_sessions,
+        time_tolerance_minutes,
+        min_momentum_pct,
+        target_minutes,
+    )
+    if key in _RELATIVE_MOMENTUM_BASELINES:
+        return _RELATIVE_MOMENTUM_BASELINES[key]
+    sessions: list[tuple[Optional[Mapping[str, float]], ...]] = []
+    candidate = local_day - timedelta(days=1)
+    for _ in range(baseline_sessions * 4 + 60):
+        features = _complete_relative_momentum_session(
+            connection,
+            settings,
+            ticker,
+            candidate,
+            window_minutes,
+            min_momentum_pct,
+        )
+        if features is not None and len(features) >= target_minutes:
+            sessions.append(features)
+            if len(sessions) == baseline_sessions:
+                break
+        candidate -= timedelta(days=1)
+    if not sessions:
+        _RELATIVE_MOMENTUM_BASELINES[key] = None
+        return None
+
+    curve: dict[int, tuple[tuple[float, ...], tuple[float, ...]]] = {}
+    for minute in range(target_minutes):
+        magnitudes: list[float] = []
+        durations: list[float] = []
+        start = max(0, minute - time_tolerance_minutes)
+        end = min(target_minutes, minute + time_tolerance_minutes + 1)
+        for features in sessions:
+            nearby = [feature for feature in features[start:end] if feature is not None]
+            if not nearby:
+                continue
+            magnitudes.append(
+                float(statistics.median(feature["magnitude_pct"] for feature in nearby))
+            )
+            durations.append(
+                float(
+                    statistics.median(
+                        feature["duration_minutes"] for feature in nearby
+                    )
+                )
+            )
+        curve[minute] = (tuple(magnitudes), tuple(durations))
+    _RELATIVE_MOMENTUM_BASELINES[key] = curve
+    return curve
+
+
+def _midrank_percentile(value: float, samples: Sequence[float]) -> float:
+    lower = sum(sample < value for sample in samples)
+    equal = sum(sample == value for sample in samples)
+    return (lower + equal * 0.5) / len(samples) * 100.0
+
+
+def _signal_relative_momentum(
+    connection, ticker, ts, parameters, inputs, settings
+) -> Optional[dict[str, Any]]:
+    session = inputs["session"]
+    if session is None:
+        return None
+    window_minutes = int(parameters["window_minutes"])
+    session_minute = int(session["minute"])
+    if session_minute + 1 < window_minutes:
+        return None
+    session_open = int(session["open_ts"])
+    rows = _session_bars(
+        connection,
+        ticker,
+        session_open,
+        session_open + int(session["total"]) * 60,
+        ts,
+        include_interpolated=False,
+    )
+    if len(rows) != session_minute + 1 or any(
+        int(row["ts"]) != session_open + index * 60
+        for index, row in enumerate(rows)
+    ):
+        return None
+    current = _relative_momentum_features(
+        rows, window_minutes, float(parameters["min_momentum_pct"])
+    )[-1]
+    if current is None:
+        return None
+    baseline = _relative_momentum_baseline(
+        connection,
+        settings,
+        ticker,
+        date.fromisoformat(session["date"]),
+        window_minutes,
+        int(parameters["baseline_sessions"]),
+        int(parameters["time_tolerance_minutes"]),
+        float(parameters["min_momentum_pct"]),
+        int(session["total"]),
+    )
+    if baseline is None:
+        return None
+    magnitudes, durations = baseline.get(session_minute, ((), ()))
+    minimum = int(parameters["min_sessions"])
+    if len(magnitudes) < minimum or len(durations) < minimum:
+        return None
+    magnitude_percentile = _midrank_percentile(
+        float(current["magnitude_pct"]), magnitudes
+    )
+    duration_percentile = _midrank_percentile(
+        float(current["duration_minutes"]), durations
+    )
+    strength_percentile = max(magnitude_percentile, duration_percentile)
+    difference = abs(magnitude_percentile - duration_percentile)
+    basis = (
+        "both"
+        if difference < 0.000001
+        else "magnitude"
+        if magnitude_percentile > duration_percentile
+        else "duration"
+    )
+    direction_value = int(current["direction"])
+    direction = (
+        "up" if direction_value > 0 else "down" if direction_value < 0 else "neutral"
+    )
+    strong = (
+        direction_value != 0
+        and strength_percentile >= float(parameters["strong_percentile"])
+    )
+    return {
+        "direction": direction,
+        "direction_value": direction_value,
+        "momentum_pct": round(float(current["momentum_pct"]), 6),
+        "magnitude_pct": round(float(current["magnitude_pct"]), 6),
+        "trend_duration_minutes": int(current["duration_minutes"]),
+        "trend_move_pct": round(float(current["trend_move_pct"]), 6),
+        "efficiency": round(float(current["efficiency"]), 6),
+        "magnitude_percentile": round(magnitude_percentile, 3),
+        "duration_percentile": round(duration_percentile, 3),
+        "strength_percentile": round(strength_percentile, 3),
+        "signed_strength": round(
+            direction_value * strength_percentile / 100.0, 6
+        ),
+        "strength_basis": basis,
+        "strong": strong,
+        "sample_sessions": len(magnitudes),
+        "session_minute": session_minute,
+        "window_minutes": window_minutes,
+    }
+
+
 def _signal_last_close(connection, ticker, ts, parameters, inputs, settings) -> Optional[float]:
     include = bool(parameters["include_interpolated"])
     quality = "" if include else "AND interpolated=0"
@@ -1353,6 +1682,11 @@ SIGNAL_FUNCTIONS: dict[str, SignalSpec] = {
     ),
     "rvol_open": SignalSpec(
         _signal_rvol_open, ("bars", "session"), _normalize_rvol
+    ),
+    "relative_momentum": SignalSpec(
+        _signal_relative_momentum,
+        ("bars", "session"),
+        _normalize_relative_momentum,
     ),
     "last_close": SignalSpec(
         _signal_last_close, ("bars",), _normalize_last_close
@@ -2566,6 +2900,8 @@ def cycle(
     _OUTPUT_SESSION_SEEDS.clear()
     _SESSION_SUMMARIES.clear()
     _ATR_SESSION_VALUES.clear()
+    _RELATIVE_MOMENTUM_SESSION_FEATURES.clear()
+    _RELATIVE_MOMENTUM_BASELINES.clear()
     clear_shape_cache()
     config_path = config_path.resolve()
     current = load_settings(config_path)
