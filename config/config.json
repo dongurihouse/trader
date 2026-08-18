@@ -1,5 +1,5 @@
 {
-  "version": 14,
+  "version": 15,
   "database": "../data/trader.sqlite3",
   "tickers": ["SNDK", "SNXX", "SNDQ", "MU", "SPY", "QQQ", "SOXX"],
   "early_closes": ["2026-11-27", "2026-12-24"],
@@ -158,7 +158,7 @@
       "function": "opening_range",
       "inputs": ["bars", "session"],
       "params": {
-        "minutes": 5
+        "minutes": 10
       }
     },
     "or15": {
@@ -224,12 +224,11 @@
       "inputs": ["session", "orb5_range", "orb5_rvol", "last_close"],
       "params": {
         "direction": "both",
-        "target_r": 2.0,
+        "target_r": 0.5,
         "min_rvol": 1.0,
         "entry_cutoff_minutes": 10,
         "flat_minutes": 5
-      },
-      "trades": true
+      }
     },
     "sentiment_pullback": {
       "inputs": ["session", "opening_sentiment", "pullback", "last_close"],
@@ -242,8 +241,7 @@
         "pattern_exit": true,
         "flat_minutes": 5,
         "capital_fraction": 0.5
-      },
-      "trades": true
+      }
     },
     "lateday_momentum": {
       "function": "momentum_continuation",
@@ -264,8 +262,7 @@
         "minute_max": 380,
         "entry_cutoff_minutes": 10,
         "flat_minutes": 5
-      },
-      "trades": true
+      }
     },
     "failed_gap_reversal": {
       "function": "failed_gap",
@@ -279,8 +276,7 @@
         "minute_max": 120,
         "entry_cutoff_minutes": 10,
         "flat_minutes": 5
-      },
-      "trades": true
+      }
     },
     "gap_play": {
       "function": "gap_continuation",
@@ -302,8 +298,7 @@
         "minute_max": 60,
         "entry_cutoff_minutes": 10,
         "flat_minutes": 5
-      },
-      "trades": true
+      }
     },
     "day_extreme_reversal": {
       "function": "extreme_fade",
@@ -325,8 +320,7 @@
         "minute_max": 380,
         "entry_cutoff_minutes": 10,
         "flat_minutes": 5
-      },
-      "trades": true
+      }
     }
   }
 }

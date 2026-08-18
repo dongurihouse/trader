@@ -774,7 +774,6 @@ class DashboardData:
                     "function": definition.get("function", name),
                     "inputs": definition.get("inputs", []),
                     "params": definition.get("params", {}),
-                    "trades_enabled": definition.get("trades") is True,
                     "configured": definition_meta["configured"],
                     "version": definition_meta["version"],
                     "stats": stats,
@@ -1066,7 +1065,7 @@ class DashboardData:
 
         overlays = []
         for algo_name, definition in algos.items():
-            if not isinstance(definition, dict) or not definition.get("trades", False):
+            if not isinstance(definition, dict):
                 continue
             if definition.get("function", algo_name) != "range_breakout":
                 continue

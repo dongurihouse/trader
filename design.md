@@ -169,7 +169,7 @@ algo; a list restricts the call to those algos.
     "shape": { "inputs": ["bars"], "function": "shape_v1", "params": {} }
   },
   "algos": {
-    "dip": { "trades": true, "inputs": ["sma20"],
+    "dip": { "inputs": ["sma20"],
              "params": { "drop_pct": 1.5, "trail_pct": 0.8 } }
   }
   ```
@@ -177,8 +177,7 @@ algo; a list restricts the call to those algos.
 - The map key is the name, and it is the `kind` value in outputs. Presence
   in the map means enabled; to disable a node, remove the entry and bump
   the version.
-- `inputs` declares what a node reads. `trades` marks an algo that writes
-  trade rows; an algo without it evaluates like a signal.
+- `inputs` declares what a node reads. Every algo action writes a trade row.
 - A `bar_metadata` input is also the fetch order. Bars reads the same config
   file and keeps the declared names populated. No service requests a fetch.
   The `name` param is the provider value; the rest are its parameters.

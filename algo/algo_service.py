@@ -193,20 +193,18 @@ def _nodes(document: Mapping[str, Any], key: str) -> dict[str, Mapping[str, Any]
         function = value.get("function")
         if function is None:
             function = "metadata" if key == "signals" and inputs == ["bar_metadata"] else name
-        trades = value.get("trades", False) if key == "algos" else False
+        if "trades" in value:
+            raise ConfigError("%s.%s.trades is not supported" % (key, name))
         if not isinstance(function, str) or not function:
             raise ConfigError("%s.%s.function must be a name" % (key, name))
         if not isinstance(params, dict) or not isinstance(inputs, list):
             raise ConfigError("%s.%s params must be an object and inputs must be a list" % (key, name))
         if not all(isinstance(target, str) and target for target in inputs):
             raise ConfigError("%s.%s inputs must contain node names" % (key, name))
-        if not isinstance(trades, bool):
-            raise ConfigError("%s.%s.trades must be boolean" % (key, name))
         nodes[name] = {
             "function": function,
             "params": params,
             "inputs": inputs,
-            "trades": trades,
         }
     return nodes
 
@@ -3247,8 +3245,6 @@ def _write_result(
             rows,
         )
         for name, output in result["algos"].items():
-            if not settings.algos[name]["trades"]:
-                continue
             is_entry, is_close, direction = _algo_output(output)
             action = "exit_all" if is_close else "entry" if is_entry else None
             if action is None:
