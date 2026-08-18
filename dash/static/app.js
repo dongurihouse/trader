@@ -1585,6 +1585,44 @@ function renderShapeForest(shape) {
   list.replaceChildren(fragment);
 }
 
+function pairTradeActions(trades) {
+  const pairs = [];
+  const openPairsByAlgo = new Map();
+  const ordered = trades.slice().sort((left, right) => (
+    Number(left.ts) - Number(right.ts) || String(left.algo).localeCompare(String(right.algo))
+  ));
+
+  ordered.forEach((trade) => {
+    const openPairs = openPairsByAlgo.get(trade.algo) || [];
+    openPairsByAlgo.set(trade.algo, openPairs);
+    if (trade.action === "entry") {
+      const pair = { entry: trade, exit: null };
+      openPairs.push(pair);
+      pairs.push(pair);
+      return;
+    }
+    if (trade.action !== "exit_all") return;
+    openPairs.splice(0).forEach((pair) => {
+      pair.exit = trade;
+    });
+  });
+
+  return pairs;
+}
+
+function tradeTime(trade, className, label) {
+  if (!trade) {
+    const pending = createElement("span", `${className} pending`, "—");
+    pending.title = "No exit yet";
+    return pending;
+  }
+  const date = dateFromEpoch(trade.ts);
+  const time = createElement("time", className, pacificClock.format(date));
+  time.dateTime = date.toISOString();
+  time.title = `${label} ${pacificDateTime.format(date)}`;
+  return time;
+}
+
 function renderDayTrades(date) {
   const title = $("#day-trades-title");
   const list = $("#day-trades-list");
@@ -1598,27 +1636,31 @@ function renderDayTrades(date) {
     return;
   }
 
-  const trades = (state.bars?.trades || [])
-    .filter((trade) => pacificDateKey(trade.ts) === date)
-    .sort((left, right) => (
-      Number(left.ts) - Number(right.ts) || String(left.algo).localeCompare(String(right.algo))
-    ));
-  if (!trades.length) {
+  const pairs = pairTradeActions(state.bars?.trades || [])
+    .filter((pair) => pacificDateKey(pair.entry.ts) === date);
+  if (!pairs.length) {
     list.replaceChildren(createElement("span", "day-trades-unavailable", "No entries or exits"));
     return;
   }
 
   const fragment = document.createDocumentFragment();
-  trades.forEach((trade) => {
-    const action = trade.action === "entry" ? "entry" : "exit";
-    const row = createElement("div", `day-trade-row ${action}`);
-    const algo = createElement("span", "day-trade-algo", formatShapeName(trade.algo));
-    algo.title = formatShapeName(trade.algo);
+  pairs.forEach((pair) => {
+    const algoName = formatShapeName(pair.entry.algo);
+    const directionName = Number(pair.entry.direction) < 0 ? "Short" : "Long";
+    const entryTime = pacificClock.format(dateFromEpoch(pair.entry.ts));
+    const exitTime = pair.exit ? pacificClock.format(dateFromEpoch(pair.exit.ts)) : "open";
+    const row = createElement("div", "day-trade-row");
+    row.setAttribute(
+      "aria-label",
+      `${algoName}, ${directionName}, entry ${entryTime}, exit ${exitTime}`,
+    );
+    const algo = createElement("span", "day-trade-algo", algoName);
+    algo.title = algoName;
     row.append(
-      createElement("time", "day-trade-time", pacificClock.format(dateFromEpoch(trade.ts))),
-      createElement("strong", "day-trade-action", action),
       algo,
-      createElement("span", "day-trade-direction", Number(trade.direction) < 0 ? "Short" : "Long"),
+      createElement("span", "day-trade-direction", directionName),
+      tradeTime(pair.entry, "day-trade-time day-trade-entry-time", "Entry"),
+      tradeTime(pair.exit, "day-trade-time day-trade-exit-time", "Exit"),
     );
     fragment.append(row);
   });

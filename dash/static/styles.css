@@ -1036,13 +1036,13 @@ h1 em {
 
 .day-trades-list {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 270px), 1fr));
   gap: 1px 14px;
 }
 
 .day-trade-row {
   display: grid;
-  grid-template-columns: 54px auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto 54px 54px;
   gap: 6px;
   align-items: baseline;
   min-width: 0;
@@ -1054,14 +1054,16 @@ h1 em {
   white-space: nowrap;
 }
 
-.day-trade-action {
+.day-trade-entry-time {
   color: var(--cyan);
-  font-size: inherit;
-  text-transform: uppercase;
 }
 
-.day-trade-row.exit .day-trade-action {
+.day-trade-exit-time {
   color: var(--red);
+}
+
+.day-trade-time.pending {
+  color: var(--subtle);
 }
 
 .day-trade-algo,
