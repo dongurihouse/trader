@@ -1793,7 +1793,7 @@ pre {
 }
 
 .algo-rollup-metrics small,
-.algo-coverage small,
+.algo-tab-coverage small,
 .algo-inputs > small {
   color: var(--subtle);
   font-family: var(--mono);
@@ -1833,17 +1833,16 @@ pre {
 
 .algo-tab {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  flex: 0 0 clamp(210px, 22vw, 300px);
-  align-items: center;
-  gap: 5px 12px;
+  flex: 0 0 clamp(560px, 58vw, 760px);
+  align-self: stretch;
   min-width: 0;
-  padding: 13px 15px;
+  padding: 0;
+  overflow: hidden;
   color: var(--muted);
   text-align: left;
   background: rgba(16, 23, 33, 0.72);
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 12px;
   cursor: pointer;
   scroll-snap-align: center;
   transition: 150ms ease;
@@ -1852,46 +1851,65 @@ pre {
 .algo-tab:hover,
 .algo-tab:focus-visible {
   color: var(--text);
-  background: rgba(23, 32, 43, 0.88);
   border-color: var(--line-strong);
 }
 
 .algo-tab.active {
-  color: var(--ink);
-  background: var(--acid);
+  color: var(--text);
+  background: rgba(16, 23, 33, 0.92);
   border-color: var(--acid);
+  box-shadow: inset 0 0 0 1px rgba(216, 255, 114, 0.35);
 }
 
-.algo-tab strong {
+.algo-tab-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 24px;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--line);
+  transition: 150ms ease;
+}
+
+.algo-tab:hover .algo-tab-summary,
+.algo-tab:focus-visible .algo-tab-summary {
+  background: rgba(23, 32, 43, 0.6);
+}
+
+.algo-tab.active .algo-tab-summary {
+  background: linear-gradient(100deg, var(--acid-soft), rgba(216, 255, 114, 0.025) 68%);
+}
+
+.algo-tab-heading {
+  display: grid;
   min-width: 0;
-  overflow: hidden;
-  font-family: var(--mono);
-  font-size: 0.67rem;
-  letter-spacing: 0.035em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  gap: 6px;
 }
 
-.algo-tab-function {
-  grid-column: 1 / -1;
-  grid-row: 2;
+.algo-tab-title-row {
+  display: flex;
   min-width: 0;
-  overflow: hidden;
-  color: var(--subtle);
-  font-family: var(--mono);
-  font-size: 0.5rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  align-items: center;
+  gap: 10px;
 }
 
-.algo-tab.active .algo-tab-function {
-  color: rgba(10, 15, 21, 0.68);
+.algo-tab-title {
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 0.94rem;
+  letter-spacing: 0.045em;
+  overflow-wrap: anywhere;
+}
+
+.algo-tab-definition-copy {
+  min-width: 0;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.56rem;
+  line-height: 1.45;
 }
 
 .algo-tab-status {
-  grid-column: 2;
-  grid-row: 1;
-  justify-self: end;
   padding: 3px 5px;
   color: var(--muted);
   font-family: var(--mono);
@@ -1910,7 +1928,28 @@ pre {
 
 .algo-tab.active .algo-tab-status {
   color: var(--ink);
-  background: rgba(10, 15, 21, 0.12);
+  background: var(--acid);
+}
+
+.algo-tab-coverage {
+  display: grid;
+  justify-items: end;
+  gap: 4px;
+  font-family: var(--mono);
+  text-align: right;
+}
+
+.algo-tab-coverage strong {
+  color: var(--text);
+  font-size: 0.62rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.algo-tab-coverage > span {
+  color: var(--subtle);
+  font-size: 0.52rem;
+  white-space: nowrap;
 }
 
 .algo-book {
@@ -1925,80 +1964,7 @@ pre {
   padding: clamp(22px, 3vw, 34px);
 }
 
-.algo-scorecard {
-  min-width: 0;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-}
-
-.algo-card-header {
-  display: flex;
-  align-items: start;
-  justify-content: space-between;
-  gap: 24px;
-  padding: clamp(18px, 2vw, 24px);
-  border-bottom: 1px solid var(--line);
-}
-
-.algo-title-row {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-}
-
-.algo-title-row h2 {
-  margin: 0;
-  font-family: var(--mono);
-  font-size: 1.25rem;
-  letter-spacing: 0.045em;
-}
-
-.algo-heading p {
-  margin: 7px 0 0;
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 0.61rem;
-}
-
-.algo-status {
-  padding: 5px 8px;
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 0.49rem;
-  font-weight: 750;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  background: rgba(137, 149, 159, 0.08);
-  border: 1px solid rgba(137, 149, 159, 0.16);
-  border-radius: 99px;
-}
-
-.algo-status.active {
-  color: var(--acid);
-  background: var(--acid-soft);
-  border-color: rgba(216, 255, 114, 0.2);
-}
-
-.algo-coverage {
-  display: grid;
-  justify-items: end;
-  gap: 4px;
-  font-family: var(--mono);
-  text-align: right;
-}
-
-.algo-coverage strong {
-  font-size: 0.67rem;
-  font-weight: 650;
-}
-
-.algo-coverage span {
-  color: var(--subtle);
-  font-size: 0.55rem;
-}
-
-.algo-metric-grid {
+.algo-tab-metric-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   overflow: hidden;
@@ -2041,7 +2007,7 @@ pre {
   display: grid;
   grid-template-columns: minmax(180px, 0.65fr) minmax(0, 1.35fr);
   gap: 24px;
-  margin-top: 20px;
+  margin-top: 0;
   padding: 18px;
   background: rgba(10, 15, 21, 0.44);
   border: 1px solid var(--line);
@@ -2570,7 +2536,7 @@ pre {
 }
 
 @media (max-width: 900px) {
-  .algo-metric-grid {
+  .algo-tab-metric-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -2663,15 +2629,24 @@ pre {
     padding: 18px;
   }
 
-  .algo-card-header {
-    display: grid;
-    gap: 14px;
-    padding: 18px;
+  .algo-tab {
+    flex-basis: min(82vw, 360px);
   }
 
-  .algo-coverage {
+  .algo-tab-summary {
+    grid-template-columns: 1fr;
+    gap: 14px;
+    padding: 16px;
+  }
+
+  .algo-tab-coverage {
     justify-items: start;
     text-align: left;
+  }
+
+  .algo-tab-coverage strong,
+  .algo-tab-coverage > span {
+    white-space: normal;
   }
 
   .algo-definition {
