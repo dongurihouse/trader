@@ -7,6 +7,9 @@ minute OHLCV data through Robinhood's official Trading MCP and upserts it into
 The service reads `../config/config.json`. It does not store a Robinhood
 password. Its ignored `../data/robinhood_oauth.json` file contains the OAuth
 refresh token with owner-only permissions.
+Every client that uses this token holds a sibling session lock while connected.
+This keeps the bar collector and live order worker from racing a rotating
+token.
 
 ## Behavior
 

@@ -22,6 +22,16 @@ a background thread and cannot stop evaluation. Set `TRADER_SMS_TO` in the
 environment or the repository `.env`; when it is absent, Trader reuses the
 existing `DT_SMS_TO` setting from the sibling `dt` checkout.
 
+The same live-only gate submits Robinhood equity orders when `broker.enabled`
+is true. A long SNDK entry buys `broker.long_symbol` (SNXX by default), and a
+short entry buys `broker.short_symbol` (SNDQ). The matching exit sells that
+symbol. Orders use market, regular-hours, good-for-day terms and a deterministic
+broker idempotency key. Set the account number in the environment variable
+named by `broker.account_env`, normally `TRADER_ROBINHOOD_ACCOUNT`. Order
+submission runs in a background thread. Every accepted order or broker error is
+written to the `algo` logs. The initial config uses zero shares so Robinhood
+rejects the request without trading money while the complete path is tested.
+
 The default config enables `orb5`, `sentiment_pullback`, and four SNDK-only
 migrations from the DT roster. The `shape` path forecast remains read-only.
 

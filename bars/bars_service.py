@@ -4,6 +4,7 @@
 import argparse
 import asyncio
 import csv
+import fcntl
 import io
 import json
 import logging
@@ -706,6 +707,26 @@ class RobinhoodClient:
         self.storage = FileTokenStorage(settings.oauth_store)
         self._session: Optional[ClientSession] = None
 
+    async def _acquire_session_lock(self):
+        lock_path = self.settings.oauth_store.with_suffix(
+            self.settings.oauth_store.suffix + ".session.lock"
+        )
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(lock_path, "a+")
+        deadline = asyncio.get_running_loop().time() + self.settings.timeout_seconds
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return handle
+            except BlockingIOError:
+                if asyncio.get_running_loop().time() >= deadline:
+                    handle.close()
+                    raise RelayError(
+                        "Robinhood session lock timed out after %d seconds"
+                        % self.settings.timeout_seconds
+                    )
+                await asyncio.sleep(0.25)
+
     def _oauth(self, interactive: bool) -> OAuthClientProvider:
         callbacks = (
             BrowserOAuthCallbacks(self.settings.oauth_callback_port)
@@ -769,6 +790,7 @@ class RobinhoodClient:
         if self._session is not None:
             raise RelayError("Robinhood session is already open")
         stack = AsyncExitStack()
+        lock_handle = await self._acquire_session_lock()
         open_timeout = (
             self.settings.timeout_seconds + self.REQUEST_GRACE_SECONDS
         )
@@ -787,18 +809,22 @@ class RobinhoodClient:
         finally:
             self._session = None
             try:
-                async with asyncio.timeout(self.CLOSE_TIMEOUT_SECONDS):
-                    await stack.aclose()
-            except TimeoutError:
-                logging.error(
-                    "Robinhood session did not close within %d seconds",
-                    self.CLOSE_TIMEOUT_SECONDS,
-                )
-            except Exception as exc:
-                logging.error(
-                    "could not close Robinhood connection cleanly: %s",
-                    exc,
-                )
+                try:
+                    async with asyncio.timeout(self.CLOSE_TIMEOUT_SECONDS):
+                        await stack.aclose()
+                except TimeoutError:
+                    logging.error(
+                        "Robinhood session did not close within %d seconds",
+                        self.CLOSE_TIMEOUT_SECONDS,
+                    )
+                except Exception as exc:
+                    logging.error(
+                        "could not close Robinhood connection cleanly: %s",
+                        exc,
+                    )
+            finally:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+                lock_handle.close()
 
     async def _request(self, action: str, name: str = "", arguments=None):
         session = self._session

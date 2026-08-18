@@ -1,5 +1,5 @@
 {
-  "version": 12,
+  "version": 13,
   "database": "../data/trader.sqlite3",
   "tickers": ["SNDK", "SNXX", "SNDQ", "MU", "SPY", "QQQ", "SOXX"],
   "early_closes": ["2026-11-27", "2026-12-24"],
@@ -32,6 +32,14 @@
     "api_port": 8791,
     "evaluation_days": 60,
     "poll_seconds": 30
+  },
+  "broker": {
+    "enabled": true,
+    "quantity": "0",
+    "account_env": "TRADER_ROBINHOOD_ACCOUNT",
+    "target_ticker": "SNDK",
+    "long_symbol": "SNXX",
+    "short_symbol": "SNDQ"
   },
   "signals": {
     "ema9": {

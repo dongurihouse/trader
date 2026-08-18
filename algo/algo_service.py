@@ -22,6 +22,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
+from broker import send_broker_orders
 from notify import send_trade_alerts
 from shape_signal import clear_shape_cache, normalize_shape_parameters, shape_v1
 from validation import require_float, require_int
@@ -93,6 +94,16 @@ class EvaluationError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class BrokerSettings:
+    enabled: bool
+    quantity: str
+    account_env: str
+    target_ticker: str
+    long_symbol: str
+    short_symbol: str
+
+
+@dataclass(frozen=True)
 class Settings:
     version: str
     database: Path
@@ -109,6 +120,7 @@ class Settings:
     signal_order: tuple[str, ...]
     algo_order: tuple[str, ...]
     algo_requirements: Mapping[str, frozenset[str]]
+    broker: BrokerSettings
     content: str
 
     def enabled_signals(self) -> tuple[str, ...]:
@@ -197,6 +209,59 @@ def _nodes(document: Mapping[str, Any], key: str) -> dict[str, Mapping[str, Any]
             "trades": trades,
         }
     return nodes
+
+
+def _broker_settings(
+    document: Mapping[str, Any], tickers: tuple[str, ...]
+) -> BrokerSettings:
+    raw = document.get("broker", {})
+    if not isinstance(raw, dict):
+        raise ConfigError("broker must be an object")
+    unknown = set(raw) - {
+        "enabled",
+        "quantity",
+        "account_env",
+        "target_ticker",
+        "long_symbol",
+        "short_symbol",
+    }
+    if unknown:
+        raise ConfigError("unknown broker settings: %s" % ", ".join(sorted(unknown)))
+    enabled = raw.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ConfigError("broker.enabled must be boolean")
+    quantity = raw.get("quantity", "0")
+    if not isinstance(quantity, str) or not re.fullmatch(
+        r"\d+(?:\.\d{1,6})?", quantity
+    ):
+        raise ConfigError("broker.quantity must be a non-negative decimal string")
+    account_env = raw.get("account_env", "TRADER_ROBINHOOD_ACCOUNT")
+    if not isinstance(account_env, str) or not re.fullmatch(
+        r"[A-Z_][A-Z0-9_]*", account_env
+    ):
+        raise ConfigError("broker.account_env must be an environment variable name")
+
+    symbols = {}
+    for key, default in (
+        ("target_ticker", "SNDK"),
+        ("long_symbol", "SNXX"),
+        ("short_symbol", "SNDQ"),
+    ):
+        value = raw.get(key, default)
+        symbol = value.strip().upper() if isinstance(value, str) else ""
+        if symbol not in tickers:
+            raise ConfigError("broker.%s must name a configured ticker" % key)
+        symbols[key] = symbol
+    if symbols["long_symbol"] == symbols["short_symbol"]:
+        raise ConfigError("broker long and short symbols must differ")
+    return BrokerSettings(
+        enabled=enabled,
+        quantity=quantity,
+        account_env=account_env,
+        target_ticker=symbols["target_ticker"],
+        long_symbol=symbols["long_symbol"],
+        short_symbol=symbols["short_symbol"],
+    )
 
 
 def _compile_dependencies(
@@ -380,6 +445,7 @@ def load_settings(
         signal_order=signal_order,
         algo_order=algo_order,
         algo_requirements=algo_requirements,
+        broker=_broker_settings(document, tuple(normalized)),
         content=_json(document),
     )
     return settings
@@ -3273,6 +3339,11 @@ def _report_alert_failure(config_path: Path, reason: str) -> None:
     _best_effort_log(config_path, "error", message)
 
 
+def _report_broker_result(config_path: Path, level: str, message: str) -> None:
+    getattr(logging, level)(message)
+    _best_effort_log(config_path, level, message)
+
+
 def cycle(
     config_path: Path,
     stop_event: Optional[threading.Event] = None,
@@ -3351,17 +3422,31 @@ def cycle(
             for key in stats:
                 stats[key] += part[key]
             if alert_resume_after is not None and trade_alerts:
+                live_records = _live_trade_alerts(
+                    connection,
+                    settings,
+                    trade_alerts,
+                    alert_resume_after,
+                )
                 send_trade_alerts(
-                    _live_trade_alerts(
-                        connection,
-                        settings,
-                        trade_alerts,
-                        alert_resume_after,
-                    ),
+                    live_records,
                     on_failure=lambda reason: _report_alert_failure(
                         config_path, reason
                     ),
                 )
+                if settings.broker.enabled:
+                    send_broker_orders(
+                        live_records,
+                        config_path=config_path,
+                        account_env=settings.broker.account_env,
+                        quantity=settings.broker.quantity,
+                        target_ticker=settings.broker.target_ticker,
+                        long_symbol=settings.broker.long_symbol,
+                        short_symbol=settings.broker.short_symbol,
+                        on_result=lambda level, message: _report_broker_result(
+                            config_path, level, message
+                        ),
+                    )
             if stats["pairs"] % CYCLE_PROGRESS_INTERVAL == 0:
                 progress = "cycle progress pairs=%d outputs=%d entries=%d exits=%d" % (
                     stats["pairs"], stats["outputs"], stats["entries"], stats["exits"]
