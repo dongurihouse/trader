@@ -1,5 +1,4 @@
 const $ = (selector) => document.querySelector(selector);
-const CHART_TICKER = "SNDK";
 
 const numberFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 const decimalNumberFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 });
@@ -64,7 +63,7 @@ function pacificDateKey(epoch) {
 
 function chartUrl(trade) {
   const parameters = new URLSearchParams({
-    ticker: CHART_TICKER,
+    ticker: trade.ticker,
     date: pacificDateKey(trade.entry_ts),
   });
   return `/?${parameters}`;
@@ -239,7 +238,7 @@ function renderTrades(algo) {
     const row = createElement("a", `algo-trade-row${tickerMatch ? " ticker-match" : ""}`);
     row.dataset.ticker = trade.ticker;
     row.href = chartUrl(trade);
-    row.title = `Show all ${CHART_TICKER} trades on ${pacificDate.format(dateFromEpoch(trade.entry_ts))}`;
+    row.title = `Show all ${trade.ticker} trades on ${pacificDate.format(dateFromEpoch(trade.entry_ts))}`;
     const identity = createElement("div", "algo-trade-identity");
     identity.append(
       createElement("strong", "", trade.ticker),
