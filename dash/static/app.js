@@ -12,16 +12,16 @@ const state = {
   chartRequest: 0,
 };
 
-const easternDateTime = new Intl.DateTimeFormat("en-US", {
-  timeZone: "America/New_York",
+const pacificDateTime = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Los_Angeles",
   month: "short",
   day: "numeric",
   hour: "numeric",
   minute: "2-digit",
 });
 
-const easternInspectionTime = new Intl.DateTimeFormat("en-US", {
-  timeZone: "America/New_York",
+const pacificInspectionTime = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Los_Angeles",
   month: "short",
   day: "numeric",
   hour: "numeric",
@@ -29,32 +29,32 @@ const easternInspectionTime = new Intl.DateTimeFormat("en-US", {
   timeZoneName: "short",
 });
 
-const easternClock = new Intl.DateTimeFormat("en-US", {
-  timeZone: "America/New_York",
+const pacificClock = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Los_Angeles",
   hour: "numeric",
   minute: "2-digit",
 });
 
-const easternDateKeyFormat = new Intl.DateTimeFormat("en-US", {
-  timeZone: "America/New_York",
+const pacificDateKeyFormat = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Los_Angeles",
   year: "numeric",
   month: "2-digit",
   day: "2-digit",
 });
 
-const easternDateButton = new Intl.DateTimeFormat("en-US", {
-  timeZone: "America/New_York",
+const pacificDateButton = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Los_Angeles",
   month: "short",
   day: "numeric",
 });
 
-const easternWeekday = new Intl.DateTimeFormat("en-US", {
-  timeZone: "America/New_York",
+const pacificWeekday = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Los_Angeles",
   weekday: "short",
 });
 
-const easternFullDate = new Intl.DateTimeFormat("en-US", {
-  timeZone: "America/New_York",
+const pacificFullDate = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Los_Angeles",
   year: "numeric",
   month: "long",
   day: "numeric",
@@ -109,8 +109,8 @@ function dateFromEpoch(epoch) {
   return new Date(Number(epoch) * 1000);
 }
 
-function easternDateKey(epoch) {
-  const parts = easternDateKeyFormat.formatToParts(dateFromEpoch(epoch));
+function pacificDateKey(epoch) {
+  const parts = pacificDateKeyFormat.formatToParts(dateFromEpoch(epoch));
   const value = (type) => parts.find((part) => part.type === type)?.value || "";
   return `${value("year")}-${value("month")}-${value("day")}`;
 }
@@ -118,7 +118,7 @@ function easternDateKey(epoch) {
 function sessionDateRanges(bars) {
   const sessions = [];
   bars.forEach((bar, index) => {
-    const date = easternDateKey(bar.ts);
+    const date = pacificDateKey(bar.ts);
     const previous = sessions.at(-1);
     if (!previous || previous.date !== date) {
       sessions.push({
@@ -262,7 +262,7 @@ class PriceChart {
     }
     const snapshot = snapshots[low - 1];
     if (!snapshot) return null;
-    return easternDateKey(snapshot.ts) === easternDateKey(timestamp) ? snapshot : null;
+    return pacificDateKey(snapshot.ts) === pacificDateKey(timestamp) ? snapshot : null;
   }
 
   momentumAt(timestamp) {
@@ -290,9 +290,9 @@ class PriceChart {
     const bars = this.payload?.bars || [];
     const bar = bars[index];
     if (!bar) return { change: null, changePct: null };
-    const session = easternDateKey(bar.ts);
+    const session = pacificDateKey(bar.ts);
     let sessionStart = index;
-    while (sessionStart > 0 && easternDateKey(bars[sessionStart - 1].ts) === session) {
+    while (sessionStart > 0 && pacificDateKey(bars[sessionStart - 1].ts) === session) {
       sessionStart -= 1;
     }
     const baseline = Number(
@@ -343,7 +343,7 @@ class PriceChart {
     this.canvas.setAttribute(
       "aria-label",
       visible.length
-        ? `${this.payload.ticker} ${label} chart, ${visible.length.toLocaleString()} visible points from ${easternDateTime.format(dateFromEpoch(first.ts))} to ${easternDateTime.format(dateFromEpoch(last.ts))}${overlayLabel}${momentumLabel}`
+        ? `${this.payload.ticker} ${label} chart, ${visible.length.toLocaleString()} visible points from ${pacificDateTime.format(dateFromEpoch(first.ts))} to ${pacificDateTime.format(dateFromEpoch(last.ts))}${overlayLabel}${momentumLabel}`
         : `${this.payload?.ticker || "Ticker"} ${label} chart with no available bars`,
     );
   }
@@ -410,8 +410,8 @@ class PriceChart {
       total: this.totalBars(),
       canZoomIn: this.viewLength() > Math.min(this.minimumViewPoints, this.totalBars()),
       canZoomOut: this.viewLength() < this.totalBars(),
-      firstDate: visibleBars.length ? easternDateKey(visibleBars[0].ts) : null,
-      lastDate: visibleBars.length ? easternDateKey(visibleBars.at(-1).ts) : null,
+      firstDate: visibleBars.length ? pacificDateKey(visibleBars[0].ts) : null,
+      lastDate: visibleBars.length ? pacificDateKey(visibleBars.at(-1).ts) : null,
     });
   }
 
@@ -630,7 +630,7 @@ class PriceChart {
     const sessionStarts = [];
     let lastSession = null;
     bars.forEach((bar, index) => {
-      const parts = easternDateTime.formatToParts(dateFromEpoch(bar.ts));
+      const parts = pacificDateTime.formatToParts(dateFromEpoch(bar.ts));
       const session = `${parts.find((part) => part.type === "month")?.value}-${parts.find((part) => part.type === "day")?.value}`;
       if (session !== lastSession) sessionStarts.push({ index, label: session });
       lastSession = session;
@@ -660,7 +660,7 @@ class PriceChart {
         const index = Math.round((bars.length - 1) * (tick / (tickCount - 1)));
         ctx.textAlign = tick === 0 ? "left" : tick === tickCount - 1 ? "right" : "center";
         ctx.fillStyle = "#5f6c77";
-        ctx.fillText(easternClock.format(dateFromEpoch(bars[index].ts)), x(index), height - 10);
+        ctx.fillText(pacificClock.format(dateFromEpoch(bars[index].ts)), x(index), height - 10);
       }
     }
 
@@ -795,7 +795,7 @@ class PriceChart {
     this.hoverIndex = index;
     const bar = bars[this.hoverIndex];
     const contents = [
-      createElement("strong", "", easternDateTime.format(dateFromEpoch(bar.ts))),
+      createElement("strong", "", pacificDateTime.format(dateFromEpoch(bar.ts))),
       createElement("span", "", `O ${formatPrice(bar.open)} · H ${formatPrice(bar.high)}`),
       createElement("span", "", `L ${formatPrice(bar.low)} · C ${formatPrice(bar.close)}`),
       createElement("span", "", `Vol ${compactFormat.format(bar.volume)}`),
@@ -946,7 +946,7 @@ function renderShapeForest(shape) {
   const title = $("#shape-forest-title");
   const list = $("#shape-forest-list");
   title.textContent = shape
-    ? `Shape forest · ${easternClock.format(dateFromEpoch(shape.ts))}`
+    ? `Shape forest · ${pacificClock.format(dateFromEpoch(shape.ts))}`
     : "Shape forest";
   if (!shape) {
     list.replaceChildren(createElement("span", "shape-unavailable", "No evaluation yet"));
@@ -971,7 +971,7 @@ function renderInspection(inspection) {
   const change = $("#quote-change");
   change.textContent = `${formatSigned(inspection.change)}  ${formatSigned(inspection.changePct, "%")}`;
   change.classList.toggle("down", Number(inspection.change) < 0);
-  $("#quote-time").textContent = easternInspectionTime.format(dateFromEpoch(inspection.bar.ts));
+  $("#quote-time").textContent = pacificInspectionTime.format(dateFromEpoch(inspection.bar.ts));
   $(".chart-header").dataset.mode = inspection.mode;
   renderShapeForest(inspection.shape);
 }
@@ -1004,10 +1004,10 @@ function renderDateStrip(payload) {
     button.type = "button";
     button.dataset.date = session.date;
     button.setAttribute("aria-pressed", "false");
-    button.title = `Show ${easternFullDate.format(date)}`;
+    button.title = `Show ${pacificFullDate.format(date)}`;
     button.append(
-      createElement("small", "", easternWeekday.format(date)),
-      createElement("span", "", easternDateButton.format(date)),
+      createElement("small", "", pacificWeekday.format(date)),
+      createElement("span", "", pacificDateButton.format(date)),
     );
     fragment.append(button);
   });
@@ -1116,7 +1116,7 @@ function renderQuote() {
     : "No bars";
   change.classList.toggle("down", Number(quote?.change) < 0);
   $("#quote-time").textContent = quote?.available
-    ? easternInspectionTime.format(dateFromEpoch(quote.ts))
+    ? pacificInspectionTime.format(dateFromEpoch(quote.ts))
     : "Waiting for bars";
   $(".chart-header").dataset.mode = "latest";
   renderShapeForest(null);

@@ -1,16 +1,16 @@
 const $ = (selector) => document.querySelector(selector);
 
 const numberFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
-const easternDateTime = new Intl.DateTimeFormat("en-US", {
-  timeZone: "America/New_York",
+const pacificDateTime = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Los_Angeles",
   month: "short",
   day: "numeric",
   hour: "numeric",
   minute: "2-digit",
   timeZoneName: "short",
 });
-const easternDate = new Intl.DateTimeFormat("en-US", {
-  timeZone: "America/New_York",
+const pacificDate = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Los_Angeles",
   month: "short",
   day: "numeric",
   year: "numeric",
@@ -203,9 +203,9 @@ function renderRecentTrades(algo) {
     );
     const times = createElement("div", "algo-trade-times");
     times.append(
-      createElement("span", "", easternDateTime.format(dateFromEpoch(trade.entry_ts))),
+      createElement("span", "", pacificDateTime.format(dateFromEpoch(trade.entry_ts))),
       createElement("i", "", "→"),
-      createElement("span", "", easternDateTime.format(dateFromEpoch(trade.exit_ts))),
+      createElement("span", "", pacificDateTime.format(dateFromEpoch(trade.exit_ts))),
     );
     const prices = createElement(
       "span",
@@ -239,7 +239,7 @@ function renderOpenPositions(algo) {
     );
     row.append(
       identity,
-      createElement("span", "algo-trade-times", easternDateTime.format(dateFromEpoch(position.entry_ts))),
+      createElement("span", "algo-trade-times", pacificDateTime.format(dateFromEpoch(position.entry_ts))),
       createElement("span", "algo-trade-prices", `${price(position.entry_price)} → ${price(position.mark_price)}`),
       createElement("span", "algo-trade-hold", "Marked"),
       createElement("strong", `algo-trade-return ${valueClass(position.return_pct)}`, unitReturn(position.return_pct)),
@@ -278,7 +278,7 @@ function renderAlgo(algo, tabId) {
       "strong",
       "",
       algo.stats.first_action
-        ? `${easternDate.format(dateFromEpoch(algo.stats.first_action))}–${easternDate.format(dateFromEpoch(algo.stats.last_action))}`
+        ? `${pacificDate.format(dateFromEpoch(algo.stats.first_action))}–${pacificDate.format(dateFromEpoch(algo.stats.last_action))}`
         : "No actions",
     ),
     createElement("span", "", `${numberFormat.format(algo.stats.session_count)} sessions · ${numberFormat.format(algo.stats.ticker_count)} tickers`),

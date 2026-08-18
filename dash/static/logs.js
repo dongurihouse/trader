@@ -7,8 +7,8 @@ const state = {
   request: 0,
 };
 
-const easternDateTime = new Intl.DateTimeFormat("en-US", {
-  timeZone: "America/New_York",
+const pacificDateTime = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Los_Angeles",
   month: "short",
   day: "numeric",
   hour: "numeric",
@@ -16,7 +16,8 @@ const easternDateTime = new Intl.DateTimeFormat("en-US", {
   second: "2-digit",
 });
 
-const localUpdated = new Intl.DateTimeFormat("en-US", {
+const pacificUpdated = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Los_Angeles",
   hour: "numeric",
   minute: "2-digit",
   second: "2-digit",
@@ -117,7 +118,7 @@ function renderHealthIndicator(service, health, responseAvailable) {
 }
 
 function renderLogs(payload) {
-  $("#logs-updated").textContent = `Updated ${localUpdated.format(new Date(payload.generated_at * 1000))}`;
+  $("#logs-updated").textContent = `Updated ${pacificUpdated.format(new Date(payload.generated_at * 1000))}`;
   for (const level of ["total", "info", "warn", "error"]) {
     $(`#count-${level}`).textContent = numberFormat.format(payload.counts[level] || 0);
   }
@@ -159,7 +160,7 @@ function renderRows(rows) {
   const fragment = document.createDocumentFragment();
   rows.forEach((row) => {
     const item = createElement("article", `log-row ${row.level}`);
-    const timestamp = createElement("time", "log-time", easternDateTime.format(new Date(row.ts * 1000)));
+    const timestamp = createElement("time", "log-time", pacificDateTime.format(new Date(row.ts * 1000)));
     timestamp.dateTime = new Date(row.ts * 1000).toISOString();
     item.append(timestamp);
     item.append(createElement("span", `level-badge ${row.level}`, row.level));
