@@ -1980,10 +1980,10 @@ pre {
 
 .algo-metric {
   display: grid;
-  min-height: 62px;
+  min-height: 46px;
   align-content: center;
-  gap: 5px;
-  padding: 10px 16px;
+  gap: 2px;
+  padding: 6px 12px;
   border-right: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
 }
