@@ -1,5 +1,5 @@
 {
-  "version": 20,
+  "version": 21,
   "database": "../data/trader.sqlite3",
   "tickers": ["SNDK", "MU", "WDC", "SPY", "QQQ", "SPCX"],
   "early_closes": ["2026-11-27", "2026-12-24"],
@@ -259,7 +259,7 @@
         "risk_atr_frac": 0.15,
         "target_r": 1.5,
         "min_rvol": 1.25,
-        "minute_min": 315,
+        "minute_min": 359,
         "minute_max": 380,
         "entry_cutoff_minutes": 10,
         "flat_minutes": 5
