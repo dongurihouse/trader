@@ -250,42 +250,8 @@ function renderOpenPositions(algo) {
   return section;
 }
 
-function renderAlgo(algo, tabId) {
-  const card = createElement("article", "algo-card surface");
-  card.id = "algo-panel";
-  card.setAttribute("role", "tabpanel");
-  card.setAttribute("aria-labelledby", tabId);
-  const scorecard = createElement("section", "algo-scorecard");
-  scorecard.setAttribute("aria-label", `${algo.name} scorecard`);
-  const header = createElement("header", "algo-card-header");
-  const heading = createElement("div", "algo-heading");
-  const titleRow = createElement("div", "algo-title-row");
-  titleRow.append(createElement("h2", "", algo.name.toUpperCase()));
-  const status = algorithmStatus(algo);
-  titleRow.append(createElement("span", `algo-status ${status.toLowerCase()}`, status));
-  heading.append(
-    titleRow,
-    createElement(
-      "p",
-      "",
-      `${humanize(algo.function)} · ${algo.configured ? "current" : "historical"} definition · config ${algo.version || "unknown"}`,
-    ),
-  );
-  const coverage = createElement("div", "algo-coverage");
-  coverage.append(
-    createElement("small", "", "Stored activity"),
-    createElement(
-      "strong",
-      "",
-      algo.stats.first_action
-        ? `${pacificDate.format(dateFromEpoch(algo.stats.first_action))}–${pacificDate.format(dateFromEpoch(algo.stats.last_action))}`
-        : "No actions",
-    ),
-    createElement("span", "", `${numberFormat.format(algo.stats.session_count)} sessions · ${numberFormat.format(algo.stats.ticker_count)} tickers`),
-  );
-  header.append(heading, coverage);
-
-  const metrics = createElement("div", "algo-metric-grid");
+function renderAlgoMetrics(algo) {
+  const metrics = createElement("span", "algo-tab-metric-grid");
   metrics.append(
     metric("Realized return", returnPoints(algo.stats.realized_return_pct), valueClass(algo.stats.realized_return_pct)),
     metric("Win rate", rate(algo.stats.win_rate)),
@@ -296,9 +262,15 @@ function renderAlgo(algo, tabId) {
     metric("Closed units", numberFormat.format(algo.stats.closed_units)),
     metric("Open units", numberFormat.format(algo.stats.open_units)),
   );
+  return metrics;
+}
 
-  scorecard.append(header, metrics);
-  card.append(scorecard, renderDefinition(algo), renderTickerTable(algo));
+function renderAlgo(algo, tabId) {
+  const card = createElement("article", "algo-card surface");
+  card.id = "algo-panel";
+  card.setAttribute("role", "tabpanel");
+  card.setAttribute("aria-labelledby", tabId);
+  card.append(renderDefinition(algo), renderTickerTable(algo));
   const open = renderOpenPositions(algo);
   if (open) card.append(open);
   card.append(renderRecentTrades(algo));
@@ -312,6 +284,7 @@ function renderAlgorithmSwitcher() {
   const fragment = document.createDocumentFragment();
   algorithms.forEach((algo, index) => {
     const selected = algo.name === selectedAlgorithmName;
+    const status = algorithmStatus(algo);
     const button = createElement("button", `algo-tab${selected ? " active" : ""}`);
     button.type = "button";
     button.id = `algo-tab-${index}`;
@@ -319,12 +292,37 @@ function renderAlgorithmSwitcher() {
     button.setAttribute("role", "tab");
     button.setAttribute("aria-controls", "algo-panel");
     button.setAttribute("aria-selected", String(selected));
+    button.setAttribute("aria-label", `${algo.name}, ${status}`);
     button.tabIndex = selected ? 0 : -1;
-    button.append(
-      createElement("strong", "", algo.name.toUpperCase()),
-      createElement("span", "algo-tab-function", humanize(algo.function)),
-      createElement("span", `algo-tab-status ${algorithmStatus(algo).toLowerCase()}`, algorithmStatus(algo)),
+    const summary = createElement("span", "algo-tab-summary");
+    const heading = createElement("span", "algo-tab-heading");
+    const titleRow = createElement("span", "algo-tab-title-row");
+    titleRow.append(
+      createElement("strong", "algo-tab-title", algo.name.toUpperCase()),
+      createElement("span", `algo-tab-status ${status.toLowerCase()}`, status),
     );
+    heading.append(
+      titleRow,
+      createElement(
+        "span",
+        "algo-tab-definition-copy",
+        `${humanize(algo.function)} · ${algo.configured ? "current" : "historical"} definition · config ${algo.version || "unknown"}`,
+      ),
+    );
+    const coverage = createElement("span", "algo-tab-coverage");
+    coverage.append(
+      createElement("small", "", "Stored activity"),
+      createElement(
+        "strong",
+        "",
+        algo.stats.first_action
+          ? `${pacificDate.format(dateFromEpoch(algo.stats.first_action))}–${pacificDate.format(dateFromEpoch(algo.stats.last_action))}`
+          : "No actions",
+      ),
+      createElement("span", "", `${numberFormat.format(algo.stats.session_count)} sessions · ${numberFormat.format(algo.stats.ticker_count)} tickers`),
+    );
+    summary.append(heading, coverage);
+    button.append(summary, renderAlgoMetrics(algo));
     fragment.append(button);
   });
   strip.replaceChildren(fragment);

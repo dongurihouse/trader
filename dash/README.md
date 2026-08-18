@@ -63,7 +63,7 @@ Open <http://127.0.0.1:8790/algos> for per-algorithm summaries calculated
 from stored trade actions and exact bar-close prices. The page shows gross
 unit return, win rate, profit factor, drawdown, holding time, per-ticker
 results, current marks, and recent closed units. Use the horizontal algorithm
-row to switch the detail view. Returns do not include
+scorecards to compare summaries and switch the detail view. Returns do not include
 position sizing, fees, or slippage, and trade rows are grouped by algorithm
 name because they do not store a config version.
 
