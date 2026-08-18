@@ -1896,33 +1896,28 @@ pre {
 .algo-rollup {
   display: grid;
   min-width: 0;
-  gap: 13px;
-  padding: 18px 22px;
+  align-items: center;
+  padding: 0 10px 0 4px;
+  border-right: 1px solid var(--line);
 }
 
 .algo-rollup-metrics {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
 }
 
 .algo-rollup-metrics span {
   display: grid;
   gap: 5px;
-  padding-inline: 18px;
-  border-right: 1px solid var(--line);
-}
-
-.algo-rollup-metrics span:first-child {
-  padding-left: 0;
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--line);
 }
 
 .algo-rollup-metrics span:last-child {
-  padding-right: 0;
-  border-right: 0;
+  border-bottom: 0;
 }
 
 .algo-rollup-metrics small,
-.algo-tab-coverage small,
 .algo-inputs > small {
   color: var(--subtle);
   font-family: var(--mono);
@@ -1934,12 +1929,15 @@ pre {
 
 .algo-rollup-metrics strong {
   color: var(--text);
-  font-size: 1.2rem;
+  font-size: 1rem;
   font-weight: 580;
   letter-spacing: -0.025em;
 }
 
 .algo-switcher {
+  display: grid;
+  grid-template-columns: 172px minmax(0, 1fr);
+  gap: 10px;
   min-width: 0;
   padding: 10px;
   overflow: hidden;
@@ -1961,7 +1959,7 @@ pre {
 
 .algo-tab {
   display: grid;
-  flex: 0 0 clamp(480px, 42vw, 500px);
+  flex: 0 0 clamp(390px, 34vw, 430px);
   align-self: stretch;
   min-width: 0;
   padding: 0;
@@ -1989,11 +1987,8 @@ pre {
 }
 
 .algo-tab-summary {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: start;
-  gap: 24px;
-  padding: 18px 20px;
+  display: block;
+  padding: 14px 16px;
   border-bottom: 1px solid var(--line);
   transition: 150ms ease;
 }
@@ -2007,76 +2002,12 @@ pre {
   background: linear-gradient(100deg, var(--acid-soft), rgba(216, 255, 114, 0.025) 68%);
 }
 
-.algo-tab-heading {
-  display: grid;
-  min-width: 0;
-  gap: 6px;
-}
-
-.algo-tab-title-row {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 10px;
-}
-
 .algo-tab-title {
-  min-width: 0;
+  display: block;
   font-family: var(--mono);
   font-size: 0.94rem;
   letter-spacing: 0.045em;
   overflow-wrap: anywhere;
-}
-
-.algo-tab-definition-copy {
-  min-width: 0;
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 0.56rem;
-  line-height: 1.45;
-}
-
-.algo-tab-status {
-  padding: 3px 5px;
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 0.43rem;
-  font-weight: 750;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-  background: rgba(137, 149, 159, 0.08);
-  border-radius: 99px;
-}
-
-.algo-tab-status.active {
-  color: var(--acid);
-  background: var(--acid-soft);
-}
-
-.algo-tab.active .algo-tab-status {
-  color: var(--ink);
-  background: var(--acid);
-}
-
-.algo-tab-coverage {
-  display: grid;
-  justify-items: end;
-  gap: 4px;
-  font-family: var(--mono);
-  text-align: right;
-}
-
-.algo-tab-coverage strong {
-  color: var(--text);
-  font-size: 0.62rem;
-  font-weight: 650;
-  white-space: nowrap;
-}
-
-.algo-tab-coverage > span {
-  color: var(--subtle);
-  font-size: 0.52rem;
-  white-space: nowrap;
 }
 
 .algo-book {
@@ -2758,28 +2689,25 @@ a.algo-trade-row:focus-visible {
   }
 
   .algo-rollup {
-    padding: 12px 14px;
+    padding: 0 8px 0 0;
   }
 
-  .algo-rollup-metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .algo-switcher {
+    grid-template-columns: 130px minmax(0, 1fr);
+    gap: 8px;
+    padding: 8px;
   }
 
   .algo-rollup-metrics span,
   .algo-rollup-metrics span:first-child,
   .algo-rollup-metrics span:last-child {
-    padding: 10px;
-    border-right: 1px solid var(--line);
-    border-bottom: 0;
-  }
-
-  .algo-rollup-metrics span:nth-child(2n) {
+    padding: 8px 6px;
     border-right: 0;
+    border-bottom: 1px solid var(--line);
   }
 
   .algo-rollup-metrics span:last-child {
-    grid-column: auto;
-    border-right: 0;
+    border-bottom: 0;
   }
 
   .algo-card {
@@ -2791,19 +2719,7 @@ a.algo-trade-row:focus-visible {
   }
 
   .algo-tab-summary {
-    grid-template-columns: 1fr;
-    gap: 14px;
-    padding: 16px;
-  }
-
-  .algo-tab-coverage {
-    justify-items: start;
-    text-align: left;
-  }
-
-  .algo-tab-coverage strong,
-  .algo-tab-coverage > span {
-    white-space: normal;
+    padding: 14px;
   }
 
   .algo-definition {

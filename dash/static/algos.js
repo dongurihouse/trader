@@ -102,10 +102,6 @@ function factor(stats) {
   return Number.isFinite(value) ? value.toFixed(2) : "—";
 }
 
-function algorithmStatus(algo) {
-  return algo.configured && algo.trades_enabled ? "Active" : algo.configured ? "Configured" : "Historical";
-}
-
 function duration(minutes) {
   if (minutes === null || minutes === undefined || minutes === "") return "—";
   const value = Number(minutes);
@@ -308,7 +304,6 @@ function renderAlgorithmSwitcher() {
   const fragment = document.createDocumentFragment();
   algorithms.forEach((algo, index) => {
     const selected = algo.name === selectedAlgorithmName;
-    const status = algorithmStatus(algo);
     const button = createElement("button", `algo-tab${selected ? " active" : ""}`);
     button.type = "button";
     button.id = `algo-tab-${index}`;
@@ -316,36 +311,10 @@ function renderAlgorithmSwitcher() {
     button.setAttribute("role", "tab");
     button.setAttribute("aria-controls", "algo-panel");
     button.setAttribute("aria-selected", String(selected));
-    button.setAttribute("aria-label", `${algo.name}, ${status}`);
+    button.setAttribute("aria-label", algo.name);
     button.tabIndex = selected ? 0 : -1;
     const summary = createElement("span", "algo-tab-summary");
-    const heading = createElement("span", "algo-tab-heading");
-    const titleRow = createElement("span", "algo-tab-title-row");
-    titleRow.append(
-      createElement("strong", "algo-tab-title", algo.name.toUpperCase()),
-      createElement("span", `algo-tab-status ${status.toLowerCase()}`, status),
-    );
-    heading.append(
-      titleRow,
-      createElement(
-        "span",
-        "algo-tab-definition-copy",
-        `${humanize(algo.function)} · ${algo.configured ? "current" : "historical"} definition · config ${algo.version || "unknown"}`,
-      ),
-    );
-    const coverage = createElement("span", "algo-tab-coverage");
-    coverage.append(
-      createElement("small", "", "Stored activity"),
-      createElement(
-        "strong",
-        "",
-        algo.stats.first_action
-          ? `${pacificDate.format(dateFromEpoch(algo.stats.first_action))}–${pacificDate.format(dateFromEpoch(algo.stats.last_action))}`
-          : "No actions",
-      ),
-      createElement("span", "", `${numberFormat.format(algo.stats.session_count)} sessions · ${numberFormat.format(algo.stats.ticker_count)} tickers`),
-    );
-    summary.append(heading, coverage);
+    summary.append(createElement("strong", "algo-tab-title", algo.name.toUpperCase()));
     button.append(summary, renderAlgoMetrics(algo));
     fragment.append(button);
   });
