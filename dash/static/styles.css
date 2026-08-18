@@ -1936,7 +1936,7 @@ pre {
 
 .algo-switcher {
   display: grid;
-  grid-template-columns: 172px minmax(0, 1fr);
+  grid-template-columns: 157px minmax(0, 1fr);
   gap: 10px;
   min-width: 0;
   padding: 10px;
@@ -2697,7 +2697,7 @@ a.algo-trade-row:focus-visible {
   }
 
   .algo-switcher {
-    grid-template-columns: 130px minmax(0, 1fr);
+    grid-template-columns: 115px minmax(0, 1fr);
     gap: 8px;
     padding: 8px;
   }
