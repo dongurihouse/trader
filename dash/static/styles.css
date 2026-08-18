@@ -1810,6 +1810,109 @@ pre {
   line-height: 1.5;
 }
 
+.algo-switcher {
+  min-width: 0;
+  padding: 10px;
+  overflow: hidden;
+}
+
+.algo-strip {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  gap: 8px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  scroll-snap-type: x proximity;
+}
+
+.algo-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.algo-tab {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  flex: 0 0 clamp(210px, 22vw, 300px);
+  align-items: center;
+  gap: 5px 12px;
+  min-width: 0;
+  padding: 13px 15px;
+  color: var(--muted);
+  text-align: left;
+  background: rgba(16, 23, 33, 0.72);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  cursor: pointer;
+  scroll-snap-align: center;
+  transition: 150ms ease;
+}
+
+.algo-tab:hover,
+.algo-tab:focus-visible {
+  color: var(--text);
+  background: rgba(23, 32, 43, 0.88);
+  border-color: var(--line-strong);
+}
+
+.algo-tab.active {
+  color: var(--ink);
+  background: var(--acid);
+  border-color: var(--acid);
+}
+
+.algo-tab strong {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 0.67rem;
+  letter-spacing: 0.035em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.algo-tab-function {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--subtle);
+  font-family: var(--mono);
+  font-size: 0.5rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.algo-tab.active .algo-tab-function {
+  color: rgba(10, 15, 21, 0.68);
+}
+
+.algo-tab-status {
+  grid-column: 2;
+  grid-row: 1;
+  justify-self: end;
+  padding: 3px 5px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.43rem;
+  font-weight: 750;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  background: rgba(137, 149, 159, 0.08);
+  border-radius: 99px;
+}
+
+.algo-tab-status.active {
+  color: var(--acid);
+  background: var(--acid-soft);
+}
+
+.algo-tab.active .algo-tab-status {
+  color: var(--ink);
+  background: rgba(10, 15, 21, 0.12);
+}
+
 .algo-book {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
