@@ -68,3 +68,20 @@ The complete result changed from 8 trades, +1.911%, and -0.540% maximum
 drawdown to 7 trades, +2.451%, and -0.179% maximum drawdown. Threshold caps
 from 1.25 through 1.40 produced the same SNDK trades and returns. The sample is
 still small, so these remain paper results rather than promotion evidence.
+
+## Sentiment pullback ticker-flip guard
+
+Measured on 2026-08-18 with the current six-ticker fixed-history ledger, the
+entry guard now rejects a ticker that has crossed the session open against its
+fixed opening direction when that opposite-side return reaches 0.5 times its
+original five-minute move. The July 21 SPCX short had a 0.802 flip ratio and is
+therefore rejected. The calculation uses only the current completed minute and
+the fixed opening return.
+
+The exact service replay changed the result from 25 trades, +5.7829% gross,
+60.0% wins, and -2.4406% maximum drawdown to 22 trades, +6.9821% gross, 63.6%
+wins, and -2.3383% maximum drawdown. Discovery return through July 31 changed
+from +1.9181% to +3.1610%. Forward return from August 3 changed from +3.8648%
+to +3.8211%. The guard removed the July 21 SPCX loss, the July 24 MU loss, and
+an August 12 MU gain of +0.0437%. These results exclude fees, slippage, and
+sizing, and the sample remains small.
