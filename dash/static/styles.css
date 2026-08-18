@@ -1765,7 +1765,7 @@ pre {
 
 .algo-rollup-metrics {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .algo-rollup-metrics span {
@@ -2643,7 +2643,7 @@ pre {
   .algo-rollup-metrics span:last-child {
     padding: 10px;
     border-right: 1px solid var(--line);
-    border-bottom: 1px solid var(--line);
+    border-bottom: 0;
   }
 
   .algo-rollup-metrics span:nth-child(2n) {
@@ -2651,9 +2651,8 @@ pre {
   }
 
   .algo-rollup-metrics span:last-child {
-    grid-column: 1 / -1;
+    grid-column: auto;
     border-right: 0;
-    border-bottom: 0;
   }
 
   .algo-card {
