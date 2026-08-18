@@ -1,5 +1,5 @@
 {
-  "version": 10,
+  "version": 11,
   "database": "../data/trader.sqlite3",
   "tickers": ["SNDK", "SNXX", "SNDQ", "MU", "SPY", "QQQ", "SOXX"],
   "early_closes": ["2026-11-27", "2026-12-24"],
@@ -310,7 +310,7 @@
         "target_tickers": ["SNDK"],
         "min_range_atr": 0.75,
         "stop_atr_frac": 0.35,
-        "target_r": 1.5,
+        "target_r": 0.35,
         "min_rvol": 1.0,
         "minute_min": 60,
         "minute_max": 380,
