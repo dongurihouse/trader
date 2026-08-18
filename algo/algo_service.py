@@ -3117,6 +3117,88 @@ def _pending(
     return pending
 
 
+def _warm_primary_shape(
+    connection: sqlite3.Connection,
+    settings: Settings,
+) -> tuple[str, int]:
+    """Fill the primary ticker's current shape before deep history catches up."""
+    shape_entry = next(
+        (
+            (name, node)
+            for name, node in settings.signals.items()
+            if node["function"] == "shape_v1"
+        ),
+        None,
+    )
+    if shape_entry is None or not settings.tickers:
+        return "", 0
+
+    kind, node = shape_entry
+    ticker = settings.tickers[0]
+    latest = connection.execute(
+        "SELECT MAX(ts) FROM bars WHERE ticker=?", (ticker,)
+    ).fetchone()[0]
+    if latest is None:
+        return ticker, 0
+
+    _local_day, session_open, session_close = _session_window(settings, int(latest))
+    if int(latest) >= session_close:
+        return ticker, 0
+    if int(latest) < session_open:
+        timestamps = [int(latest)]
+    else:
+        timestamps = [
+            int(row["ts"])
+            for row in connection.execute(
+                """
+                SELECT ts FROM bars
+                WHERE ticker=? AND ts>=? AND ts<=?
+                ORDER BY ts
+                """,
+                (ticker, session_open, int(latest)),
+            )
+        ]
+    if not timestamps:
+        return ticker, 0
+
+    stored = {
+        int(row["ts"])
+        for row in connection.execute(
+            """
+            SELECT ts FROM outputs
+            WHERE ticker=? AND kind=? AND config=? AND ts>=? AND ts<=?
+            """,
+            (ticker, kind, settings.version, timestamps[0], timestamps[-1]),
+        )
+    }
+    targets = [ts for ts in timestamps if ts not in stored]
+    if not targets:
+        return ticker, 0
+
+    computed_at = int(time.time())
+    rows = []
+    for ts in targets:
+        value = _signal_shape_v1(
+            connection,
+            ticker,
+            ts,
+            node["params"],
+            {"bars": None},
+            settings,
+        )
+        rows.append((ticker, ts, kind, settings.version, _json(value), computed_at))
+    connection.executemany(
+        """
+        INSERT INTO outputs(ticker,ts,kind,config,output,computed_at)
+        VALUES (?,?,?,?,?,?)
+        ON CONFLICT(ticker,ts,kind,config) DO UPDATE SET
+          output=excluded.output,computed_at=excluded.computed_at
+        """,
+        rows,
+    )
+    return ticker, len(rows)
+
+
 def _warm_primary_relative_momentum(
     connection: sqlite3.Connection,
     settings: Settings,
@@ -3480,10 +3562,18 @@ def cycle(
             )
         connection.commit()
 
+        shape_ticker, shape_rows = _warm_primary_shape(connection, settings)
         warm_ticker, warm_rows = _warm_primary_relative_momentum(
             connection, settings
         )
         repaired_rows = _repair_relative_momentum_gaps(connection, settings)
+        if shape_rows:
+            message = "priority shape warmup ticker=%s rows=%d" % (
+                shape_ticker,
+                shape_rows,
+            )
+            _log(connection, "info", message)
+            logging.info(message)
         if warm_rows:
             message = "priority momentum warmup ticker=%s rows=%d" % (
                 warm_ticker,
@@ -3495,7 +3585,7 @@ def cycle(
             message = "continuous momentum repair rows=%d" % repaired_rows
             _log(connection, "info", message)
             logging.info(message)
-        if warm_rows or repaired_rows:
+        if shape_rows or warm_rows or repaired_rows:
             connection.commit()
 
         stats = {"pairs": 0, "outputs": 0, "entries": 0, "exits": 0}
@@ -3567,11 +3657,18 @@ def cycle(
         connection.close()
 
 
-def _best_effort_log(config_path: Path, level: str, message: str) -> None:
+def _best_effort_log(
+    config_path: Path,
+    level: str,
+    message: str,
+    database: Optional[Path] = None,
+) -> None:
     try:
-        settings = load_settings(config_path)
-        _init_database(settings.database)
-        connection = _connect(settings.database)
+        database_path = database
+        if database_path is None:
+            database_path = load_settings(config_path).database
+        _init_database(database_path)
+        connection = _connect(database_path)
         try:
             _log(connection, level, message)
             connection.commit()
@@ -3666,6 +3763,15 @@ class Service:
                         if stats["pairs"] == CYCLE_PAIR_LIMIT
                         else settings.poll_seconds
                     )
+                except ConfigError as exc:
+                    logging.exception("configuration reload failed")
+                    _best_effort_log(
+                        self.config_path,
+                        "error",
+                        "configuration reload failed: %s" % exc,
+                        database=self.settings.database,
+                    )
+                    raise
                 except Exception as exc:
                     delay = 30
                     logging.exception("cycle failed")
