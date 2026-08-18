@@ -1959,7 +1959,7 @@ pre {
 
 .algo-tab {
   display: grid;
-  flex: 0 0 clamp(315px, calc(30vw - 45px), 355px);
+  flex: 0 0 clamp(275px, calc(30vw - 85px), 315px);
   align-self: stretch;
   min-width: 0;
   padding: 0;
@@ -2024,7 +2024,9 @@ pre {
 
 .algo-tab-metric-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns:
+    calc(33.333333% + 13.333333px)
+    repeat(2, calc(33.333333% - 6.666667px));
   overflow: hidden;
 }
 
@@ -2059,6 +2061,12 @@ pre {
   font-family: var(--mono);
   font-size: 0.82rem;
   font-weight: 700;
+}
+
+@media (min-width: 901px) {
+  .algo-metric:not(:nth-child(3n + 1)) {
+    padding-inline: 10px;
+  }
 }
 
 .algo-definition {
