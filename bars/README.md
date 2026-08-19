@@ -25,9 +25,7 @@ token.
 - Require a result block for every requested ticker before advancing work.
 - Upsert by `(ticker, ts)`, so every repeated fetch is safe.
 - Keep per-ticker backfill and scheduled-sweep progress in `bar_jobs`, not log
-  text. Mark a scheduled sweep complete only after its metadata refresh succeeds.
-- During each sweep, fetch configured provider indicators and upsert them into
-  `bar_metadata`. The minute poll does not fetch indicators.
+  text.
 - Serve process health and current operation at
   `http://127.0.0.1:8789/health` for Dash.
 - Accept named `POST /poll`, `POST /backfill`, and `POST /sweep` work on the
@@ -47,13 +45,6 @@ live polling window, fixed initial history start, 30-day sweep, and provider
 settings. The default live window is 04:00 Eastern through four hours after
 the regular or configured early close. `bars.api_port` sets the loopback health
 API port. `bars.poll_catchup_days` bounds one live catch-up cycle.
-
-Any signal whose only input is `bar_metadata` declares one provider fetch.
-Its `params.name` is the indicator type; the remaining params are the provider
-parameters. Bars supports EMA, SMA, RSI, momentum, ROC, CCI, Williams %R, ATR,
-MFI, ADX, Donchian and Bollinger channels, MACD, Keltner channels, Supertrend,
-VWAP, OBV, and classic pivot points. The default config enables one parameter
-set for all 18 types.
 
 ## Operate
 

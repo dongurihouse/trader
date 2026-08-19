@@ -16,24 +16,28 @@ import threading
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from common.validation import (
-    normalize_symbol,
-    require_clock,
-    require_int,
+from common.config import (
+    configured_tickers,
+    market_schedule,
+    read_config,
+    resolve_config_path,
 )
+from common.service import (
+    request_operation as request_service_operation,
+    write_json,
+)
+from common.validation import normalize_symbol, require_int
 
 from algo_types import (
     AlgoContext,
@@ -108,13 +112,7 @@ def _nodes(document: Mapping[str, Any], key: str) -> dict[str, Mapping[str, Any]
             raise ConfigError("every %s entry must be a named object" % key)
         params = value.get("params", {})
         inputs = value.get("inputs", [])
-        function = value.get("function")
-        if function is None:
-            function = (
-                "metadata"
-                if key == "signals" and inputs == ["bar_metadata"]
-                else name
-            )
+        function = value.get("function", name)
         if "trades" in value:
             raise ConfigError("%s.%s.trades is not supported" % (key, name))
         if not isinstance(function, str) or not function:
@@ -224,7 +222,7 @@ def _compile_dependencies(
         node = nodes[name]
         visiting.add(key)
         for target in node["inputs"]:
-            if layer == "signal" and target in ("bars", "bar_metadata", "events"):
+            if layer == "signal" and target in ("bars", "events"):
                 continue
             if target in signals:
                 visit("signal", target)
@@ -258,45 +256,19 @@ def load_settings(
     database_override: Optional[Path] = None,
 ) -> Settings:
     if document is None:
-        try:
-            document = json.loads(path.read_text())
-        except FileNotFoundError as exc:
-            raise ConfigError("config file does not exist: %s" % path) from exc
-        except json.JSONDecodeError as exc:
-            raise ConfigError("invalid JSON in %s: %s" % (path, exc)) from exc
+        document = read_config(path, ConfigError)
     if not isinstance(document, dict):
         raise ConfigError("config must be a JSON object")
 
-    tickers = document.get("tickers")
-    if not isinstance(tickers, list) or not tickers:
-        raise ConfigError("tickers must be a non-empty list")
-    normalized: list[str] = []
-    for value in tickers:
-        ticker = normalize_symbol(value, error=ConfigError)
-        if ticker not in normalized:
-            normalized.append(ticker)
+    normalized = configured_tickers(document, ConfigError)
 
     algo = document.get("algo", {})
     if not isinstance(algo, dict):
         raise ConfigError("algo must be an object")
-    polling = document.get("live_polling", {})
-    if not isinstance(polling, dict):
-        raise ConfigError("live_polling must be an object")
-    early_closes = document.get("early_closes", [])
-    if not isinstance(early_closes, list):
-        raise ConfigError("early_closes must be a list")
-    try:
-        early_close_days = frozenset(
-            date.fromisoformat(value) for value in early_closes
-        )
-    except (TypeError, ValueError) as exc:
-        raise ConfigError("early_closes must contain YYYY-MM-DD strings") from exc
-    database_value = document.get("database", "../data/trader.sqlite3")
-    if not isinstance(database_value, str) or not database_value:
-        raise ConfigError("database must be a path string")
-    database = Path(database_value).expanduser()
-    if not database.is_absolute():
-        database = (path.parent / database).resolve()
+    schedule = market_schedule(document, ConfigError)
+    database = resolve_config_path(
+        document, "database", path, "../data/trader.sqlite3", ConfigError
+    )
     if database_override is not None:
         database = database_override
 
@@ -322,7 +294,7 @@ def load_settings(
                 "signals.%s inputs must be %s" % (name, list(required))
             )
         try:
-            params = spec.normalize(node["params"], tuple(normalized))
+            params = spec.normalize(node["params"], normalized)
         except ConfigError as exc:
             raise ConfigError("signals.%s.params: %s" % (name, exc)) from exc
         signals[name] = {**node, "params": params}
@@ -334,7 +306,7 @@ def load_settings(
                 "algos.%s inputs must contain %d nodes" % (name, required)
             )
         try:
-            params = spec.normalize(node["params"], tuple(normalized))
+            params = spec.normalize(node["params"], normalized)
         except ConfigError as exc:
             raise ConfigError("algos.%s.params: %s" % (name, exc)) from exc
         algos[name] = {**node, "params": params}
@@ -357,7 +329,7 @@ def load_settings(
     )
     settings = Settings(
         database=database,
-        tickers=tuple(normalized),
+        tickers=normalized,
         evaluation_days=require_int(
             algo.get("evaluation_days", 60), "algo.evaluation_days", error=ConfigError
         ),
@@ -367,28 +339,13 @@ def load_settings(
         api_port=require_int(
             algo.get("api_port", 8791), "algo.api_port", 1024, error=ConfigError
         ),
-        regular_open=require_clock(
-            polling.get("regular_open", "09:30"),
-            "live_polling.regular_open",
-            error=ConfigError,
-        ),
-        regular_close=require_clock(
-            polling.get("regular_close", "16:00"),
-            "live_polling.regular_close",
-            error=ConfigError,
-        ),
-        early_close=require_clock(
-            polling.get("early_close", "13:00"),
-            "live_polling.early_close",
-            error=ConfigError,
-        ),
-        early_close_days=early_close_days,
+        schedule=schedule,
         signals=signals,
         algos=algos,
         signal_order=signal_order,
         algo_order=algo_order,
         algo_requirements=algo_requirements,
-        broker=_broker_settings(document, tuple(normalized)),
+        broker=_broker_settings(document, normalized),
         content=_json(document),
     )
     return settings
@@ -551,9 +508,7 @@ def run_core(
     for name in settings.signal_order:
         node = settings.signals[name]
         inputs = {
-            target: None
-            if target in ("bars", "bar_metadata", "events")
-            else signal_values[target]
+            target: None if target in ("bars", "events") else signal_values[target]
             for target in node["inputs"]
         }
         try:
@@ -725,6 +680,43 @@ def run_targeted_core(
     }
 
 
+def _evaluate_pair(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    ticker: str,
+    ts: int,
+    state: _EvaluationState,
+    target_algos: Sequence[str],
+    stored_inputs: Optional[Mapping[str, Any]] = None,
+    bar_close: Optional[float] = None,
+) -> dict[str, Any]:
+    if not target_algos:
+        return run_core(connection, settings, ticker, ts, state=state)
+    if stored_inputs is None:
+        stored_inputs = _outputs_for_timestamps(
+            connection,
+            ticker,
+            (ts,),
+            _targeted_input_names(settings, target_algos),
+        ).get(ts, {})
+    if bar_close is None:
+        bar_close = _bar_close(connection, ticker, ts)
+    if bar_close is None:
+        raise EvaluationError(
+            "timestamp is not a stored bar: %s %s" % (ticker, ts)
+        )
+    return run_targeted_core(
+        connection,
+        settings,
+        ticker,
+        ts,
+        target_algos,
+        state,
+        stored_inputs,
+        bar_close,
+    )
+
+
 
 def core(
     ticker: str,
@@ -821,23 +813,16 @@ def _parallel_ticker_batch(
                     if targeted
                     else _seed_evaluation_state(connection, settings, ticker, ts)
                 )
-            if targeted:
-                if ts not in closes_by_ts:
-                    raise EvaluationError(
-                        "timestamp is not a stored bar: %s %s" % (ticker, ts)
-                    )
-                result = run_targeted_core(
-                    connection,
-                    settings,
-                    ticker,
-                    ts,
-                    target_algos,
-                    state,
-                    stored_by_ts.get(ts, {}),
-                    closes_by_ts[ts],
-                )
-            else:
-                result = run_core(connection, settings, ticker, ts, state=state)
+            result = _evaluate_pair(
+                connection,
+                settings,
+                ticker,
+                ts,
+                state,
+                target_algos,
+                stored_by_ts.get(ts) if targeted else None,
+                closes_by_ts.get(ts) if targeted else None,
+            )
             state.advance(result)
             pending_results.append(result)
             if len(pending_results) == PARALLEL_WRITE_BATCH_SIZE:
@@ -1122,30 +1107,9 @@ def _evaluate_parallel_pairs(
             return stats, trade_alerts, replacement_pending
         ticker, ts = remaining.pop(0)
         state = _empty_evaluation_state(settings, ticker, ts)
-        if target_algos:
-            stored = _outputs_for_timestamps(
-                connection,
-                ticker,
-                (ts,),
-                _targeted_input_names(settings, target_algos),
-            ).get(ts, {})
-            bar_close = _bar_close(connection, ticker, ts)
-            if bar_close is None:
-                raise EvaluationError(
-                    "timestamp is not a stored bar: %s %s" % (ticker, ts)
-                )
-            result = run_targeted_core(
-                connection,
-                settings,
-                ticker,
-                ts,
-                target_algos,
-                state,
-                stored,
-                bar_close,
-            )
-        else:
-            result = run_core(connection, settings, ticker, ts, state=state)
+        result = _evaluate_pair(
+            connection, settings, ticker, ts, state, target_algos
+        )
         part, first_alerts = _write_result(
             connection,
             settings,
@@ -1300,30 +1264,9 @@ def _evaluate_cycle(
                     )
                 )
                 states[ticker] = state
-            if target_algos:
-                stored = _outputs_for_timestamps(
-                    connection,
-                    ticker,
-                    (ts,),
-                    _targeted_input_names(settings, target_algos),
-                ).get(ts, {})
-                bar_close = _bar_close(connection, ticker, ts)
-                if bar_close is None:
-                    raise EvaluationError(
-                        "timestamp is not a stored bar: %s %s" % (ticker, ts)
-                    )
-                result = run_targeted_core(
-                    connection,
-                    settings,
-                    ticker,
-                    ts,
-                    target_algos,
-                    state,
-                    stored,
-                    bar_close,
-                )
-            else:
-                result = run_core(connection, settings, ticker, ts, state=state)
+            result = _evaluate_pair(
+                connection, settings, ticker, ts, state, target_algos
+            )
             part, trade_alerts = _write_result(
                 connection,
                 settings,
@@ -1443,33 +1386,14 @@ def _best_effort_log(
 
 def request_operation(settings: Settings, operation: str) -> dict[str, Any]:
     """Submit work to the one running algo writer."""
-    if operation not in ("cycle", "recalculate"):
-        raise ConfigError("unknown algo operation: %s" % operation)
-    request = Request(
-        "http://127.0.0.1:%d/%s" % (settings.api_port, operation),
-        data=b"{}",
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    return request_service_operation(
+        settings.api_port,
+        operation,
+        ("cycle", "recalculate"),
+        "algo",
+        "make algo-install",
+        ConfigError,
     )
-    try:
-        with urlopen(request, timeout=5) as response:
-            payload = json.load(response)
-    except HTTPError as exc:
-        try:
-            detail = json.load(exc)
-        except (json.JSONDecodeError, OSError):
-            detail = {"error": exc.reason}
-        raise ConfigError(
-            "algo %s request failed: %s"
-            % (operation, detail.get("error", exc.reason))
-        ) from exc
-    except (URLError, OSError) as exc:
-        raise ConfigError(
-            "algo service is unavailable; start it with: make algo-install"
-        ) from exc
-    if not isinstance(payload, dict):
-        raise ConfigError("algo service returned an invalid response")
-    return payload
 
 
 
@@ -1626,14 +1550,7 @@ class _HealthHandler(BaseHTTPRequestHandler):
         if urlparse(self.path).path != "/health":
             self.send_error(404)
             return
-        body = json.dumps(
-            self.server.service.health(), separators=(",", ":")
-        ).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        write_json(self, self.server.service.health())
 
     def do_POST(self) -> None:  # noqa: N802
         operation = urlparse(self.path).path.lstrip("/")
@@ -1652,12 +1569,7 @@ class _HealthHandler(BaseHTTPRequestHandler):
         else:
             self.send_error(404)
             return
-        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        write_json(self, payload, status)
 
     def log_message(self, format: str, *args) -> None:
         return

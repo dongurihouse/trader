@@ -11,7 +11,7 @@ from functools import lru_cache
 from typing import Any, Callable, Mapping, Optional, Sequence
 from zoneinfo import ZoneInfo
 
-from validation import require_float, require_int
+from common.validation import require_float, require_int
 
 
 EASTERN = ZoneInfo("America/New_York")

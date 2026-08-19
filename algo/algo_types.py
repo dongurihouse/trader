@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date, datetime, time as clock_time, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
-from zoneinfo import ZoneInfo
 
+from common.config import EASTERN, MarketSchedule
 from common.validation import require_float, require_int
 
 UTC = timezone.utc
-EASTERN = ZoneInfo("America/New_York")
 CYCLE_PAIR_LIMIT = 2_000
 ALERT_CLOSE_GRACE_SECONDS = 5 * 60
 
@@ -43,10 +42,7 @@ class Settings:
     evaluation_days: int
     poll_seconds: int
     api_port: int
-    regular_open: clock_time
-    regular_close: clock_time
-    early_close: clock_time
-    early_close_days: frozenset[date]
+    schedule: MarketSchedule
     signals: Mapping[str, Mapping[str, Any]]
     algos: Mapping[str, Mapping[str, Any]]
     signal_order: tuple[str, ...]
@@ -169,15 +165,5 @@ def _parameter_bool(parameters: Mapping[str, Any], name: str) -> bool:
 
 def _session_window(settings: Settings, ts: int) -> tuple[date, int, int]:
     local_day = datetime.fromtimestamp(ts, tz=EASTERN).date()
-    session_close_time = (
-        settings.early_close
-        if local_day in settings.early_close_days
-        else settings.regular_close
-    )
-    session_open = datetime.combine(
-        local_day, settings.regular_open, tzinfo=EASTERN
-    )
-    session_close = datetime.combine(
-        local_day, session_close_time, tzinfo=EASTERN
-    )
-    return local_day, int(session_open.timestamp()), int(session_close.timestamp())
+    session_open, session_close = settings.schedule.session_window(local_day)
+    return local_day, session_open, session_close

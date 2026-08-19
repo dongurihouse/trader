@@ -1,4 +1,4 @@
-"""SQLite storage for bars, metadata, jobs, logs, and operational queries."""
+"""SQLite storage for bars, jobs, logs, and operational queries."""
 
 import sqlite3
 from dataclasses import dataclass
@@ -11,8 +11,6 @@ from bar_provider import (
     UTC,
     BarRow,
     ConfigError,
-    MetadataPoint,
-    TechnicalSpec,
     _epoch,
     _parse_iso,
 )
@@ -156,56 +154,6 @@ class BarStore:
                     ],
                 )
         return stats
-
-    def store_metadata(
-        self,
-        points: Sequence[MetadataPoint],
-        ticker: str,
-        spec: TechnicalSpec,
-    ) -> Dict[str, int]:
-        fetched_at = _epoch(datetime.now(UTC))
-        rows = [
-            (
-                ticker,
-                point.ts,
-                spec.name,
-                spec.params,
-                point.value,
-                fetched_at,
-                ticker,
-                point.ts,
-            )
-            for point in points
-        ]
-        with self.connection as connection:
-            cursor = connection.executemany(
-                """
-                INSERT INTO bar_metadata (
-                    ticker, ts, name, params, value, fetched_at
-                )
-                SELECT ?, ?, ?, ?, ?, ?
-                WHERE EXISTS (
-                    SELECT 1 FROM bars WHERE ticker=? AND ts=?
-                )
-                ON CONFLICT(ticker, ts, name, params) DO UPDATE SET
-                    value=excluded.value,
-                    fetched_at=excluded.fetched_at
-                """,
-                rows,
-            )
-        return {"received": len(points), "written": cursor.rowcount}
-
-    def latest_metadata(
-        self, ticker: str, spec: TechnicalSpec, refreshed_after: int
-    ) -> Optional[int]:
-        row = self.connection.execute(
-            """
-            SELECT MAX(ts) AS ts FROM bar_metadata
-            WHERE ticker=? AND name=? AND params=? AND fetched_at>=?
-            """,
-            (ticker, spec.name, spec.params, refreshed_after),
-        ).fetchone()
-        return row["ts"]
 
     def ensure_jobs(
         self,

@@ -12,7 +12,7 @@ import re
 import sqlite3
 import sys
 from contextlib import contextmanager
-from datetime import datetime, time, timedelta
+from datetime import datetime, time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -26,6 +26,7 @@ REPO_ROOT = DASH_ROOT.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from common.config import market_schedule, read_config
 from common.validation import normalize_symbol
 
 
@@ -45,14 +46,7 @@ class DashboardData:
         self.config_path = config_path.resolve()
 
     def config(self) -> dict[str, Any]:
-        try:
-            content = self.config_path.read_text(encoding="utf-8")
-            value = json.loads(content)
-        except (OSError, json.JSONDecodeError) as exc:
-            raise DashboardError(f"Cannot read config: {exc}") from exc
-        if not isinstance(value, dict):
-            raise DashboardError("The config root must be a JSON object")
-        return value
+        return dict(read_config(self.config_path, DashboardError))
 
     def database_path(self) -> Path:
         raw = self.config().get("database")
@@ -82,42 +76,11 @@ class DashboardData:
             if "connection" in locals():
                 connection.close()
 
-    def overview(self, compact: bool = False) -> dict[str, Any]:
+    def overview(self) -> dict[str, Any]:
         config = self.config()
         configured_tickers = [str(item) for item in config.get("tickers", [])]
         with self.connection() as connection:
             quotes = [self._quote(connection, ticker) for ticker in configured_tickers]
-            if compact:
-                services = []
-                problems = []
-                history = []
-                nodes = []
-                counts = {}
-            else:
-                services = self._services(connection, config)
-                problems = self._logs(
-                    connection,
-                    "WHERE level IN ('warn', 'error')",
-                    limit=24,
-                )
-                history = self._logs(
-                    connection,
-                    "WHERE level = 'info' AND lower(message) NOT LIKE 'heartbeat%'",
-                    limit=36,
-                )
-                nodes = self._nodes(connection, config)
-                counts = {
-                    table: connection.execute(
-                        f"SELECT COUNT(*) FROM {table}"
-                    ).fetchone()[0]
-                    for table in (
-                        "bars",
-                        "events",
-                        "trades",
-                        "outputs",
-                        "algos",
-                    )
-                }
 
         return {
             "generated_at": int(datetime.now(tz=UTC).timestamp()),
@@ -130,12 +93,7 @@ class DashboardData:
                 "signals": config.get("signals", {}),
                 "algos": config.get("algos", {}),
             },
-            "counts": counts,
             "quotes": quotes,
-            "services": services,
-            "problems": problems,
-            "history": history,
-            "nodes": nodes,
         }
 
     def bars(
@@ -405,86 +363,6 @@ class DashboardData:
             "definition": definition,
             "values": values,
         }
-
-    def performance(self, ticker: str) -> dict[str, Any]:
-        ticker = self._valid_symbol(ticker)
-        config = self.config()
-        algo_display_names = self._algo_display_names(config)
-        algo_names = set(self._mapping(config.get("algos")).keys())
-
-        with self.connection() as connection:
-            algo_names.update(
-                str(row["name"])
-                for row in connection.execute("SELECT name FROM algos")
-            )
-
-            if not algo_names:
-                return {"ticker": ticker, "rows": []}
-
-            placeholders = ",".join("?" for _ in algo_names)
-            query = f"""
-                SELECT o.kind, o.ts, o.output, b.close
-                FROM outputs o
-                JOIN bars b ON b.ticker = o.ticker AND b.ts = o.ts
-                WHERE o.ticker = ? AND o.kind IN ({placeholders})
-                ORDER BY o.kind, o.ts
-            """
-            rows = connection.execute(query, (ticker, *sorted(algo_names))).fetchall()
-
-        groups: dict[str, dict[str, Any]] = {}
-        for row in rows:
-            key = str(row["kind"])
-            group = groups.setdefault(
-                key,
-                {
-                    "algo": row["kind"],
-                    "entries": 0,
-                    "closed_units": 0,
-                    "wins": 0,
-                    "realized_pct": 0.0,
-                    "open_units": [],
-                    "last_price": float(row["close"]),
-                },
-            )
-            price = float(row["close"])
-            group["last_price"] = price
-            action = self._output_action(self._json_value(row["output"]))
-            if action is None:
-                continue
-            is_entry, is_close, direction = action
-            if is_close:
-                for entry_price, entry_direction in group["open_units"]:
-                    result = ((price / entry_price) - 1.0) * 100.0 * entry_direction
-                    group["realized_pct"] += result
-                    group["closed_units"] += 1
-                    if result > 0:
-                        group["wins"] += 1
-                group["open_units"] = []
-            elif is_entry:
-                group["entries"] += 1
-                group["open_units"].append((price, direction))
-
-        performance_rows = []
-        for group in groups.values():
-            unrealized = sum(
-                ((group["last_price"] / entry_price) - 1.0) * 100.0 * direction
-                for entry_price, direction in group["open_units"]
-            )
-            closed = group["closed_units"]
-            performance_rows.append(
-                {
-                    "algo": group["algo"],
-                    "display_name": algo_display_names.get(str(group["algo"])),
-                    "entries": group["entries"],
-                    "closed_units": closed,
-                    "open_units": len(group["open_units"]),
-                    "realized_pct": round(group["realized_pct"], 4),
-                    "total_pct": round(group["realized_pct"] + unrealized, 4),
-                    "win_rate": round((group["wins"] / closed) * 100.0, 1) if closed else None,
-                }
-            )
-        performance_rows.sort(key=lambda item: item["algo"])
-        return {"ticker": ticker, "rows": performance_rows}
 
     @staticmethod
     def _median(values: list[float]) -> float | None:
@@ -843,56 +721,6 @@ class DashboardData:
             "chart_revision": chart_revision,
         }
 
-    def _services(self, connection: sqlite3.Connection, config: dict[str, Any]) -> list[dict[str, Any]]:
-        rows = connection.execute(
-            """
-            SELECT service, ts, level, message
-            FROM (
-                SELECT service, ts, level, message,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY service ORDER BY ts DESC
-                       ) AS position
-                FROM logs
-                WHERE service NOT IN ('bars', 'algo')
-            )
-            WHERE position = 1
-            ORDER BY service
-            """
-        ).fetchall()
-        now = int(datetime.now(tz=UTC).timestamp())
-        services = []
-        for row in rows:
-            age = max(0, now - int(row["ts"]))
-            if row["service"] == "events":
-                cadence = 86_400
-            else:
-                cadence = 60
-            cadence = max(1, int(cadence))
-            if age <= max(90, cadence * 2.5):
-                state = "active"
-            elif age <= max(300, cadence * 6):
-                state = "quiet"
-            else:
-                state = "stale"
-            services.append(
-                {
-                    "service": row["service"],
-                    "ts": row["ts"],
-                    "level": row["level"],
-                    "message": row["message"],
-                    "age_seconds": age,
-                    "state": state,
-                }
-            )
-        services.extend(
-            (
-                self._service_health(config, "bars", 8789),
-                self._service_health(config, "algo", 8791),
-            )
-        )
-        services.sort(key=lambda service: service["service"])
-        return services
-
     @staticmethod
     def _service_health(
         config: dict[str, Any], service: str, default_port: int
@@ -926,52 +754,6 @@ class DashboardData:
                 "age_seconds": 0,
                 "state": "stale",
             }
-
-    def _logs(self, connection: sqlite3.Connection, where: str, limit: int) -> list[dict[str, Any]]:
-        query = f"SELECT ts, service, level, message FROM logs {where} ORDER BY ts DESC, rowid DESC LIMIT ?"
-        return [dict(row) for row in connection.execute(query, (limit,))]
-
-    def _nodes(self, connection: sqlite3.Connection, config: dict[str, Any]) -> list[dict[str, Any]]:
-        nodes: dict[str, dict[str, Any]] = {}
-        for node_type, key in (("signal", "signals"), ("algo", "algos")):
-            for name, definition in self._mapping(config.get(key)).items():
-                nodes[name] = {
-                    "name": name,
-                    "node_type": node_type,
-                    "definition": definition,
-                    "enabled": not isinstance(definition, dict) or definition.get("enabled", True),
-                    "latest_by_ticker": {},
-                }
-
-        for row in connection.execute(
-            """
-            SELECT ticker, kind, ts, output
-            FROM (
-                SELECT ticker, kind, ts, output,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY ticker, kind ORDER BY ts DESC, computed_at DESC
-                       ) AS position
-                FROM outputs
-            )
-            WHERE position = 1
-            ORDER BY kind, ticker
-            """
-        ):
-            node = nodes.setdefault(
-                row["kind"],
-                {
-                    "name": row["kind"],
-                    "node_type": "output",
-                    "definition": {},
-                    "enabled": True,
-                    "latest_by_ticker": {},
-                },
-            )
-            node.setdefault("latest_by_ticker", {})[row["ticker"]] = {
-                "ts": row["ts"],
-                "output": self._json_value(row["output"]),
-            }
-        return sorted(nodes.values(), key=lambda item: (item["node_type"], item["name"]))
 
     def _node_definition(self, kind: str) -> tuple[Any, str]:
         current = self.config()
@@ -1015,14 +797,7 @@ class DashboardData:
     ) -> list[dict[str, Any]]:
         signals = self._mapping(config.get("signals"))
         algos = self._mapping(config.get("algos"))
-        polling = self._mapping(config.get("live_polling"))
-        early_dates = {str(value) for value in config.get("early_closes", [])}
-        try:
-            regular_open = time.fromisoformat(str(polling.get("regular_open", "09:30")))
-            regular_close = time.fromisoformat(str(polling.get("regular_close", "16:00")))
-            early_close = time.fromisoformat(str(polling.get("early_close", "13:00")))
-        except ValueError:
-            regular_open, regular_close, early_close = time(9, 30), time(16), time(13)
+        schedule = market_schedule(config, DashboardError)
 
         overlays = []
         for algo_name, definition in algos.items():
@@ -1053,11 +828,7 @@ class DashboardData:
                 timestamp = int(row["ts"])
                 local = datetime.fromtimestamp(timestamp, tz=EASTERN)
                 session = local.date().isoformat()
-                close_time = early_close if session in early_dates else regular_close
-                session_open = datetime.combine(local.date(), regular_open, tzinfo=EASTERN)
-                session_close = datetime.combine(local.date(), close_time, tzinfo=EASTERN)
-                start = int(session_open.timestamp())
-                end = int(session_close.timestamp())
+                start, end = schedule.session_window(local.date())
                 if start <= timestamp < end and not int(row["interpolated"]):
                     sessions.setdefault(session, []).append(row)
                     session_bounds[session] = (start, end)
@@ -1278,19 +1049,10 @@ class DashboardData:
 
     def _market_state(self, config: dict[str, Any]) -> dict[str, Any]:
         now = datetime.now(tz=EASTERN)
-        polling = config.get("live_polling", {})
-        early_dates = {str(value) for value in config.get("early_closes", [])}
-        close_key = "early_close" if now.date().isoformat() in early_dates else "regular_close"
-        try:
-            start_time = time.fromisoformat(str(polling.get("start", "04:00")))
-            close_time = time.fromisoformat(str(polling.get(close_key, "16:00")))
-        except ValueError:
-            start_time, close_time = time(4), time(16)
-        after_close = int(polling.get("after_close_minutes", 5))
-        start = datetime.combine(now.date(), start_time, tzinfo=EASTERN)
-        end = datetime.combine(now.date(), close_time, tzinfo=EASTERN) + timedelta(minutes=after_close)
-        weekday = now.weekday() < 5
-        live = weekday and start <= now <= end
+        start, end = market_schedule(config, DashboardError).collection_window(
+            now.date()
+        )
+        live = now.weekday() < 5 and start <= now <= end
         return {
             "state": "live" if live else "closed",
             "label": "Live polling" if live else "Outside live window",
@@ -1325,24 +1087,6 @@ class DashboardData:
             return value
 
     @staticmethod
-    def _output_action(value: Any) -> tuple[bool, bool, int] | None:
-        if not isinstance(value, (list, tuple)) or len(value) != 3:
-            return None
-        is_entry, is_close, direction = value
-        if (
-            not isinstance(is_entry, bool)
-            or not isinstance(is_close, bool)
-            or (is_entry and is_close)
-            or isinstance(direction, bool)
-            or not isinstance(direction, int)
-            or direction not in (-1, 0, 1)
-            or ((is_entry or is_close) and direction == 0)
-            or (not (is_entry or is_close) and direction != 0)
-        ):
-            return None
-        return is_entry, is_close, direction
-
-    @staticmethod
     def _valid_symbol(value: str) -> str:
         return normalize_symbol(
             value,
@@ -1368,9 +1112,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _api(self, path: str, query: dict[str, list[str]]) -> None:
         try:
             if path == "/api/overview":
-                payload = self.data.overview(
-                    self._param(query, "compact", "0") == "1"
-                )
+                payload = self.data.overview()
             elif path == "/api/bars":
                 payload = self.data.bars(
                     self._param(query, "ticker"),
@@ -1394,8 +1136,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self._param(query, "ticker"),
                     self._param(query, "kind"),
                 )
-            elif path == "/api/performance":
-                payload = self.data.performance(self._param(query, "ticker"))
             elif path == "/api/algorithms":
                 payload = self.data.algorithms()
             elif path == "/api/health":

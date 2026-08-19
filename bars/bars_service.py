@@ -14,13 +14,11 @@ import threading
 import time
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date, datetime, time as clock_time, timedelta
+from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Sequence, Tuple
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent
@@ -28,12 +26,18 @@ REPO_ROOT = ROOT.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from common.metadata import normalize_provider_indicator
-from common.validation import (
-    normalize_symbol,
-    require_clock,
-    require_int,
+from common.config import (
+    MarketSchedule,
+    configured_tickers,
+    market_schedule,
+    read_config,
+    resolve_config_path,
 )
+from common.service import (
+    request_operation as request_service_operation,
+    write_json,
+)
+from common.validation import require_int
 
 from bar_provider import (
     UTC,
@@ -41,7 +45,6 @@ from bar_provider import (
     ProviderSettings,
     RelayError,
     RobinhoodClient,
-    TechnicalSpec,
     _epoch,
     _iso_utc,
 )
@@ -50,9 +53,7 @@ from bar_store import BAR_COLUMNS, BarStore, JobRef, JobState
 
 DEFAULT_CONFIG_PATH = ROOT.parent / "config" / "config.json"
 EASTERN = ZoneInfo("America/New_York")
-TECHNICAL_CHUNK_DAYS = 3
 LIVE_INT_FIELDS = (
-    ("after_close_minutes", 240, 0),
     ("poll_seconds", 60, 30),
 )
 BARS_INT_FIELDS = (
@@ -73,11 +74,7 @@ PROVIDER_INT_FIELDS = (
 @dataclass(frozen=True)
 class Settings:
     tickers: Tuple[str, ...]
-    live_start: clock_time
-    regular_close: clock_time
-    early_close: clock_time
-    early_close_days: frozenset
-    after_close_minutes: int
+    schedule: MarketSchedule
     poll_seconds: int
     api_port: int
     history_start: date
@@ -88,7 +85,6 @@ class Settings:
     retry_max_seconds: int
     database: Path
     provider: ProviderSettings
-    technical_specs: Tuple[TechnicalSpec, ...]
 
 
 def _positive_int_fields(
@@ -107,52 +103,10 @@ def _positive_int_fields(
     }
 
 
-def _technical_specs(raw: dict) -> Tuple[TechnicalSpec, ...]:
-    signals = raw.get("signals") or {}
-    if not isinstance(signals, dict):
-        raise ConfigError("signals must be a JSON object")
-    specs: List[TechnicalSpec] = []
-    seen = set()
-    for signal_name, node in signals.items():
-        if not isinstance(node, dict) or node.get("inputs") != ["bar_metadata"]:
-            continue
-        configured = node.get("params")
-        if not isinstance(configured, dict):
-            raise ConfigError("signals.%s.params must be a JSON object" % signal_name)
-        try:
-            name, encoded = normalize_provider_indicator(
-                configured,
-                error=ConfigError,
-            )
-        except ConfigError as exc:
-            raise ConfigError("signals.%s.params: %s" % (signal_name, exc)) from exc
-        key = (name, encoded)
-        if key not in seen:
-            seen.add(key)
-            specs.append(TechnicalSpec(name=name, params=encoded))
-    return tuple(specs)
-
-
 def load_settings(path: Path) -> Settings:
-    try:
-        raw = json.loads(path.read_text())
-    except FileNotFoundError as exc:
-        raise ConfigError("config file does not exist: %s" % path) from exc
-    except json.JSONDecodeError as exc:
-        raise ConfigError("invalid JSON in %s: %s" % (path, exc)) from exc
-    if not isinstance(raw, dict):
-        raise ConfigError("config must be a JSON object")
-
-    tickers_raw = raw.get("tickers")
-    if not isinstance(tickers_raw, list) or not tickers_raw:
-        raise ConfigError("tickers must be a non-empty JSON list")
-    tickers: List[str] = []
-    for value in tickers_raw:
-        if not isinstance(value, str):
-            raise ConfigError("every ticker must be a string")
-        ticker = normalize_symbol(value, error=ConfigError)
-        if ticker not in tickers:
-            tickers.append(ticker)
+    raw = read_config(path, ConfigError)
+    tickers = configured_tickers(raw, ConfigError)
+    schedule = market_schedule(raw, ConfigError)
 
     live = raw.get("live_polling") or {}
     bars = raw.get("bars") or {}
@@ -176,20 +130,9 @@ def load_settings(path: Path) -> Settings:
     except (TypeError, ValueError) as exc:
         raise ConfigError("bars.history_start must be YYYY-MM-DD") from exc
 
-    early_closes_raw = raw.get("early_closes") or []
-    if not isinstance(early_closes_raw, list):
-        raise ConfigError("early_closes must be a JSON list")
-    try:
-        early_close_days = frozenset(
-            date.fromisoformat(value) for value in early_closes_raw
-        )
-    except (TypeError, ValueError) as exc:
-        raise ConfigError("early_closes must contain YYYY-MM-DD strings") from exc
-
-    database_value = raw.get("database", "../data/trader.sqlite3")
-    database = Path(database_value).expanduser()
-    if not database.is_absolute():
-        database = (path.parent / database).resolve()
+    database = resolve_config_path(
+        raw, "database", path, "../data/trader.sqlite3", ConfigError
+    )
     oauth_store_value = provider.get(
         "oauth_store", "../data/robinhood_oauth.json"
     )
@@ -204,22 +147,8 @@ def load_settings(path: Path) -> Settings:
     )
 
     return Settings(
-        tickers=tuple(tickers),
-        live_start=require_clock(
-            live.get("start", "04:00"), "live_polling.start", error=ConfigError
-        ),
-        regular_close=require_clock(
-            live.get("regular_close", "16:00"),
-            "live_polling.regular_close",
-            error=ConfigError,
-        ),
-        early_close=require_clock(
-            live.get("early_close", "13:00"),
-            "live_polling.early_close",
-            error=ConfigError,
-        ),
-        early_close_days=early_close_days,
-        after_close_minutes=live_ints["after_close_minutes"],
+        tickers=tickers,
+        schedule=schedule,
         poll_seconds=live_ints["poll_seconds"],
         api_port=bars_ints["api_port"],
         history_start=history_start,
@@ -239,23 +168,7 @@ def load_settings(path: Path) -> Settings:
             timeout_seconds=provider_ints["timeout_seconds"],
             max_symbols_per_call=provider_ints["max_symbols_per_call"],
         ),
-        technical_specs=_technical_specs(raw),
     )
-
-
-def _collection_window(
-    settings: Settings, day: date
-) -> Tuple[datetime, datetime]:
-    close = (
-        settings.early_close
-        if day in settings.early_close_days
-        else settings.regular_close
-    )
-    start = datetime.combine(day, settings.live_start, tzinfo=EASTERN)
-    end = datetime.combine(day, close, tzinfo=EASTERN) + timedelta(
-        minutes=settings.after_close_minutes
-    )
-    return start.astimezone(UTC), end.astimezone(UTC)
 
 
 def _collection_chunks(
@@ -267,23 +180,12 @@ def _collection_chunks(
     final_day = end.astimezone(EASTERN).date()
     while day <= final_day:
         if day.weekday() < 5:
-            window_start, window_end = _collection_window(settings, day)
+            window_start, window_end = settings.schedule.collection_window(day)
             chunk_start = max(start, window_start)
             chunk_end = min(end, window_end)
             if chunk_start <= chunk_end:
                 yield chunk_start, chunk_end
         day += timedelta(days=1)
-
-
-def _fixed_chunks(
-    start: datetime, end: datetime, days: int
-) -> Iterator[Tuple[datetime, datetime]]:
-    cursor = start.astimezone(UTC)
-    end = end.astimezone(UTC)
-    while cursor < end:
-        chunk_end = min(end, cursor + timedelta(days=days))
-        yield cursor, chunk_end
-        cursor = chunk_end
 
 
 class Collector:
@@ -331,54 +233,6 @@ class Collector:
     ) -> Dict[str, int]:
         async with self.provider.session() as session:
             return await self._fetch_range(session, symbols, start, end, job)
-
-    async def fetch_metadata_range(
-        self, start: datetime, end: datetime, refreshed_after: int
-    ) -> Dict[str, int]:
-        total = Counter(requests=0, received=0, written=0)
-        start = start.astimezone(UTC)
-        end = end.astimezone(UTC)
-        if not self.settings.technical_specs:
-            return total
-        async with self.provider.session() as session:
-            for spec in self.settings.technical_specs:
-                for ticker in self.settings.tickers:
-                    latest = self.store.latest_metadata(
-                        ticker, spec, refreshed_after
-                    )
-                    cursor = start
-                    if latest is not None:
-                        cursor = max(
-                            cursor,
-                            datetime.fromtimestamp(latest + 60, UTC),
-                        )
-                    chunks = (
-                        _collection_chunks(self.settings, cursor, end)
-                        if spec.name == "pivot_points"
-                        else _fixed_chunks(cursor, end, TECHNICAL_CHUNK_DAYS)
-                    )
-                    for chunk_start, chunk_end in chunks:
-                        logging.info(
-                            "fetching %s %s from %s through %s",
-                            ticker,
-                            spec.name,
-                            _iso_utc(chunk_start),
-                            _iso_utc(chunk_end),
-                        )
-                        points = await session.fetch_technical(
-                            ticker,
-                            spec,
-                            _iso_utc(chunk_start),
-                            _iso_utc(chunk_end),
-                        )
-                        stats = self.store.store_metadata(
-                            points,
-                            ticker,
-                            spec,
-                        )
-                        total.update(stats)
-                        total["requests"] += 1
-        return total
 
     async def _run_jobs(
         self,
@@ -454,18 +308,11 @@ class Collector:
         scheduled_day: Optional[date] = None,
     ) -> Dict[str, int]:
         current = (now or datetime.now(UTC)).astimezone(UTC)
-        metadata_refreshed_after = _epoch(
-            datetime.combine(
-                datetime.now(UTC).date(), clock_time(0), tzinfo=UTC
-            )
-        )
         await self.backfill(current)
         start = current - timedelta(days=self.settings.sweep_days)
         scheduled = scheduled_day is not None
         if not scheduled:
             stats = await self.fetch_range(self.settings.tickers, start, current)
-            metadata_start = start
-            metadata_end = current
         else:
             target = scheduled_day.isoformat()
             selected = tuple(self.settings.tickers)
@@ -483,30 +330,11 @@ class Collector:
                 "sweep",
                 target,
                 jobs,
-                complete=False,
-            )
-            metadata_start = datetime.fromtimestamp(
-                min(job.window_start for job in jobs), UTC
-            )
-            metadata_end = datetime.fromtimestamp(
-                max(job.window_end for job in jobs), UTC
-            )
-        metadata_stats = await self.fetch_metadata_range(
-            metadata_start,
-            metadata_end,
-            metadata_refreshed_after,
-        )
-        if scheduled:
-            self.store.complete_jobs(
-                "sweep",
-                tuple(job.scope for job in jobs),
-                target,
             )
         prefix = "sweep complete"
         if scheduled_day is not None:
             prefix += " day=%s" % scheduled_day.isoformat()
         self._record(prefix, stats)
-        self._record("metadata sweep complete", metadata_stats)
         return stats
 
     async def backfill(
@@ -518,7 +346,7 @@ class Collector:
         selected = self.settings.tickers
         start = datetime.combine(
             self.settings.history_start,
-            self.settings.live_start,
+            self.settings.schedule.live_start,
             tzinfo=EASTERN,
         ).astimezone(UTC)
         target = self.settings.history_start.isoformat()
@@ -585,33 +413,14 @@ class Collector:
 
 def request_operation(settings: Settings, operation: str) -> dict:
     """Submit collection work to the one running bars writer."""
-    if operation not in ("poll", "backfill", "sweep"):
-        raise ConfigError("unknown bars operation: %s" % operation)
-    request = Request(
-        "http://127.0.0.1:%d/%s" % (settings.api_port, operation),
-        data=b"{}",
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    return request_service_operation(
+        settings.api_port,
+        operation,
+        ("poll", "backfill", "sweep"),
+        "bars",
+        "make install",
+        ConfigError,
     )
-    try:
-        with urlopen(request, timeout=5) as response:
-            payload = json.load(response)
-    except HTTPError as exc:
-        try:
-            detail = json.load(exc)
-        except (json.JSONDecodeError, OSError):
-            detail = {"error": exc.reason}
-        raise ConfigError(
-            "bars %s request failed: %s"
-            % (operation, detail.get("error", exc.reason))
-        ) from exc
-    except (URLError, OSError) as exc:
-        raise ConfigError(
-            "bars service is unavailable; start it with: make install"
-        ) from exc
-    if not isinstance(payload, dict):
-        raise ConfigError("bars service returned an invalid response")
-    return payload
 
 
 class Service:
@@ -685,7 +494,7 @@ class Service:
         if day.weekday() >= 5:
             return self.settings.idle_seconds
 
-        start, final_at = _collection_window(self.settings, day)
+        start, final_at = self.settings.schedule.collection_window(day)
         if start <= now < final_at:
             await self.collector.poll(now)
             return self.settings.poll_seconds
@@ -765,13 +574,7 @@ class _HealthHandler(BaseHTTPRequestHandler):
         if urlparse(self.path).path != "/health":
             self.send_error(404)
             return
-        payload = self.server.service.health()
-        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        write_json(self, self.server.service.health())
 
     def do_POST(self) -> None:  # noqa: N802
         operation = urlparse(self.path).path.lstrip("/")
@@ -784,12 +587,7 @@ class _HealthHandler(BaseHTTPRequestHandler):
             "operation": operation,
             "status": "queued" if accepted else "already_running",
         }
-        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        self.send_response(202 if accepted else 409)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        write_json(self, payload, 202 if accepted else 409)
 
     def log_message(self, format: str, *args) -> None:
         return

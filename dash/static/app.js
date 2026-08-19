@@ -1,4 +1,3 @@
-const $ = (selector) => document.querySelector(selector);
 const HISTORY_SESSIONS_PER_CHUNK = 5;
 const HISTORY_PARALLEL_REQUESTS = 3;
 const initialParameters = new URLSearchParams(window.location.search);
@@ -63,13 +62,6 @@ const pacificClock = new Intl.DateTimeFormat("en-US", {
   minute: "2-digit",
 });
 
-const pacificDateKeyFormat = new Intl.DateTimeFormat("en-US", {
-  timeZone: "America/Los_Angeles",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-});
-
 const pacificDateButton = new Intl.DateTimeFormat("en-US", {
   timeZone: "America/Los_Angeles",
   month: "short",
@@ -92,20 +84,6 @@ const compactFormat = new Intl.NumberFormat("en-US", {
   notation: "compact",
   maximumFractionDigits: 1,
 });
-
-function createElement(tag, className, text) {
-  const element = document.createElement(tag);
-  if (className) element.className = className;
-  if (text !== undefined) element.textContent = text;
-  return element;
-}
-
-async function api(path) {
-  const response = await fetch(path, { headers: { Accept: "application/json" } });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `Request failed (${response.status})`);
-  return payload;
-}
 
 function formatPrice(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "—";
@@ -148,16 +126,6 @@ function formatProbability(value) {
   const probability = Number(value);
   if (!Number.isFinite(probability)) return "—";
   return `${(probability * 100).toFixed(1)}%`;
-}
-
-function dateFromEpoch(epoch) {
-  return new Date(Number(epoch) * 1000);
-}
-
-function pacificDateKey(epoch) {
-  const parts = pacificDateKeyFormat.formatToParts(dateFromEpoch(epoch));
-  const value = (type) => parts.find((part) => part.type === type)?.value || "";
-  return `${value("year")}-${value("month")}-${value("day")}`;
 }
 
 function sessionDateRanges(bars) {
@@ -311,16 +279,6 @@ function commonMomentumIndicators(bars) {
     macd: movingAverageConvergenceDivergence(closes),
     roc: rateOfChange(closes, 10),
   };
-}
-
-function showToast(message) {
-  const toast = $("#toast");
-  toast.textContent = message;
-  toast.hidden = false;
-  clearTimeout(showToast.timer);
-  showToast.timer = setTimeout(() => {
-    toast.hidden = true;
-  }, 4200);
 }
 
 class PriceChart {
@@ -1858,7 +1816,7 @@ function focusDate(date) {
 
 async function loadOverview({ quiet = false } = {}) {
   try {
-    const overview = await api("/api/overview?compact=1");
+    const overview = await api("/api/overview");
     state.overview = overview;
     if (!state.ticker || !overview.quotes.some((quote) => quote.ticker === state.ticker)) {
       const preferred = overview.quotes.find((quote) => quote.ticker === "SNDK" && quote.available);

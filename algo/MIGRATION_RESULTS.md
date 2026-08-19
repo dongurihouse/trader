@@ -20,6 +20,9 @@ The discovery period ends 2026-07-31. The forward period is 2026-08-03 through
 | `gap_play` | risk 0.20 ATR, not 0.25 ATR | 6 / +10.052 | 3 / -0.378 | 9 / +9.674 | 77.8% | -1.698 |
 | `day_extreme_reversal` | literal 0.75-ATR range gate | 8 / +8.728 | 1 / +1.072 | 9 / +9.800 | 55.6% | -1.057 |
 
+The `day_extreme_reversal` row is historical. The current config raised its
+range gate to 1.0 ATR on 2026-08-18.
+
 The same July 6 replay produced 21 `orb5` trades, +27.669%, a 66.7% win
 rate, and -4.725% maximum drawdown. `sentiment_pullback` produced nine trades,
 +2.435%, a 66.7% win rate, and -0.861% maximum drawdown.

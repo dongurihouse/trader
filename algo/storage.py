@@ -248,24 +248,6 @@ def _session_bars(
 
 
 
-def _bar_metadata_value(
-    connection: sqlite3.Connection,
-    ticker: str,
-    ts: int,
-    name: str,
-    query_key: str,
-) -> Optional[str]:
-    row = connection.execute(
-        """
-        SELECT value FROM bar_metadata
-        WHERE ticker=? AND ts=? AND name=? AND params=?
-        """,
-        (ticker, ts, name, query_key),
-    ).fetchone()
-    return str(row["value"]) if row else None
-
-
-
 def _exact_bar(
     connection: sqlite3.Connection, ticker: str, ts: int
 ) -> Optional[sqlite3.Row]:

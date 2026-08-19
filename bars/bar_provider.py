@@ -4,7 +4,6 @@ import asyncio
 import fcntl
 import json
 import logging
-import math
 import os
 import webbrowser
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -31,7 +30,6 @@ from common.validation import is_symbol
 
 
 UTC = timezone.utc
-TECHNICAL_TOOL = "get_equity_technical_indicators"
 
 
 class ConfigError(ValueError):
@@ -44,15 +42,6 @@ class RelayError(RuntimeError):
 
 class RelayAuthRequired(RelayError):
     pass
-
-
-@dataclass(frozen=True)
-class TechnicalSpec:
-    name: str
-    params: str
-
-    def provider_params(self) -> dict:
-        return json.loads(self.params)
 
 
 @dataclass(frozen=True)
@@ -92,12 +81,6 @@ class BarRow:
     close: float
     volume: int
     interpolated: bool
-
-
-@dataclass(frozen=True)
-class MetadataPoint:
-    ts: int
-    value: str
 
 
 def _bar_row(ticker: str, raw: object) -> BarRow:
@@ -175,73 +158,6 @@ def _bar_rows(
             % ", ".join(sorted(missing))
         )
     return rows
-
-
-def _metadata_points(
-    payload: object,
-    ticker: str,
-    spec: TechnicalSpec,
-    start: datetime,
-    end: datetime,
-) -> List[MetadataPoint]:
-    data = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(data, dict) or data.get("symbol") != ticker:
-        raise RelayError("Robinhood indicator payload has the wrong symbol")
-    if data.get("interval") != "minute":
-        raise RelayError("Robinhood indicator payload has the wrong interval")
-    indicators = data.get("indicators")
-    if not isinstance(indicators, list) or len(indicators) != 1:
-        raise RelayError("Robinhood indicator payload must contain one indicator")
-    indicator = indicators[0]
-    if not isinstance(indicator, dict) or indicator.get("type") != spec.name:
-        raise RelayError("Robinhood indicator payload has the wrong type")
-    series = indicator.get("series")
-    if not isinstance(series, list):
-        raise RelayError("Robinhood indicator payload is missing its series")
-
-    points: List[MetadataPoint] = []
-    for raw in series:
-        if not isinstance(raw, dict):
-            raise RelayError("Robinhood returned a malformed indicator point")
-        try:
-            timestamp = _parse_iso(raw["begins_at"])
-        except (AttributeError, KeyError, TypeError, ValueError) as exc:
-            raise RelayError("Robinhood returned a malformed indicator point") from exc
-        if timestamp < start or timestamp > end:
-            raise RelayError(
-                "%s %s point %s is outside [%s, %s]"
-                % (
-                    ticker,
-                    spec.name,
-                    _iso_utc(timestamp),
-                    _iso_utc(start),
-                    _iso_utc(end),
-                )
-            )
-        values = {}
-        for name, value in raw.items():
-            if name == "begins_at" or value is None:
-                continue
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not math.isfinite(float(value))
-            ):
-                raise RelayError("Robinhood returned a non-numeric indicator value")
-            values[name] = value
-        if values:
-            points.append(
-                MetadataPoint(
-                    ts=_epoch(timestamp),
-                    value=json.dumps(
-                        values,
-                        allow_nan=False,
-                        separators=(",", ":"),
-                        sort_keys=True,
-                    ),
-                )
-            )
-    return points
 
 
 class FileTokenStorage(TokenStorage):
@@ -614,29 +530,3 @@ class RobinhoodClient:
             )
             rows.extend(_bar_rows(payload, batch, start, end))
         return rows
-
-    async def fetch_technical(
-        self,
-        ticker: str,
-        spec: TechnicalSpec,
-        start_iso: str,
-        end_iso: str,
-    ) -> List[MetadataPoint]:
-        start = _parse_iso(start_iso)
-        end = _parse_iso(end_iso)
-        arguments = {
-            "symbol": ticker,
-            "type": spec.name,
-            "interval": "minute",
-            "start_time": start_iso,
-            "end_time": end_iso,
-            "bounds": self.settings.bounds,
-            "output": "series",
-        }
-        arguments.update(spec.provider_params())
-        payload = await self.call_tool(
-            TECHNICAL_TOOL,
-            arguments,
-            "technical indicator request",
-        )
-        return _metadata_points(payload, ticker, spec, start, end)

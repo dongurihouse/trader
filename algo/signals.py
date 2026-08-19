@@ -7,7 +7,7 @@ import math
 import sqlite3
 import statistics
 from datetime import date, datetime, time as clock_time, timedelta
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Iterator, Mapping, Optional, Sequence
 
 from algo_types import (
     ConfigError,
@@ -23,11 +23,9 @@ from algo_types import (
     _parameter_number,
     _session_window,
 )
-from common.metadata import normalize_provider_indicator
 from common.validation import require_float
 from shape_signal import normalize_shape_parameters, shape_v1
 from storage import (
-    _bar_metadata_value,
     _bars,
     _exact_bar,
     _latest_close,
@@ -104,14 +102,6 @@ def _normalize_sma(
             parameters, "include_interpolated"
         ),
     }
-
-
-
-def _normalize_metadata(
-    parameters: Mapping[str, Any], tickers: tuple[str, ...]
-) -> Mapping[str, Any]:
-    name, query_key = normalize_provider_indicator(parameters, error=ConfigError)
-    return {"name": name, "query_key": query_key}
 
 
 
@@ -275,19 +265,6 @@ def _signal_sma(
 
 
 
-def _signal_metadata(
-    connection, ticker, ts, parameters, inputs, settings=None
-) -> Any:
-    value = _bar_metadata_value(
-        connection,
-        ticker,
-        ts,
-        parameters["name"],
-        parameters["query_key"],
-    )
-    return json.loads(value) if value is not None else None
-
-
 def _signal_session(
     connection, ticker, ts, parameters, inputs, settings
 ) -> Optional[dict[str, Any]]:
@@ -350,8 +327,7 @@ def _prior_complete_session_summaries(
     count: int,
 ) -> list[Mapping[str, float]]:
     summaries: list[Mapping[str, float]] = []
-    candidate = local_day - timedelta(days=1)
-    for _ in range(count * 4 + 60):
+    for candidate in _prior_days(local_day, count):
         summary = _complete_session_summary(
             connection, settings, ticker, candidate
         )
@@ -359,8 +335,12 @@ def _prior_complete_session_summaries(
             summaries.append(summary)
             if len(summaries) == count:
                 break
-        candidate -= timedelta(days=1)
     return summaries
+
+
+def _prior_days(local_day: date, count: int) -> Iterator[date]:
+    for offset in range(1, count * 4 + 61):
+        yield local_day - timedelta(days=offset)
 
 
 
@@ -537,8 +517,7 @@ def _prior_volume_baseline(
     if key in _RVOL_BASELINES:
         return _RVOL_BASELINES[key]
     sessions: list[list[float]] = []
-    candidate = local_day - timedelta(days=1)
-    for _ in range(baseline_sessions * 4 + 60):
+    for candidate in _prior_days(local_day, baseline_sessions):
         probe = int(
             datetime.combine(candidate, clock_time(12), tzinfo=EASTERN).timestamp()
         )
@@ -558,7 +537,6 @@ def _prior_volume_baseline(
             sessions.append([float(row["volume"]) for row in rows])
             if len(sessions) == baseline_sessions:
                 break
-        candidate -= timedelta(days=1)
     if len(sessions) < baseline_sessions:
         _RVOL_BASELINES[key] = None
         return None
@@ -771,8 +749,7 @@ def _relative_momentum_baseline(
     if key in _RELATIVE_MOMENTUM_BASELINES:
         return _RELATIVE_MOMENTUM_BASELINES[key]
     sessions: list[tuple[Optional[Mapping[str, float]], ...]] = []
-    candidate = local_day - timedelta(days=1)
-    for _ in range(baseline_sessions * 4 + 60):
+    for candidate in _prior_days(local_day, baseline_sessions):
         features = _complete_relative_momentum_session(
             connection,
             settings,
@@ -785,7 +762,6 @@ def _relative_momentum_baseline(
             sessions.append(features)
             if len(sessions) == baseline_sessions:
                 break
-        candidate -= timedelta(days=1)
     if not sessions:
         _RELATIVE_MOMENTUM_BASELINES[key] = None
         return None
@@ -1085,8 +1061,7 @@ def _prior_pullback_baseline(
     early_values: list[float] = []
     late_values: list[float] = []
     complete_sessions = 0
-    candidate = local_day - timedelta(days=1)
-    for _ in range(baseline_sessions * 4 + 60):
+    for candidate in _prior_days(local_day, baseline_sessions):
         probe = int(
             datetime.combine(candidate, clock_time(12), tzinfo=EASTERN).timestamp()
         )
@@ -1127,7 +1102,6 @@ def _prior_pullback_baseline(
             complete_sessions += 1
             if complete_sessions == baseline_sessions:
                 break
-        candidate -= timedelta(days=1)
     if (
         complete_sessions < min_baseline_sessions
         or not early_values
@@ -1362,9 +1336,6 @@ def _signal_shape_v1(connection, ticker, ts, parameters, inputs, settings) -> An
 
 SIGNAL_FUNCTIONS: dict[str, SignalSpec] = {
     "sma": SignalSpec(_signal_sma, ("bars",), _normalize_sma),
-    "metadata": SignalSpec(
-        _signal_metadata, ("bar_metadata",), _normalize_metadata
-    ),
     "session": SignalSpec(_signal_session, (), _no_parameters),
     "atr_session": SignalSpec(
         _signal_atr_session,

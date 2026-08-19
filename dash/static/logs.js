@@ -1,5 +1,3 @@
-const $ = (selector) => document.querySelector(selector);
-
 const state = {
   service: "",
   level: "",
@@ -17,30 +15,6 @@ const pacificDateTime = new Intl.DateTimeFormat("en-US", {
 });
 
 const numberFormat = new Intl.NumberFormat("en-US");
-
-function createElement(tag, className, text) {
-  const element = document.createElement(tag);
-  if (className) element.className = className;
-  if (text !== undefined) element.textContent = text;
-  return element;
-}
-
-function showToast(message) {
-  const toast = $("#toast");
-  toast.textContent = message;
-  toast.hidden = false;
-  clearTimeout(showToast.timer);
-  showToast.timer = setTimeout(() => {
-    toast.hidden = true;
-  }, 4200);
-}
-
-async function api(path) {
-  const response = await fetch(path, { headers: { Accept: "application/json" } });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `Request failed (${response.status})`);
-  return payload;
-}
 
 async function loadLogs() {
   const request = ++state.request;
