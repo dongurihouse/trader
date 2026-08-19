@@ -137,7 +137,7 @@ It has these algo functions:
 | --- | --- | --- |
 | `crossover` | `fast`, `slow` | none |
 | `range_breakout` | `session`, `opening_range`, `rvol_open`, `last_close` | `direction`, `target_r`, `min_rvol`, `entry_cutoff_minutes`, `flat_minutes` |
-| `sentiment_pullback` | `session`, `opening_sentiment`, `pullback`, `last_close` | `early_minutes`, `early_hold_minutes`, `late_hold_minutes`, `take_profit_pct`, `stop_loss_pct`, `pattern_exit`, `flat_minutes`, `capital_fraction` |
+| `sentiment_pullback` | `session`, `opening_sentiment`, `pullback`, `last_close` | `early_minutes`, `early_hold_minutes`, `late_hold_minutes`, `take_profit_pct`, `stop_loss_pct`, `giveback_pct`, `pattern_exit`, `flat_minutes`, `capital_fraction` |
 | `momentum_continuation` | `session`, `first30_ret`, `atr_session`, `rvol_open`, `last_close` | `first30_min_pct`, `risk_atr_frac`, `target_r`, `min_rvol`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
 | `failed_gap` | `session`, `prior_session`, `atr_session`, `last_close` | `gap_min_pct`, `risk_atr_frac`, `target_r`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
 | `gap_continuation` | `session`, `prior_session`, `opening_range`, `atr_session`, `rvol_open`, `last_close` | `gap_min_pct`, `risk_atr_frac`, `target_r`, `min_rvol`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
@@ -168,9 +168,11 @@ A late entry also requires the current market return to retain at least
 statistically extreme move in each regime can enter, so a rejected setup cannot
 become a later chase entry. It enters at most once per session, never adds to an
 open unit, and exits on its configured close-based profit, close-based loss,
-early or late time limit, market-pattern, or end-of-session rule. One unit maps
-to at most 50% of capital for performance reporting; broker submission uses its
-separately configured fixed quantity.
+give-back from its best close since entry, early or late time limit,
+market-pattern, or end-of-session rule. The best profit is floored at zero, so
+the give-back rule also limits a trade that never becomes profitable. One unit
+maps to at most 50% of capital for performance reporting; broker submission
+uses its separately configured fixed quantity.
 
 The four migrated algorithms run on every configured ticker and enter at most
 once per regular session. `lateday_momentum` follows a large first-half-hour

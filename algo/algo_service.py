@@ -2141,6 +2141,7 @@ def _algo_sentiment_pullback(context: AlgoContext) -> tuple[bool, bool, int]:
     late_hold = int(context.parameters["late_hold_minutes"])
     take_profit = float(context.parameters["take_profit_pct"])
     stop_loss = float(context.parameters["stop_loss_pct"])
+    giveback_pct = float(context.parameters["giveback_pct"])
     flat_minutes = float(context.parameters["flat_minutes"])
     pattern_exit = bool(context.parameters["pattern_exit"])
     if session is None or price is None:
@@ -2149,10 +2150,21 @@ def _algo_sentiment_pullback(context: AlgoContext) -> tuple[bool, bool, int]:
     if context.open_entries:
         entry = context.open_entries[0]
         direction = int(entry["direction"])
+        entry_price = float(entry["price"])
         elapsed = (int(session["ts"]) - int(entry["ts"])) / 60.0
         entry_minute = (int(entry["ts"]) - int(session["open_ts"])) / 60.0
         hold_minutes = early_hold if entry_minute < early_minutes else late_hold
-        pnl_pct = direction * (float(price) / float(entry["price"]) - 1.0) * 100.0
+        pnl_pct = direction * (float(price) / entry_price - 1.0) * 100.0
+        peak_pnl_pct = max(
+            0.0,
+            *(
+                direction * (float(row["close"]) / entry_price - 1.0) * 100.0
+                for row in context.read_bars(
+                    int(entry["ts"]), int(session["ts"])
+                )
+            ),
+        )
+        gave_back = pnl_pct <= peak_pnl_pct - giveback_pct
         pattern_broke = (
             pattern_exit
             and (sentiment is None or not bool(sentiment["pattern_valid"]))
@@ -2160,6 +2172,7 @@ def _algo_sentiment_pullback(context: AlgoContext) -> tuple[bool, bool, int]:
         if (
             (take_profit > 0.0 and pnl_pct >= take_profit)
             or (stop_loss > 0.0 and pnl_pct <= -stop_loss)
+            or gave_back
             or elapsed >= hold_minutes
             or pattern_broke
             or float(session["to_close"]) <= flat_minutes
@@ -2533,20 +2546,25 @@ def _normalize_sentiment_pullback(
         "late_hold_minutes",
         "take_profit_pct",
         "stop_loss_pct",
+        "giveback_pct",
         "pattern_exit",
         "flat_minutes",
         "capital_fraction",
     }
     _parameter_keys(parameters, names)
     capital_fraction = _parameter_number(parameters, "capital_fraction")
+    giveback_pct = _parameter_number(parameters, "giveback_pct")
     if capital_fraction <= 0.0 or capital_fraction > 0.5:
         raise ConfigError("capital_fraction must be > 0 and <= 0.5")
+    if giveback_pct <= 0.0:
+        raise ConfigError("giveback_pct must be > 0")
     return {
         "early_minutes": _parameter_int(parameters, "early_minutes"),
         "early_hold_minutes": _parameter_int(parameters, "early_hold_minutes"),
         "late_hold_minutes": _parameter_int(parameters, "late_hold_minutes"),
         "take_profit_pct": _parameter_number(parameters, "take_profit_pct"),
         "stop_loss_pct": _parameter_number(parameters, "stop_loss_pct"),
+        "giveback_pct": giveback_pct,
         "pattern_exit": _parameter_bool(parameters, "pattern_exit"),
         "flat_minutes": _parameter_number(parameters, "flat_minutes"),
         "capital_fraction": capital_fraction,

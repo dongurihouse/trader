@@ -242,6 +242,7 @@
         "late_hold_minutes": 10,
         "take_profit_pct": 1.0,
         "stop_loss_pct": 1.5,
+        "giveback_pct": 0.9,
         "pattern_exit": true,
         "flat_minutes": 5,
         "capital_fraction": 0.5
