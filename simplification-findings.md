@@ -299,3 +299,187 @@ cache lifetime, only the plumbing.
 
 Validate each engine change (steps 4 through 8) by replay against stored bars,
 because there is no automated test to catch a regression.
+
+---
+
+# Round 2 findings (2026-08-19)
+
+Anchors below are current as of commit `e83eb00`. The round-1 line numbers above
+may have drifted, because the code grew after the first pass. The tracked source
+is now about 19,400 lines. Round 1 removed 711 lines; new features added more
+than that back: a trades page (`trades.js`, `trades.html`), a Robinhood snapshot
+worker (`robinhood_snapshot.py`), a scan tool (`close_scan.py`), and a
+`second_leg` algo. Round 2 audits that new growth and the engine internals that
+round 1 did not record.
+
+Round 1 findings 2 through 11 remain open. Round 2 adds seven new findings and
+four verified-clean results.
+
+## Round 2 priority table
+
+| # | Finding | Type | Area | Est. lines | Risk |
+|---|---------|------|------|-----------:|------|
+| R1 | Dead example nodes: `sma` signal and `crossover` algo | delete | algo | ~53 | none |
+| R2 | `trades.js` re-copies formatters that belong in `common.js` | reuse | dash | ~60 | low |
+| R3 | `robinhood_snapshot.py` clones the `robinhood_order.py` stdin CLI | reuse | dash+algo | ~25 | low |
+| R4 | `close_scan.py` reimplements production drive/ATR/gate math | decide | tools | 35–290 | low |
+| R5 | Storage query family has no shared window/query helpers | reuse | algo | 30–40 | low |
+| R6 | `_write_result` builds output rows in two identical loops | reuse | algo | ~10 | none |
+| R7 | The two service `main()` CLIs duplicate scaffolding | reuse | bars+algo | ~20 | low |
+
+## Dead code
+
+### R1. Two registered nodes are dead example scaffolding
+
+The `sma` signal and the `crossover` algo are registered, defined, and used
+nowhere. Neither appears in `config/config.json`, and no code references them
+outside their own definitions. They are the original reference examples from the
+first build. `design.md` already documents the node pattern, so dead nodes are
+not needed as examples.
+
+- [signals.py:172](algo/signals.py:172) `_signal_sma`,
+  [signals.py:84](algo/signals.py:84) `_normalize_sma`,
+  [signals.py:876](algo/signals.py:876) the registry entry, and the now-orphaned
+  `BAR_FIELDS` at [signals.py:34](algo/signals.py:34).
+- [strategies.py:21](algo/strategies.py:21) `_algo_crossover` and
+  [strategies.py:863](algo/strategies.py:863) the registry entry.
+
+Removing both is a pure deletion of about 53 lines.
+
+Keep `second_leg`. It is also registered without a config entry, but it is a
+recent, intentional addition ([strategies.py:608](algo/strategies.py:608),
+commit `a003e1d`) that waits for config enablement. It is work in progress, not
+dead code.
+
+## New-file duplication
+
+### R2. The new trades page re-copied the formatter duplication
+
+Round 1 finding 8 flagged duplicated frontend formatters. The new
+`dash/static/trades.js` added a fresh copy of them, so the duplication grew
+instead of shrinking. Each page bundles `common.js` plus its own script, so
+these are true copies.
+
+- `signed` ([trades.js:39](dash/static/trades.js:39)), `rate`
+  ([trades.js:45](dash/static/trades.js:45)), `valueClass`
+  ([trades.js:50](dash/static/trades.js:50)), and `duration`
+  ([trades.js:56](dash/static/trades.js:56)) repeat the same helpers in
+  `algos.js`.
+- `wholeNumber`, `localTime`, `titleCase`, and `tradeChartUrl` repeat
+  `numberFormat`, `pacificDateTime`, `humanize`, and `chartUrl`.
+- Three card builders (`summaryCard`, `shadowMetric`, `accountMetric`) plus the
+  `algos.js` `metric` are one parameterized helper.
+
+Move the shared subset to `common.js`. This removes about 60 lines from
+`trades.js` and fixes finding 8 at the same time. Do finding 8 now; the cost of
+delay is one fresh copy per new page.
+
+### R3. The snapshot worker clones the order worker's command shell
+
+`dash/robinhood_snapshot.py` and `algo/robinhood_order.py` are both standalone
+scripts that read one JSON request from standard input and print one JSON result.
+Their `main()` functions are near-identical: the same argument-count guard, the
+same `json.load(sys.stdin)`, the same `except BaseException` to stderr, the same
+compact `json.dumps`, and the same `sys.path` bootstrap.
+
+- [robinhood_snapshot.py:213](dash/robinhood_snapshot.py:213) `main`
+- [robinhood_order.py:83](algo/robinhood_order.py:83) `main`
+- The `_decimal` helper ([robinhood_snapshot.py:32](dash/robinhood_snapshot.py:32))
+  repeats the finite-Decimal check in `_filled_quantity`
+  ([robinhood_order.py:22](algo/robinhood_order.py:22)).
+
+Add one shared `stdin_cli(worker)` helper and one shared `decimal` helper. This
+removes about 25 lines. The snapshot worker already reuses `RobinhoodClient` and
+`session` correctly, so there is no auth duplication.
+
+The snapshot worker also over-validates trusted internal payloads. `_data`,
+`_quote_map`, and the `raw_portfolio`/`buying_power` fallbacks re-check dicts that
+`RobinhoodClient._payload` already validated. About 12 of those guard lines are
+removable.
+
+### R4. The scan tool reimplements production trading math
+
+`tools/close_scan.py` is a standalone calibration harness. It reads only through
+the dashboard `GET /api/bars` HTTP endpoint, never the database, so it cannot
+import the production code cleanly. As a result it holds a parallel copy of
+load-bearing math that will drift from the engine:
+
+- `compute_atr` ([close_scan.py:75](tools/close_scan.py:75)) re-derives the
+  gap-inclusive true-range ATR of `_signal_atr_session` in `signals.py`.
+- `drive_pct` ([close_scan.py:104](tools/close_scan.py:104)) and `gates_pass`
+  ([close_scan.py:128](tools/close_scan.py:128)) re-derive the `opening_drive`
+  entry gate.
+- `run_immediate` ([close_scan.py:134](tools/close_scan.py:134)) and `run_break`
+  ([close_scan.py:156](tools/close_scan.py:156)) are about 90 percent identical.
+
+Decision needed: this is scratch calibration tooling with a hardcoded split date.
+Either keep it out of the committed tree, or accept the drift as the price of a
+research harness. If it stays, merge the two run functions (about 25 lines) and
+trim the 19-line docstring. Removing it entirely reclaims about 290 lines.
+
+## Engine internals
+
+### R5. The storage query family has no shared window or query helper
+
+Four functions select the work list: `_pending`, `_recalculation_pairs`,
+`_incomplete_algo_kinds`, and `_targeted_recalculation_pairs`. They share one
+skeleton: for each ticker, read the latest bar, compute a cutoff, query the
+window, then round-robin. The shared pieces are copied, not factored:
+
+- The evaluation-window cutoff `evaluation_days * 86_400` is written five times
+  ([storage.py:724](algo/storage.py:724), 967, 1024, 1060, 1106). The window
+  boundary has no single definition.
+- `SELECT MAX(ts) FROM bars WHERE ticker=?` is written seven times.
+- The placeholder idiom `",".join("?" for _ in ...)` is written seven times.
+
+Add small helpers: `_latest_bar(connection, ticker)`, `_window_start(settings,
+latest)`, `_placeholders(n)`, and a `_ticker_windows` generator that yields
+`(ticker, latest, cutoff)`. This removes about 30 to 40 lines and, more
+important, gives the evaluation window one home.
+
+### R6. `_write_result` builds output rows twice
+
+`_write_result` loops over `result["signals"]`
+([storage.py:1306](algo/storage.py:1306)) and then over `result["algos"]`
+([storage.py:1316](algo/storage.py:1316)) with byte-identical bodies. Both build
+`(ticker, ts, name, _serialized[name], computed_at)`. `result["_serialized"]`
+already holds both sets. Collapse to one loop over `_serialized`. This removes
+about 10 lines.
+
+### R7. The two service command shells duplicate scaffolding
+
+`bars_service.py` and `algo_service.py` each build an argument parser with
+`once`, `status`, and `logs` subcommands, the same `--verbose` logging setup, and
+the same `except (...): logging.error; return 1` wrapper.
+
+- [bars_service.py:597](bars/bars_service.py:597) `_parser`,
+  [bars_service.py:620](bars/bars_service.py:620) `main`
+- [algo_service.py:1642](algo/algo_service.py:1642) `_parser`,
+  [algo_service.py:1661](algo/algo_service.py:1661) `main`
+
+Fold the shared `status`, `logs`, and `once` handling into the same
+`common/service.py` extraction as round-1 finding 3. This is one consolidation,
+not two.
+
+## Verified clean — do not re-investigate
+
+- **The stylesheet has no dead rules now.** `styles.css` grew to about 3,090
+  lines because new features outpaced the round-1 cleanup, not because dead rules
+  returned. A fresh scan found nine unreferenced class names; all nine are built
+  dynamically (`is-${state}` in `header.js`, `rank-${index}` in `app.js`, and the
+  order-status names in `trades.js`). The round-1 dead-CSS cleanup holds.
+- **`second_leg` is intentional, not dead.** See R1.
+- **The snapshot worker reuses auth correctly.** It imports `RobinhoodClient` and
+  `session`; it does not re-implement OAuth.
+- **The targeted-recalculation path is a real optimization.** `run_targeted_core`
+  and the `_targeted_*` helpers let an algo-only config change reuse stored
+  upstream outputs instead of recomputing every signal. That is the main
+  algo-tuning loop. Leave it, as with the parallel path.
+
+## Round 2 totals
+
+In-place consolidation removes about 200 to 225 lines (R1 53, R2 60, R3 25, R5 40,
+R6 10, R7 20, plus small snapshot trims). Removing `close_scan.py` from the tree
+(R4) reclaims about 290 more. The highest-value items are R1 (pure deletion) and
+R2 with finding 8 (stop the formatter duplication before it spreads to the next
+page).
