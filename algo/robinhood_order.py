@@ -11,21 +11,22 @@ from typing import Any, Mapping
 
 
 TRADER_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(TRADER_ROOT))
 sys.path.insert(0, str(TRADER_ROOT / "bars"))
 
-from bars_service import RobinhoodClient, load_settings  # noqa: E402
+from bar_provider import RobinhoodClient  # noqa: E402
+from bars_service import load_settings  # noqa: E402
 
 
 async def _place(config_path: Path, request: Mapping[str, Any]) -> dict:
     settings = load_settings(config_path)
     client = RobinhoodClient(settings.provider)
     async with client.session() as active:
-        result = await active._request(
-            "place equity order",
+        return await active.call_tool(
             "place_equity_order",
             dict(request),
+            "place equity order",
         )
-    return active._payload(result)
 
 
 def main() -> int:
