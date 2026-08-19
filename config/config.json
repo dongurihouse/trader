@@ -44,6 +44,10 @@
       "QQQ": {
         "long": "TQQQ",
         "short": "SQQQ"
+      },
+      "SPCX": {
+        "long": "SPCH",
+        "short": "SSPC"
       }
     }
   },
