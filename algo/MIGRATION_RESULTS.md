@@ -90,19 +90,21 @@ sizing, and the sample remains small.
 
 Measured on 2026-08-18 with the current six-ticker fixed-history ledger, the
 exit now tracks the best close-based profit since entry, floored at zero. It
-closes when the current close is 0.9 percentage points below that peak. The
+closes when the current close is 0.75 percentage points below that peak. The
 existing close-based 1.0% take-profit and 1.5% stop remain unchanged.
 
 Only the two flagged WDC shorts changed. The July 13 exit moved from minute 10
-at -0.8778% to minute 9 at -0.2140%. The July 28 exit moved from minute 6 at
+at -0.8778% to minute 7 at +0.1901%. The July 28 exit moved from minute 6 at
 -1.5669% to minute 3 at -1.0836%. WDC's five-trade return improved from
--1.5404% to -0.3933%.
+-1.5404% to +0.0108%.
 
-The exact service replay kept 22 trades and a 63.6% win rate. Gross return
-changed from +6.9821% to +8.1292%, and maximum drawdown changed from -2.3383%
-to -1.8550%. Discovery return through July 31 changed from +3.1610% to
-+4.3081%; forward return from August 3 remained +3.8211%. These results exclude
-fees, slippage, and sizing, and the sample remains small.
+The exact service replay kept 22 trades. Win rate changed from 63.6% to 68.2%,
+gross return changed from +6.9821% to +8.5333%, and maximum drawdown changed
+from -2.3383% to -1.8550%. Discovery return through July 31 changed from
++3.1610% to +4.7122%; forward return from August 3 remained +3.8211%. The
+intermediate 0.9 setting produced a 63.6% win rate and +8.1292% gross; tightening
+to 0.75 changed only the July 13 exit, adding one win and +0.4041%. These
+results exclude fees, slippage, and sizing, and the sample remains small.
 
 ## Lateday momentum win-rate refinement
 
