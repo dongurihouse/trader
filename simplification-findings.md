@@ -264,12 +264,12 @@ Together these remove about 30 to 40 lines.
 
 ### Bespoke memoization in the signals layer
 
-`signals.py` keeps six module-level cache dictionaries, each with a hand-built
+`signals.py` keeps five module-level cache dictionaries, each with a hand-built
 tuple key, and `clear_signal_caches` ([signals.py:59](algo/signals.py:59))
-clears all six. The pattern "check key, compute, store, return" repeats in
+clears all five. The pattern "check key, compute, store, return" repeats in
 `_complete_session_summary`, `_prior_volume_baseline`,
 `_complete_relative_momentum_session`, `_relative_momentum_baseline`,
-`_prior_pullback_baseline`, and `_signal_atr_session`.
+and `_signal_atr_session`.
 
 A single `session_cache` decorator keyed by `(database, ticker, day, params)`
 would remove the repeated bookkeeping. This is a medium-value cleanup; the keys
@@ -282,9 +282,9 @@ cache lifetime, only the plumbing.
 
 - **The broker and order path.** `broker.py`, `robinhood_order.py`, and the
   `broker_positions` writes in `storage.py` move real money and are correct.
-- **The individual signal math.** `_signal_pullback`, `_signal_relative_momentum`,
-  and `_signal_opening_sentiment` are long because the strategies are real, not
-  because the code is padded. Shrinking them risks the trading logic.
+- **The individual signal math.** `_signal_relative_momentum` is long because
+  the strategy is real, not because the code is padded. Shrinking it risks the
+  trading logic.
 - **The parallel recalculation path.** The `ProcessPoolExecutor` machinery in
   [algo_service.py:1100](algo/algo_service.py:1100) is heavy but it is a real
   speed optimization for a full recalculation across tickers. Leave it until a

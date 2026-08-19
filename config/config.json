@@ -45,7 +45,6 @@
   },
   "algo_display_names": {
     "orb5": "10-Minute Opening Range Breakout",
-    "sentiment_pullback": "Opening Sentiment Pullback",
     "lateday_momentum": "Late-Day Momentum Continuation",
     "failed_gap_reversal": "Failed Gap Reversal",
     "gap_play": "15-Minute Gap Continuation",
@@ -115,31 +114,6 @@
         "include_interpolated": false
       }
     },
-    "opening_sentiment": {
-      "inputs": ["bars", "session"],
-      "params": {
-        "market_tickers": ["SPY", "QQQ"],
-        "minutes": 5,
-        "min_market_move_pct": 0.0,
-        "require_ticker_agreement": true
-      }
-    },
-    "pullback": {
-      "inputs": ["bars", "session", "opening_sentiment"],
-      "params": {
-        "early_minutes": 30,
-        "early_window_minutes": 5,
-        "late_window_minutes": 30,
-        "late_market_strength_ratio": 1.0,
-        "max_threshold_ratio": 1.25,
-        "max_ticker_flip_ratio": 0.5,
-        "entry_cutoff_minutes": 60,
-        "baseline_sessions": 20,
-        "min_baseline_sessions": 5,
-        "percentile": 0.9,
-        "min_extreme_distance_pct": 0.5
-      }
-    },
     "shape": {
       "function": "shape_v1",
       "inputs": ["bars"],
@@ -164,25 +138,6 @@
         "minute_max": 15,
         "entry_cutoff_minutes": 10,
         "flat_minutes": 5
-      }
-    },
-    "sentiment_pullback": {
-      "inputs": ["session", "opening_sentiment", "pullback", "last_close"],
-      "params": {
-        "early_minutes": 30,
-        "early_hold_minutes": 3,
-        "late_hold_minutes": 10,
-        "tp_vol_mult": 1.9281,
-        "gb_vol_mult": 1.4461,
-        "sl_vol_mult": 2.8921,
-        "vol_percentile": 0.9,
-        "vol_lookback_minutes": 240,
-        "vol_floor_pct": 0.1,
-        "vol_cap_pct": 0.45,
-        "min_vol_bars": 30,
-        "pattern_exit": true,
-        "flat_minutes": 5,
-        "capital_fraction": 0.5
       }
     },
     "lateday_momentum": {

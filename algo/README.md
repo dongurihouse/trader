@@ -44,8 +44,8 @@ good-for-day terms and a deterministic idempotency key. The account comes from
 the environment variable named by `broker.account_env`. The initial config maps
 SNDK to SNXX/SNDQ and keeps quantity at zero.
 
-The default config enables `orb5`, `sentiment_pullback`, and four migrations
-from the DT roster. The `shape` path forecast remains read-only.
+The default config enables `orb5`, `opening_drive`, and four migrations from
+the DT roster. The `shape` path forecast remains read-only.
 
 The service exposes process health and the current operation at
 `http://127.0.0.1:8791/health` for Dash. Its loopback API accepts
@@ -92,8 +92,6 @@ The service has these signal functions:
 | `rvol_open` | `cap_bars`, `baseline_sessions` | number or `null` |
 | `relative_momentum` | `window_minutes`, `baseline_sessions`, `min_sessions`, `time_tolerance_minutes`, `min_momentum_pct`, `strong_percentile` | direction, current move and duration, relative percentiles, and strength |
 | `last_close` | `include_interpolated` | number or `null` |
-| `opening_sentiment` | `market_tickers`, `minutes`, `min_market_move_pct`, `require_ticker_agreement` | fixed opening direction, current-ticker agreement, and live pattern validity |
-| `pullback` | `early_minutes`, `early_window_minutes`, `late_window_minutes`, `late_market_strength_ratio`, `max_threshold_ratio`, `max_ticker_flip_ratio`, `entry_cutoff_minutes`, `baseline_sessions`, `min_baseline_sessions`, `percentile`, `min_extreme_distance_pct` | current countertrend move, prior-session threshold, and entry trigger |
 | `shape_v1` | `history_sessions`, `min_sessions`, `stride_minutes`, `shape_base_rate_w`, `age_halflife_days`, `support_k` | path funnel, eight shape probabilities, and evidence; otherwise `null` |
 
 Supported fields are `open`, `high`, `low`, `close`, and `volume`. Every read
@@ -144,7 +142,6 @@ It has these algo functions:
 | --- | --- | --- |
 | `crossover` | `fast`, `slow` | none |
 | `range_breakout` | `session`, `opening_range`, `rvol_open`, `last_close` | `direction`, `target_r`, `min_rvol`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
-| `sentiment_pullback` | `session`, `opening_sentiment`, `pullback`, `last_close` | `early_minutes`, `early_hold_minutes`, `late_hold_minutes`, `tp_vol_mult`, `gb_vol_mult`, `sl_vol_mult`, `vol_percentile`, `vol_lookback_minutes`, `vol_floor_pct`, `vol_cap_pct`, `min_vol_bars`, `pattern_exit`, `flat_minutes`, `capital_fraction` |
 | `momentum_continuation` | `session`, `first30_ret`, `atr_session`, `rvol_open`, `last_close` | `first30_min_pct`, `risk_atr_frac`, `target_r`, `min_rvol`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
 | `failed_gap` | `session`, `prior_session`, `atr_session`, `last_close` | `gap_min_pct`, `risk_atr_frac`, `target_r`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
 | `gap_continuation` | `session`, `prior_session`, `opening_range`, `atr_session`, `rvol_open`, `last_close` | `gap_min_pct`, `risk_atr_frac`, `target_r`, `min_rvol`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
@@ -162,26 +159,6 @@ minute 15 (09:45 ET). The opposite range edge is the stop and the target is
 `0.10R`. It enters at most once per session, blocks new entries inside ten
 minutes to close, and closes any open unit five minutes before the configured
 regular or early close.
-
-`sentiment_pullback` fixes the opening direction after five minutes from the
-median SPY and QQQ return and requires the ticker being evaluated to agree. It
-then enters immediately on an unusually large move against that direction. The
-move uses a five-minute window inside the first 30 minutes and a 30-minute
-window later. Its threshold uses only complete prior sessions. A move more than
-`max_threshold_ratio` times that threshold is treated as an overshoot instead
-of a pullback. If the ticker crosses the session open against its fixed opening
-direction, the opposite-side return must remain below
-`max_ticker_flip_ratio` times the magnitude of its original five-minute move.
-A late entry also requires the current market return to retain at least
-`late_market_strength_ratio` times its opening magnitude. Only the first
-statistically extreme move in each regime can enter, so a rejected setup cannot
-become a later chase entry. It enters at most once per session, never adds to an
-open unit, and exits on its configured close-based profit, close-based loss,
-give-back from its best close since entry, early or late time limit,
-market-pattern, or end-of-session rule. The best profit is floored at zero, so
-the give-back rule also limits a trade that never becomes profitable. One unit
-maps to at most 50% of capital for performance reporting; broker submission
-uses its separately configured fixed quantity.
 
 The four migrated algorithms run on every configured ticker and enter at most
 once per regular session. `lateday_momentum` follows a large first-half-hour
