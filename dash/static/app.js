@@ -10,6 +10,13 @@ function algorithmUrl(name) {
   return `/algos?${parameters}`;
 }
 
+function rememberChartView() {
+  window.traderHeader?.rememberView("chart", {
+    ticker: state.ticker,
+    date: state.selectedDate,
+  });
+}
+
 function tradePairKey(pair) {
   return `${pair.entry.algo}|${Number(pair.entry.ts)}`;
 }
@@ -1832,6 +1839,7 @@ function renderDateSelection(date) {
     button.setAttribute("aria-pressed", String(active));
   });
   renderDayTrades(date);
+  rememberChartView();
 }
 
 function focusDate(date) {

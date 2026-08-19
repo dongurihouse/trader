@@ -388,6 +388,7 @@ function selectAlgorithm(name, { focus = false } = {}) {
     .find((button) => button.dataset.algoName === name);
   selectedButton?.scrollIntoView({ block: "nearest", inline: "center" });
   if (focus) selectedButton?.focus();
+  window.traderHeader?.rememberView("algos", { algo: selectedAlgorithmName });
 }
 
 function render(payload) {
@@ -412,6 +413,7 @@ function render(payload) {
   }
   renderAlgorithmSwitcher();
   renderSelectedAlgorithm();
+  window.traderHeader?.rememberView("algos", { algo: selectedAlgorithmName });
   if (revealSelectedAlgorithm) {
     revealSelectedAlgorithm = false;
     requestAnimationFrame(() => {

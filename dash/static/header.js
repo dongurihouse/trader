@@ -1,9 +1,48 @@
 (() => {
+  const viewPaths = Object.freeze({ chart: "/", algos: "/algos" });
+  const viewStoragePrefix = "trader.last-view.";
   const button = document.querySelector("#trader-menu-button");
   const dropdown = document.querySelector("#trader-menu-dropdown");
   if (!button || !dropdown) return;
 
   let healthRequest = 0;
+
+  function storedViewUrl(view) {
+    const expectedPath = viewPaths[view];
+    if (!expectedPath) return null;
+    try {
+      const stored = sessionStorage.getItem(`${viewStoragePrefix}${view}`);
+      if (!stored) return null;
+      const url = new URL(stored, window.location.origin);
+      if (url.origin !== window.location.origin || url.pathname !== expectedPath) return null;
+      return `${url.pathname}${url.search}`;
+    } catch {
+      return null;
+    }
+  }
+
+  function updateViewLink(view) {
+    const link = document.querySelector(`[data-dashboard-view="${view}"]`);
+    if (!link || link.getAttribute("aria-current") === "page") return;
+    link.href = storedViewUrl(view) || viewPaths[view];
+  }
+
+  function rememberView(view, parameters = {}) {
+    const path = viewPaths[view];
+    if (!path) return;
+    const url = new URL(path, window.location.origin);
+    Object.entries(parameters).forEach(([name, value]) => {
+      if (value !== null && value !== undefined && value !== "") {
+        url.searchParams.set(name, String(value));
+      }
+    });
+    try {
+      sessionStorage.setItem(`${viewStoragePrefix}${view}`, `${url.pathname}${url.search}`);
+    } catch {
+      return;
+    }
+    updateViewLink(view);
+  }
 
   function setOpen(open) {
     button.setAttribute("aria-expanded", String(open));
@@ -103,7 +142,8 @@
     button.focus();
   });
 
-  window.traderHeader = Object.freeze({ setOpen });
+  Object.keys(viewPaths).forEach(updateViewLink);
+  window.traderHeader = Object.freeze({ rememberView, setOpen });
   loadHealth();
   setInterval(loadHealth, 5000);
 })();
