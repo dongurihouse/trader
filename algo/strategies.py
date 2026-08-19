@@ -605,6 +605,86 @@ def _algo_opening_drive(context: AlgoContext) -> tuple[bool, bool, int]:
     return True, False, 1 if drive_pct > 0.0 else -1
 
 
+def _algo_second_leg(context: AlgoContext) -> tuple[bool, bool, int]:
+    session_name, atr_name, price_name = context.inputs
+    session = context.inputs[session_name]
+    atr_session = require_float(
+        context.inputs[atr_name],
+        "atr_session",
+        nullable=True,
+        error=EvaluationError,
+    )
+    price = require_float(
+        context.inputs[price_name],
+        "last_close",
+        nullable=True,
+        error=EvaluationError,
+    )
+    confirm_minutes = int(context.parameters["confirm_minutes"])
+    min_drive_pct = float(context.parameters["min_drive_pct"])
+    drive_atr_frac = float(context.parameters["drive_atr_frac"])
+    target_frac = float(context.parameters["target_frac"])
+    stop_frac = float(context.parameters["stop_frac"])
+    minute_min = int(context.parameters["minute_min"])
+    minute_max = int(context.parameters["minute_max"])
+    entry_cutoff = float(context.parameters["entry_cutoff_minutes"])
+    flat_minutes = float(context.parameters["flat_minutes"])
+    if session is None or atr_session is None or price is None:
+        return False, False, 0
+    leg1_pct = _opening_drive_pct(context, session, confirm_minutes)
+    if context.open_entries:
+        entry = context.open_entries[0]
+        direction = int(entry["direction"])
+        entry_price = float(entry["price"])
+        if leg1_pct is None:
+            return False, True, direction
+        move = abs(leg1_pct) / 100.0 * entry_price
+        target = entry_price + direction * target_frac * move
+        stop = entry_price - direction * stop_frac * move
+        hit_stop = (
+            float(price) <= stop if direction == 1 else float(price) >= stop
+        )
+        hit_target = (
+            float(price) >= target if direction == 1 else float(price) <= target
+        )
+        if (
+            move <= 0.0
+            or hit_stop
+            or hit_target
+            or float(session["to_close"]) <= flat_minutes
+        ):
+            return False, True, direction
+        return False, False, 0
+    if _algo_has_session_entry(context):
+        return False, False, 0
+    window_min, window_max = _algo_window(session, minute_min, minute_max)
+    minute = int(session["minute"])
+    if (
+        minute < window_min
+        or minute >= window_max
+        or float(session["to_close"]) < entry_cutoff
+        or leg1_pct is None
+        or leg1_pct == 0.0
+        or abs(leg1_pct)
+        < max(min_drive_pct, drive_atr_frac * float(atr_session) * 100.0)
+    ):
+        return False, False, 0
+    rows = context.read_bars(int(session["open_ts"]), context.ts)
+    if not rows or int(rows[-1]["ts"]) != context.ts:
+        return False, False, 0
+    prior = rows[:-1]
+    if not prior:
+        return False, False, 0
+    current_close = float(rows[-1]["close"])
+    if leg1_pct > 0.0:
+        if current_close > max(float(row["high"]) for row in prior):
+            return True, False, 1
+        return False, False, 0
+    if current_close < min(float(row["low"]) for row in prior):
+        return True, False, -1
+    return False, False, 0
+
+
 
 def _normalize_range_breakout(
     parameters: Mapping[str, Any], tickers: tuple[str, ...]
@@ -754,6 +834,31 @@ def _normalize_opening_drive(
     return result
 
 
+def _normalize_second_leg(
+    parameters: Mapping[str, Any], tickers: tuple[str, ...]
+) -> Mapping[str, Any]:
+    base_parameters = dict(parameters)
+    confirm_minutes = base_parameters.pop("confirm_minutes", None)
+    result = _normalize_algo_window(
+        base_parameters,
+        tickers,
+        (
+            "min_drive_pct",
+            "drive_atr_frac",
+            "target_frac",
+            "stop_frac",
+            "entry_cutoff_minutes",
+            "flat_minutes",
+        ),
+    )
+    result["confirm_minutes"] = require_int(
+        confirm_minutes, "confirm_minutes", error=ConfigError
+    )
+    if result["minute_min"] < result["confirm_minutes"]:
+        raise ConfigError("minute_min must be at least confirm_minutes")
+    return result
+
+
 ALGO_FUNCTIONS: dict[str, AlgoSpec] = {
     "crossover": AlgoSpec(_algo_crossover, 2, _no_parameters),
     "range_breakout": AlgoSpec(
@@ -770,6 +875,7 @@ ALGO_FUNCTIONS: dict[str, AlgoSpec] = {
     "opening_drive": AlgoSpec(
         _algo_opening_drive, 3, _normalize_opening_drive
     ),
+    "second_leg": AlgoSpec(_algo_second_leg, 3, _normalize_second_leg),
 }
 
 

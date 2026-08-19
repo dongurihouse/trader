@@ -147,6 +147,7 @@ It has these algo functions:
 | `gap_continuation` | `session`, `prior_session`, `opening_range`, `atr_session`, `rvol_open`, `last_close` | `gap_min_pct`, `risk_atr_frac`, `target_r`, `min_rvol`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
 | `extreme_fade` | `session`, `session_extremes`, `atr_session`, `rvol_open`, `last_close` | `min_range_atr`, `stop_atr_frac`, `target_r`, `confirmation_bars`, `min_rvol`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
 | `opening_drive` | `session`, `atr_session`, `last_close` | `confirm_minutes`, `minute_min`, `minute_max`, `min_drive_pct`, `drive_atr_frac`, `target_frac`, `stop_frac`, `entry_cutoff_minutes`, `flat_minutes` |
+| `second_leg` | `session`, `atr_session`, `last_close` | `confirm_minutes`, `minute_min`, `minute_max`, `min_drive_pct`, `drive_atr_frac`, `target_frac`, `stop_frac`, `entry_cutoff_minutes`, `flat_minutes` |
 
 Every algo output is `[is_entry, is_close_all, direction]`. Direction is `1`
 for long, `-1` for short, and `0` when quiet. Both actions cannot be true. A
@@ -178,6 +179,13 @@ between minutes 15 and 20. The drive must clear an absolute floor and an
 ATR-scaled floor. The target is 0.25 times the drive and the stop is 1.0
 times the drive from the entry price. All exits use the minute close. The
 algo goes flat five minutes before the close.
+
+`second_leg` measures leg one from the session open to the minute-30 close.
+Leg one must clear an absolute floor and an ATR-scaled floor. The algo enters
+once per session, between minutes 35 and 90, on the first close beyond the
+session extreme in the leg-one direction. The target is 0.15 times leg one and
+the stop is 0.75 times leg one from the entry price. All exits use the minute
+close. The algo goes flat five minutes before the close.
 
 Example:
 

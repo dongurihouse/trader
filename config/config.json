@@ -228,6 +228,20 @@
         "entry_cutoff_minutes": 10,
         "flat_minutes": 5
       }
+    },
+    "second_leg": {
+      "inputs": ["session", "atr_session", "last_close"],
+      "params": {
+        "confirm_minutes": 30,
+        "minute_min": 35,
+        "minute_max": 90,
+        "min_drive_pct": 0.5,
+        "drive_atr_frac": 0.2,
+        "target_frac": 0.15,
+        "stop_frac": 0.75,
+        "entry_cutoff_minutes": 10,
+        "flat_minutes": 5
+      }
     }
   }
 }
