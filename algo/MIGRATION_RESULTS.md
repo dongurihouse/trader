@@ -246,3 +246,26 @@ before it attempts a targeted algo-tail repair, so an explicit bounded full
 recalculation can finish after its first replacement batch.
 
 These results exclude fees, slippage, and sizing; the sample remains small.
+
+## Second leg continuation
+
+Measured 2026-08-19 from the live service recalculation after the
+`second_leg` merge, then disabled the same day. The algo entered on the
+first close beyond the session extreme in the leg-one direction, minutes
+35 to 90, after a first-half-hour move above the same floors as
+`opening_drive`. The target was 0.15 times leg one and the stop was 0.75
+times leg one.
+
+The design scan promised 87.5% wins and +0.106 net per trade on 112
+simulated trades. The service replay delivered 40 trades, a 77.5% win
+rate against an 83.3% breakeven, -6.89 gross points, and a 0.79 profit
+factor. Three causes explain the gap. The scan filled exits on intrabar
+touches; production exits on the minute close, which a 0.15-times target
+rarely survives. The exact-bar requirement at the open and at minute 30
+dropped many sessions, so 112 scan trades became 40. WDC alone lost
+12.02 points at a 25% win rate; the scan had flagged WDC as the weakest
+ticker, and there is no per-algo ticker gate to exclude it.
+
+The config entry was removed; the `second_leg` function stays in
+strategies.py for a future retune. A retune must scan with close-based
+exits, a larger target fraction, and a steeper leg-one gate.
