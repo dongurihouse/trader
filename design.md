@@ -302,14 +302,34 @@ CREATE TABLE events (
 );
 
 CREATE TABLE trades (
-    ticker TEXT    NOT NULL,
-    algo   TEXT    NOT NULL,
-    ts     INTEGER NOT NULL,  -- exact entry or exit time, epoch seconds, UTC
-    action TEXT    NOT NULL,
-    direction INTEGER NOT NULL DEFAULT 1,  -- 1 long, -1 short
+    ticker          TEXT    NOT NULL,
+    algo            TEXT    NOT NULL,
+    ts              INTEGER NOT NULL,  -- exact entry or exit time, epoch seconds, UTC
+    action          TEXT    NOT NULL,
+    direction       INTEGER NOT NULL DEFAULT 1,  -- 1 long, -1 short
+    real_order      INTEGER NOT NULL DEFAULT 0,  -- broker accepted this action
+    broker_order_id TEXT,                       -- accepted entry order UUID
     PRIMARY KEY (ticker, algo, ts, action),
     CHECK (action IN ('entry', 'exit_all')),
-    CHECK (direction IN (-1, 1))
+    CHECK (direction IN (-1, 1)),
+    CHECK (real_order IN (0, 1))
+);
+
+CREATE TABLE broker_positions (
+    ticker          TEXT    NOT NULL,
+    algo            TEXT    NOT NULL,
+    entry_ts        INTEGER NOT NULL,
+    direction       INTEGER NOT NULL,
+    symbol          TEXT    NOT NULL,
+    entry_order_id  TEXT    NOT NULL UNIQUE,
+    exit_ts         INTEGER,
+    exit_order_id   TEXT,
+    PRIMARY KEY (ticker, algo, entry_ts),
+    CHECK (direction IN (-1, 1)),
+    CHECK (
+        (exit_ts IS NULL AND exit_order_id IS NULL) OR
+        (exit_ts IS NOT NULL AND exit_order_id IS NOT NULL)
+    )
 );
 
 CREATE TABLE outputs (
@@ -354,7 +374,11 @@ Notes:
 - `bars.interpolated` preserves Robinhood's gap-fill flag; no returned bar is
   discarded at ingest.
 - `trades` binds every row to one algo and direction; nothing consolidates
-  across algos. No price (recomputable) and no size (a row is one unit).
+  across algos. `real_order` and `broker_order_id` distinguish accepted live
+  broker entries from paper or rejected entries so exits close only real fills.
+  Signal price remains recomputable and a paper row remains one unit.
+- `broker_positions` is not derived. It keeps accepted entry order IDs through
+  algorithm recalculation and records the one accepted close for each entry.
 - `outputs` grows fastest; `logs` grows steadily.
 - `algos` contains only live definitions and has no version column.
 - `logs` is append-only and has supporting indexes.

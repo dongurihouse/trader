@@ -29,7 +29,7 @@
   },
   "broker": {
     "enabled": true,
-    "quantity": "0",
+    "dollar_amount": "100.00",
     "account_env": "TRADER_ROBINHOOD_ACCOUNT",
     "execution_tickers": {
       "SNDK": {
