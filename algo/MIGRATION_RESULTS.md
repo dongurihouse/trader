@@ -180,3 +180,31 @@ four remaining losses are flat exits smaller than 0.3 points. With the
 the change and 77.3% after it. The prior 14:45-entry window measured 25%
 wins on SNDK. The move to the close window on 2026-08-17 removed that
 failure mode; these parameters refine the close window.
+
+## Opening drive momentum
+
+Measured 2026-08-19 from the live service recalculation after the
+`opening_drive` merge. The algo enters at the minute-15 close in the
+direction of the open-to-minute-15 drive, between minutes 15 and 20, once
+per session. The drive must clear a 0.5% floor and 0.2 times the session
+ATR. The target is 0.25 times the drive and the stop is 1.00 times the
+drive; all exits use the minute close. Every configured ticker traded
+except SPY, which the floor excluded. Returns are gross percentage points
+per unit; the cost-aware column subtracts 0.10 points per round trip.
+
+| period | trades | win rate | gross return | cost-aware return |
+| --- | ---: | ---: | ---: | ---: |
+| discovery (through 2026-07-31) | 22 | 86.4% | +15.57 | +13.37 |
+| forward (2026-08-03 on) | 44 | 93.2% | +32.64 | +28.24 |
+| all | 66 | 90.9% | +48.20 | +41.60 |
+
+The average hold is 26 minutes and the profit factor is 3.18. The maximum
+drawdown is -11.68 gross points. The geometry came from a six-ticker scan;
+the five tickers added on 2026-08-18 were outside that sample and still won
+31 of 36 trades (86.1%, +19.86 gross points).
+
+The worst trade shows the open risk of the geometry. A CRWV long on
+2026-08-13 followed a very large drive, so the drive-sized stop sat far
+below the entry. The stop never hit, and the flat rule closed the unit at
+-8.65 points after 365 minutes. A large drive sets a large stop; a risk cap
+for extreme drives is a possible refinement.
