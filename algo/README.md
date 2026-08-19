@@ -43,7 +43,7 @@ symbols remain paper-and-alert only. Orders use market, regular-hours,
 good-for-day terms and a deterministic idempotency key. The account comes from
 the environment variable named by `broker.account_env`. The current config
 spends $100 per entry and maps SNDK to SNXX/SNDQ, SPY to SPXL/SPXS, and QQQ to
-TQQQ/SQQQ, and SPCX to SPCH/SSPC.
+TQQQ/SQQQ, SPCX to SPCH/SSPC, RKLB to RKLX/RKLZ, and ASTS to ASTX/ASTN.
 
 When `broker.shadow_options` is true, each mapped fresh live entry also records
 one read-only option shadow on the signal ticker. Long signals select the

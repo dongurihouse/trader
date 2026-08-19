@@ -48,6 +48,14 @@
       "SPCX": {
         "long": "SPCH",
         "short": "SSPC"
+      },
+      "RKLB": {
+        "long": "RKLX",
+        "short": "RKLZ"
+      },
+      "ASTS": {
+        "long": "ASTX",
+        "short": "ASTN"
       }
     }
   },
