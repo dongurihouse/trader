@@ -312,7 +312,7 @@
         "last_close"
       ],
       "params": {
-        "min_range_atr": 0.75,
+        "min_range_atr": 1.0,
         "stop_atr_frac": 0.35,
         "target_r": 0.35,
         "confirmation_bars": 2,
