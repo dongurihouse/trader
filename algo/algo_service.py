@@ -52,6 +52,7 @@ from algo_types import (
 )
 from broker import send_broker_orders
 from notify import send_trade_alerts
+from option_shadow import process_option_shadows
 from shape_signal import clear_shape_cache
 from signals import (
     SIGNAL_FUNCTIONS,
@@ -70,6 +71,7 @@ from storage import (
     _init_database,
     _live_trade_alerts,
     _log,
+    _open_option_shadows,
     _output_state,
     _outputs_for_timestamps,
     _pending,
@@ -81,6 +83,8 @@ from storage import (
     _relative_momentum_warm_targets,
     _replace_empty_calculation,
     _record_broker_order,
+    _record_option_shadow_entry,
+    _record_option_shadow_exits,
     _shape_warm_targets,
     _sync_live_definitions,
     _targeted_recalculation_pairs,
@@ -144,6 +148,7 @@ def _broker_settings(
     unknown = set(raw) - {
         "enabled",
         "dollar_amount",
+        "shadow_options",
         "account_env",
         "execution_tickers",
     }
@@ -152,6 +157,9 @@ def _broker_settings(
     enabled = raw.get("enabled", False)
     if not isinstance(enabled, bool):
         raise ConfigError("broker.enabled must be boolean")
+    shadow_options = raw.get("shadow_options", False)
+    if not isinstance(shadow_options, bool):
+        raise ConfigError("broker.shadow_options must be boolean")
     dollar_amount = raw.get("dollar_amount", "0")
     if not isinstance(dollar_amount, str) or not re.fullmatch(
         r"\d+(?:\.\d{1,2})?", dollar_amount
@@ -200,6 +208,7 @@ def _broker_settings(
     return BrokerSettings(
         enabled=enabled,
         dollar_amount=dollar_amount,
+        shadow_options=shadow_options,
         account_env=account_env,
         execution_tickers=execution_tickers,
     )
@@ -1075,6 +1084,24 @@ def _dispatch_trade_alerts(
         on_failure=lambda reason: _report_alert_failure(config_path, reason),
     )
     if settings.broker.enabled:
+        option_completion = None
+        if settings.broker.shadow_options:
+            option_completion = lambda records: process_option_shadows(
+                records,
+                config_path=config_path,
+                open_positions=lambda record: _open_option_shadows(
+                    settings.database, record
+                ),
+                on_entry=lambda record, result: _record_option_shadow_entry(
+                    settings.database, record, result
+                ),
+                on_exits=lambda record, results: _record_option_shadow_exits(
+                    settings.database, record, results
+                ),
+                on_result=lambda level, message: _report_broker_result(
+                    config_path, level, message
+                ),
+            )
         send_broker_orders(
             live_records,
             config_path=config_path,
@@ -1090,6 +1117,7 @@ def _dispatch_trade_alerts(
             on_result=lambda level, message: _report_broker_result(
                 config_path, level, message
             ),
+            on_complete=option_completion,
         )
 
 

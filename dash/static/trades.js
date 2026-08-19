@@ -193,6 +193,103 @@ function renderClosedTrade(trade) {
   return row;
 }
 
+function shadowMetric(label, value, note, className = "") {
+  const metric = createElement("article", "shadow-metric");
+  metric.append(
+    createElement("small", "", label),
+    createElement("strong", className, value),
+    createElement("span", "", note),
+  );
+  return metric;
+}
+
+function shadowStatus(shadow) {
+  const labels = {
+    open: ["Open", "open"],
+    closed: ["Closed", "closed"],
+    entry_error: ["Entry unavailable", "error"],
+    exit_error: ["Exit unavailable", "error"],
+  };
+  const [label, className] = labels[shadow.status] || [titleCase(shadow.status), "error"];
+  return createElement("span", `shadow-status ${className}`, label);
+}
+
+function optionContract(shadow) {
+  if (!shadow.expiration_date || shadow.strike_price === null || !shadow.option_type) {
+    return "Contract unavailable";
+  }
+  const expiration = new Date(`${shadow.expiration_date}T12:00:00`);
+  return `${marketDay.format(expiration)} · $${Number(shadow.strike_price).toFixed(2)} ${titleCase(shadow.option_type)}`;
+}
+
+function renderOptionShadows(payload) {
+  const container = $("#option-shadows");
+  const shadows = payload.option_shadows || [];
+  const stats = payload.option_summary || {};
+  if (!shadows.length) {
+    const empty = createElement("div", "trade-empty");
+    empty.append(
+      createElement("strong", "", "No live option shadows yet"),
+      createElement("span", "", "The first fresh mapped entry will record the nearest-expiry near-OTM contract at its ask."),
+    );
+    container.replaceChildren(empty);
+    return;
+  }
+
+  const summary = createElement("div", "shadow-summary-grid");
+  summary.append(
+    shadowMetric("Closed", wholeNumber.format(stats.closed || 0), `${wholeNumber.format(stats.open || 0)} open`),
+    shadowMetric("Win rate", rate(stats.win_rate), `${wholeNumber.format(stats.wins || 0)} wins · ${wholeNumber.format(stats.losses || 0)} losses`),
+    shadowMetric(
+      "Return",
+      signed(stats.realized_return_pct, " pts"),
+      "Ask-to-bid percentage points",
+      valueClass(stats.realized_return_pct),
+    ),
+    shadowMetric(
+      "One-contract P&L",
+      currency(stats.pnl_dollars),
+      `${wholeNumber.format(stats.errors || 0)} quote errors`,
+      valueClass(stats.pnl_dollars),
+    ),
+  );
+
+  const list = createElement("div", "shadow-list");
+  shadows.forEach((shadow) => {
+    const row = createElement("article", "shadow-row");
+    const identity = createElement("div", "shadow-identity");
+    identity.append(
+      createElement("strong", "", shadow.ticker),
+      createElement("span", Number(shadow.direction) < 0 ? "short" : "long", Number(shadow.direction) < 0 ? "Put" : "Call"),
+    );
+    const prices = createElement("div", "shadow-prices");
+    prices.append(
+      createElement("span", "", shadow.entry_ask === null ? "Ask —" : `Ask ${currency(shadow.entry_ask)}`),
+      createElement("span", "", shadow.exit_bid === null ? "Bid —" : `Bid ${currency(shadow.exit_bid)}`),
+    );
+    const outcome = createElement("div", "shadow-outcome");
+    if (shadow.status === "closed") {
+      outcome.append(
+        createElement("strong", valueClass(shadow.return_pct), signed(shadow.return_pct)),
+        createElement("span", valueClass(shadow.pnl_dollars), currency(shadow.pnl_dollars)),
+      );
+    } else {
+      outcome.append(shadowStatus(shadow));
+    }
+    row.append(
+      identity,
+      createElement("div", "shadow-contract", optionContract(shadow)),
+      createElement("div", "shadow-algo", shadow.display_name),
+      createElement("time", "shadow-time", localTime.format(dateFromEpoch(shadow.entry_ts))),
+      prices,
+      outcome,
+    );
+    if (shadow.error) row.title = shadow.error;
+    list.append(row);
+  });
+  container.replaceChildren(summary, list);
+}
+
 function renderDaily(payload) {
   const container = $("#trade-days");
   const days = payload.daily || [];
@@ -352,6 +449,7 @@ async function loadTrades() {
     if (request !== localRequest) return;
     renderSummary(payload);
     renderActive(payload);
+    renderOptionShadows(payload);
     renderDaily(payload);
     $("#trade-updated").textContent = `Ledger updated ${localTime.format(dateFromEpoch(payload.generated_at))}`;
   } catch (error) {
@@ -359,6 +457,7 @@ async function loadTrades() {
     showToast(error.message);
     $("#trade-summary").replaceChildren(createElement("div", "trade-error surface", error.message));
     $("#active-trades").replaceChildren(createElement("div", "trade-error", error.message));
+    $("#option-shadows").replaceChildren(createElement("div", "trade-error", error.message));
     $("#trade-days").replaceChildren(createElement("div", "trade-error", error.message));
   }
 }

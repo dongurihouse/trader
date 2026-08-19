@@ -93,4 +93,6 @@ exit market date. Broker-routed entries and closes come from the durable local
 broker-position ledger. A separate, manually refreshable section calls
 Robinhood for the configured account's current value, buying power, cash,
 equity positions, and recent agentic equity orders. Account numbers are masked
-before data reaches the browser.
+before data reaches the browser. The Option shadows section shows every fresh
+live near-OTM comparison, including its contract, conservative ask-to-bid
+return, one-contract dollar result, and quote failures.

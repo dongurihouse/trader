@@ -662,6 +662,13 @@ class DashboardData:
         """Return one combined trade book with daily and active summaries."""
         algorithm_payload = self.algorithms()
         broker_entries: dict[tuple[str, str, int], dict[str, Any]] = {}
+        option_shadows: list[dict[str, Any]] = []
+        display_names = {
+            str(algorithm["name"]): (
+                algorithm.get("display_name") or str(algorithm["name"])
+            )
+            for algorithm in algorithm_payload["algorithms"]
+        }
         with self.connection() as connection:
             tables = {
                 str(row["name"])
@@ -686,6 +693,26 @@ class DashboardData:
                         "real_close": row["exit_order_id"] is not None,
                         "broker_exit_ts": row["exit_ts"],
                     }
+            if "option_shadows" in tables:
+                option_shadows = [
+                    {
+                        **dict(row),
+                        "display_name": display_names.get(
+                            str(row["algo"]), str(row["algo"])
+                        ),
+                    }
+                    for row in connection.execute(
+                        """
+                        SELECT ticker,algo,entry_ts,direction,option_type,
+                               expiration_date,strike_price,underlying_price,
+                               entry_ask,entry_quote_ts,exit_ts,exit_bid,
+                               exit_quote_ts,return_pct,pnl_dollars,status,
+                               error,updated_at
+                        FROM option_shadows
+                        ORDER BY entry_ts DESC
+                        """
+                    )
+                ]
 
         closed: list[dict[str, Any]] = []
         active: list[dict[str, Any]] = []
@@ -757,6 +784,8 @@ class DashboardData:
             "summary": summary,
             "active": active,
             "daily": daily,
+            "option_summary": self._option_shadow_stats(option_shadows),
+            "option_shadows": option_shadows,
         }
 
     def robinhood(self) -> dict[str, Any]:
@@ -843,6 +872,37 @@ class DashboardData:
         else:
             state = "closed_mismatch" if real_close else "real_open"
         return {**broker, "broker_state": state}
+
+    @staticmethod
+    def _option_shadow_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        closed = [
+            row
+            for row in rows
+            if row.get("status") == "closed" and row.get("return_pct") is not None
+        ]
+        returns = [float(row["return_pct"]) for row in closed]
+        pnl = [
+            float(row["pnl_dollars"])
+            for row in closed
+            if row.get("pnl_dollars") is not None
+        ]
+        wins = sum(value > 0 for value in returns)
+        return {
+            "total": len(rows),
+            "open": sum(row.get("status") == "open" for row in rows),
+            "closed": len(closed),
+            "errors": sum(
+                row.get("status") in ("entry_error", "exit_error") for row in rows
+            ),
+            "wins": wins,
+            "losses": sum(value < 0 for value in returns),
+            "win_rate": round(wins / len(returns) * 100.0, 1) if returns else None,
+            "realized_return_pct": round(sum(returns), 4),
+            "average_return_pct": (
+                round(sum(returns) / len(returns), 4) if returns else None
+            ),
+            "pnl_dollars": round(sum(pnl), 4),
+        }
 
     @staticmethod
     def _env_value(path: Path, name: str) -> str:

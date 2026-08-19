@@ -3344,6 +3344,138 @@ a.algo-trade-row.ticker-match {
   color: var(--red);
 }
 
+.shadow-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-bottom: 1px solid var(--line);
+}
+
+.shadow-metric {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  padding: 17px 22px;
+  border-right: 1px solid var(--line);
+}
+
+.shadow-metric:last-child {
+  border-right: 0;
+}
+
+.shadow-metric small {
+  color: var(--subtle);
+  font-family: var(--mono);
+  font-size: 0.5rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.shadow-metric strong {
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shadow-metric > span {
+  color: var(--subtle);
+  font-family: var(--mono);
+  font-size: 0.49rem;
+}
+
+.shadow-list {
+  display: grid;
+}
+
+.shadow-row {
+  display: grid;
+  grid-template-columns: 80px minmax(230px, 1.3fr) minmax(170px, 1fr) 140px 105px 95px;
+  min-height: 58px;
+  align-items: center;
+  gap: 13px;
+  padding: 10px 16px;
+  font-family: var(--mono);
+  font-size: 0.53rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.shadow-row:last-child {
+  border-bottom: 0;
+}
+
+.shadow-identity {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.shadow-identity strong {
+  font-size: 0.63rem;
+}
+
+.shadow-identity span,
+.shadow-status {
+  padding: 3px 5px;
+  color: var(--cyan);
+  font-size: 0.44rem;
+  text-transform: uppercase;
+  background: rgba(112, 216, 220, 0.08);
+  border-radius: 4px;
+}
+
+.shadow-identity span.short {
+  color: var(--red);
+  background: rgba(255, 123, 115, 0.08);
+}
+
+.shadow-contract,
+.shadow-algo,
+.shadow-time {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shadow-algo,
+.shadow-time {
+  color: var(--subtle);
+}
+
+.shadow-prices,
+.shadow-outcome {
+  display: grid;
+  gap: 3px;
+}
+
+.shadow-prices span,
+.shadow-outcome span {
+  color: var(--subtle);
+  font-size: 0.48rem;
+}
+
+.shadow-outcome {
+  justify-items: end;
+  text-align: right;
+}
+
+.shadow-status.open {
+  color: var(--acid);
+  background: var(--acid-soft);
+}
+
+.shadow-status.closed {
+  color: var(--cyan);
+}
+
+.shadow-status.error {
+  color: var(--red);
+  background: rgba(255, 123, 115, 0.08);
+}
+
 @media (max-width: 1160px) {
   .trade-primary-grid {
     grid-template-columns: 1fr;
@@ -3356,6 +3488,14 @@ a.algo-trade-row.ticker-match {
 
   .active-record {
     grid-template-columns: 72px minmax(0, 1fr) 86px 62px;
+  }
+
+  .shadow-row {
+    grid-template-columns: 72px minmax(210px, 1.3fr) minmax(150px, 1fr) 105px 90px;
+  }
+
+  .shadow-time {
+    display: none;
   }
 }
 
@@ -3429,6 +3569,48 @@ a.algo-trade-row.ticker-match {
 
   .account-position .account-metric:nth-last-child(-n + 2) {
     border-top: 1px solid var(--line);
+  }
+
+  .shadow-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .shadow-metric:nth-child(2) {
+    border-right: 0;
+  }
+
+  .shadow-metric:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--line);
+  }
+
+  .shadow-row {
+    grid-template-columns: 70px minmax(0, 1fr) 92px 76px;
+    gap: 5px 10px;
+  }
+
+  .shadow-identity {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+  }
+
+  .shadow-contract {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .shadow-algo {
+    grid-column: 2;
+    grid-row: 2;
+  }
+
+  .shadow-prices {
+    grid-column: 3;
+    grid-row: 1 / span 2;
+  }
+
+  .shadow-outcome {
+    grid-column: 4;
+    grid-row: 1 / span 2;
   }
 }
 
@@ -3565,6 +3747,23 @@ a.algo-trade-row.ticker-match {
   .account-order > :nth-child(5),
   .account-order > :nth-child(6) {
     display: none;
+  }
+
+  .shadow-metric {
+    padding: 14px;
+  }
+
+  .shadow-row {
+    grid-template-columns: 62px minmax(0, 1fr) 72px;
+    padding-inline: 10px;
+  }
+
+  .shadow-prices {
+    display: none;
+  }
+
+  .shadow-outcome {
+    grid-column: 3;
   }
 }
 

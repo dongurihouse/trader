@@ -78,6 +78,34 @@ CREATE TABLE IF NOT EXISTS broker_positions (
     )
 );
 
+CREATE TABLE IF NOT EXISTS option_shadows (
+    ticker              TEXT    NOT NULL,
+    algo                TEXT    NOT NULL,
+    entry_ts            INTEGER NOT NULL,
+    direction           INTEGER NOT NULL,
+    option_id           TEXT,
+    option_type         TEXT,
+    expiration_date     TEXT,
+    strike_price        REAL,
+    underlying_price    REAL,
+    entry_ask           REAL,
+    entry_quote_ts      TEXT,
+    exit_ts             INTEGER,
+    exit_bid            REAL,
+    exit_quote_ts       TEXT,
+    return_pct          REAL,
+    pnl_dollars         REAL,
+    status              TEXT    NOT NULL,
+    error               TEXT,
+    updated_at          INTEGER NOT NULL,
+    PRIMARY KEY (ticker, algo, entry_ts),
+    CHECK (direction IN (-1, 1)),
+    CHECK (option_type IS NULL OR option_type IN ('call', 'put')),
+    CHECK (status IN ('open', 'closed', 'entry_error', 'exit_error')),
+    CHECK (entry_ask IS NULL OR entry_ask >= 0),
+    CHECK (exit_bid IS NULL OR exit_bid >= 0)
+);
+
 CREATE TABLE IF NOT EXISTS outputs (
     ticker      TEXT    NOT NULL,
     ts          INTEGER NOT NULL,

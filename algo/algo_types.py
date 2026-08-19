@@ -30,6 +30,7 @@ class EvaluationError(RuntimeError):
 class BrokerSettings:
     enabled: bool
     dollar_amount: str
+    shadow_options: bool
     account_env: str
     execution_tickers: Mapping[str, Mapping[str, str]]
 

@@ -238,6 +238,50 @@ def _submit_all(
                 )
 
 
+def _complete(
+    records: Sequence[Mapping[str, Any]],
+    on_complete: Callable[[Sequence[Mapping[str, Any]]], None] | None,
+    on_result: Callable[[str, str], None],
+) -> None:
+    if on_complete is None:
+        return
+    try:
+        on_complete(records)
+    except BaseException as exc:
+        on_result(
+            "error",
+            "post-broker processing failed: %s: %s"
+            % (type(exc).__name__, _clean(exc)),
+        )
+
+
+def _submit_all_then_complete(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    account_number: str,
+    dollar_amount: str,
+    config_path: Path,
+    execution_tickers: Mapping[str, Mapping[str, str]],
+    entry_order_ids: Callable[[Mapping[str, Any]], Sequence[str]],
+    on_result: Callable[[str, str], None],
+    on_submitted: Callable[[Mapping[str, Any], str], None],
+    on_complete: Callable[[Sequence[Mapping[str, Any]]], None] | None,
+) -> None:
+    try:
+        _submit_all(
+            records,
+            account_number=account_number,
+            dollar_amount=dollar_amount,
+            config_path=config_path,
+            execution_tickers=execution_tickers,
+            entry_order_ids=entry_order_ids,
+            on_result=on_result,
+            on_submitted=on_submitted,
+        )
+    finally:
+        _complete(records, on_complete, on_result)
+
+
 def send_broker_orders(
     records: Sequence[Mapping[str, Any]],
     *,
@@ -248,6 +292,7 @@ def send_broker_orders(
     entry_order_ids: Callable[[Mapping[str, Any]], Sequence[str]],
     on_result: Callable[[str, str], None],
     on_submitted: Callable[[Mapping[str, Any], str], None],
+    on_complete: Callable[[Sequence[Mapping[str, Any]]], None] | None = None,
 ) -> int:
     """Queue mapped live orders and skip tickers without an execution mapping."""
     eligible = [
@@ -265,9 +310,15 @@ def send_broker_orders(
             "error",
             "broker order failed: %s is not configured" % account_env,
         )
+        threading.Thread(
+            target=_complete,
+            args=(eligible, on_complete, on_result),
+            name="post-broker-processing",
+            daemon=True,
+        ).start()
         return 0
     worker = threading.Thread(
-        target=_submit_all,
+        target=_submit_all_then_complete,
         kwargs={
             "records": eligible,
             "account_number": account_number,
@@ -277,6 +328,7 @@ def send_broker_orders(
             "entry_order_ids": entry_order_ids,
             "on_result": on_result,
             "on_submitted": on_submitted,
+            "on_complete": on_complete,
         },
         name="broker-orders",
         daemon=True,

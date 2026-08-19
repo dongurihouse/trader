@@ -332,6 +332,159 @@ def _record_broker_order(
         connection.close()
 
 
+def _open_option_shadows(
+    path: Path, record: Mapping[str, Any]
+) -> tuple[dict[str, Any], ...]:
+    """Return open shadow contracts closed by one live exit event."""
+    if record.get("action") != "exit_all":
+        return ()
+    _init_database(path)
+    connection = _connect(path, read_only=True)
+    try:
+        rows = connection.execute(
+            "SELECT ticker,algo,entry_ts,direction,option_id,option_type,"
+            "expiration_date,strike_price,underlying_price,entry_ask,entry_quote_ts "
+            "FROM option_shadows WHERE ticker=? AND algo=? AND direction=? "
+            "AND status='open' ORDER BY entry_ts",
+            (
+                str(record["ticker"]),
+                str(record["algo"]),
+                int(record["direction"]),
+            ),
+        ).fetchall()
+        return tuple(dict(row) for row in rows)
+    finally:
+        connection.close()
+
+
+def _record_option_shadow_entry(
+    path: Path, record: Mapping[str, Any], result: Mapping[str, Any]
+) -> None:
+    """Persist one live option-shadow selection or entry failure."""
+    if record.get("action") != "entry":
+        raise EvaluationError("option shadow entry record is invalid")
+    status = str(result.get("status", ""))
+    if status not in ("open", "entry_error"):
+        raise EvaluationError("option shadow entry status is invalid")
+    if status == "open" and not all(
+        result.get(name) is not None
+        for name in (
+            "option_id",
+            "option_type",
+            "expiration_date",
+            "strike_price",
+            "underlying_price",
+            "entry_ask",
+            "entry_quote_ts",
+        )
+    ):
+        raise EvaluationError("option shadow entry is incomplete")
+    _init_database(path)
+    connection = _connect(path)
+    try:
+        key = (
+            str(record["ticker"]),
+            str(record["algo"]),
+            int(record["ts"]),
+        )
+        existing = connection.execute(
+            "SELECT 1 FROM option_shadows WHERE ticker=? AND algo=? AND entry_ts=?",
+            key,
+        ).fetchone()
+        if existing is not None:
+            return
+        connection.execute(
+            """
+            INSERT INTO option_shadows(
+                ticker,algo,entry_ts,direction,option_id,option_type,
+                expiration_date,strike_price,underlying_price,entry_ask,
+                entry_quote_ts,status,error,updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                *key,
+                int(record["direction"]),
+                result.get("option_id"),
+                result.get("option_type"),
+                result.get("expiration_date"),
+                result.get("strike_price"),
+                result.get("underlying_price"),
+                result.get("entry_ask"),
+                result.get("entry_quote_ts"),
+                status,
+                result.get("error"),
+                int(time.time()),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _record_option_shadow_exits(
+    path: Path,
+    record: Mapping[str, Any],
+    results: Sequence[Mapping[str, Any]],
+) -> None:
+    """Persist conservative bid marks for every shadow closed by one exit."""
+    if record.get("action") != "exit_all":
+        raise EvaluationError("option shadow exit record is invalid")
+    if not results:
+        return
+    _init_database(path)
+    connection = _connect(path)
+    try:
+        current = {
+            (int(row["entry_ts"]), str(row["option_id"]))
+            for row in connection.execute(
+                "SELECT entry_ts,option_id FROM option_shadows "
+                "WHERE ticker=? AND algo=? AND direction=? AND status='open'",
+                (
+                    str(record["ticker"]),
+                    str(record["algo"]),
+                    int(record["direction"]),
+                ),
+            )
+        }
+        supplied = {
+            (int(result["entry_ts"]), str(result["option_id"]))
+            for result in results
+        }
+        if supplied != current:
+            raise EvaluationError("option shadow exit state changed")
+        now = int(time.time())
+        for result in results:
+            status = str(result.get("status", ""))
+            if status not in ("closed", "exit_error"):
+                raise EvaluationError("option shadow exit status is invalid")
+            connection.execute(
+                """
+                UPDATE option_shadows
+                SET exit_ts=?,exit_bid=?,exit_quote_ts=?,return_pct=?,
+                    pnl_dollars=?,status=?,error=?,updated_at=?
+                WHERE ticker=? AND algo=? AND entry_ts=? AND option_id=?
+                  AND status='open'
+                """,
+                (
+                    int(record["ts"]),
+                    result.get("exit_bid"),
+                    result.get("exit_quote_ts"),
+                    result.get("return_pct"),
+                    result.get("pnl_dollars"),
+                    status,
+                    result.get("error"),
+                    now,
+                    str(record["ticker"]),
+                    str(record["algo"]),
+                    int(result["entry_ts"]),
+                    str(result["option_id"]),
+                ),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def _trade_broker_state(
     connection: sqlite3.Connection,
     row: tuple[str, str, int, str, int],

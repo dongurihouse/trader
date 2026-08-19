@@ -30,11 +30,20 @@
   "broker": {
     "enabled": true,
     "dollar_amount": "100.00",
+    "shadow_options": true,
     "account_env": "TRADER_ROBINHOOD_ACCOUNT",
     "execution_tickers": {
       "SNDK": {
         "long": "SNXX",
         "short": "SNDQ"
+      },
+      "SPY": {
+        "long": "SPXL",
+        "short": "SPXS"
+      },
+      "QQQ": {
+        "long": "TQQQ",
+        "short": "SQQQ"
       }
     }
   },
