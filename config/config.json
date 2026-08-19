@@ -43,6 +43,14 @@
     "evaluation_days": 60,
     "poll_seconds": 30
   },
+  "algo_display_names": {
+    "orb5": "10-Minute Opening Range Breakout",
+    "sentiment_pullback": "Opening Sentiment Pullback",
+    "lateday_momentum": "Late-Day Momentum Continuation",
+    "failed_gap_reversal": "Failed Gap Reversal",
+    "gap_play": "15-Minute Gap Continuation",
+    "day_extreme_reversal": "Intraday Extreme Reversal"
+  },
   "signals": {
     "ema9": {
       "inputs": ["bar_metadata"],

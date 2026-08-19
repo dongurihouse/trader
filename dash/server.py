@@ -152,6 +152,7 @@ class DashboardData:
                 "Range must be HISTORY, 1D, 5D, 1M, 3M, 120D, or ALL"
             )
         config = self.config()
+        algo_display_names = self._algo_display_names(config)
         custom_window = window_start is not None or window_end is not None
         if custom_window:
             if window_start is None or window_end is None:
@@ -213,7 +214,10 @@ class DashboardData:
                 "direction" if "direction" in trade_columns else "1 AS direction"
             )
             trades = [
-                dict(row)
+                {
+                    **dict(row),
+                    "display_name": algo_display_names.get(str(row["algo"])),
+                }
                 for row in connection.execute(
                     f"""
                     SELECT ticker, algo, ts, action, {direction_column}
@@ -405,6 +409,7 @@ class DashboardData:
     def performance(self, ticker: str) -> dict[str, Any]:
         ticker = self._valid_symbol(ticker)
         config = self.config()
+        algo_display_names = self._algo_display_names(config)
         algo_names = set(self._mapping(config.get("algos")).keys())
 
         with self.connection() as connection:
@@ -469,6 +474,7 @@ class DashboardData:
             performance_rows.append(
                 {
                     "algo": group["algo"],
+                    "display_name": algo_display_names.get(str(group["algo"])),
                     "entries": group["entries"],
                     "closed_units": closed,
                     "open_units": len(group["open_units"]),
@@ -551,6 +557,7 @@ class DashboardData:
 
     def algorithms(self) -> dict[str, Any]:
         config = self.config()
+        algo_display_names = self._algo_display_names(config)
         configured_tickers = {str(ticker) for ticker in config.get("tickers", [])}
         current_definitions = self._mapping(config.get("algos"))
         definitions: dict[str, dict[str, Any]] = {
@@ -743,6 +750,7 @@ class DashboardData:
             algorithms.append(
                 {
                     "name": name,
+                    "display_name": algo_display_names.get(name),
                     "function": definition.get("function", name),
                     "inputs": definition.get("inputs", []),
                     "params": definition.get("params", {}),
@@ -1300,6 +1308,14 @@ class DashboardData:
                 if isinstance(item, dict) and item.get("name")
             }
         return {}
+
+    @classmethod
+    def _algo_display_names(cls, config: dict[str, Any]) -> dict[str, str]:
+        return {
+            str(name): value.strip()
+            for name, value in cls._mapping(config.get("algo_display_names")).items()
+            if isinstance(value, str) and value.strip()
+        }
 
     @staticmethod
     def _json_value(value: str) -> Any:

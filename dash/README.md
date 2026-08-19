@@ -70,7 +70,9 @@ results for every configured ticker, current marks, and all closed units. A
 ticker without trades remains visible with zero or unavailable results. Use
 the horizontal algorithm scorecards to compare summaries and switch the detail
 view. Returns do not include position sizing, fees, or slippage, and trade rows
-are grouped by algorithm name. Select an instrument row to jump to and
+are grouped by stable internal algorithm ID. The dashboard uses the descriptive
+labels in `algo_display_names` without changing stored IDs or recalculating
+algorithm output. Select an instrument row to jump to and
 highlight its trades; all closed units remain visible. Select a closed unit to
 open the SNDK chart, its trading date, and all algorithm overlays.
 

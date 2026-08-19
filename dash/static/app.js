@@ -10,6 +10,10 @@ function algorithmUrl(name) {
   return `/algos?${parameters}`;
 }
 
+function algorithmDisplayName(trade) {
+  return trade.display_name || formatShapeName(trade.algo);
+}
+
 function rememberChartView() {
   window.traderHeader?.rememberView("chart", {
     ticker: state.ticker,
@@ -1478,7 +1482,7 @@ class PriceChart {
         createElement(
           "span",
           `algo-action ${action}`,
-          `${trade.algo.toUpperCase()} · ${direction} ${action}${resultDetail}`,
+          `${algorithmDisplayName(trade)} · ${direction} ${action}${resultDetail}`,
         ),
       );
     });
@@ -1741,7 +1745,7 @@ function renderDayTrades(date) {
 
   const fragment = document.createDocumentFragment();
   pairs.forEach((pair) => {
-    const algoName = formatShapeName(pair.entry.algo);
+    const algoName = algorithmDisplayName(pair.entry);
     const directionName = Number(pair.entry.direction) < 0 ? "Short" : "Long";
     const entryTime = pacificClock.format(dateFromEpoch(pair.entry.ts));
     const exitTime = pair.exit ? pacificClock.format(dateFromEpoch(pair.exit.ts)) : "open";

@@ -75,6 +75,10 @@ function humanize(value) {
     .replace(/^./, (letter) => letter.toUpperCase());
 }
 
+function algorithmDisplayName(algo) {
+  return algo.display_name || humanize(algo.name);
+}
+
 function signed(value, digits = 2, suffix = "") {
   if (value === null || value === undefined || value === "") return "—";
   const number = Number(value);
@@ -347,6 +351,7 @@ function renderAlgorithmSwitcher() {
   const fragment = document.createDocumentFragment();
   algorithms.forEach((algo, index) => {
     const selected = algo.name === selectedAlgorithmName;
+    const displayName = algorithmDisplayName(algo);
     const button = createElement("button", `algo-tab${selected ? " active" : ""}`);
     button.type = "button";
     button.id = `algo-tab-${index}`;
@@ -354,10 +359,10 @@ function renderAlgorithmSwitcher() {
     button.setAttribute("role", "tab");
     button.setAttribute("aria-controls", "algo-panel");
     button.setAttribute("aria-selected", String(selected));
-    button.setAttribute("aria-label", algo.name);
+    button.setAttribute("aria-label", displayName);
     button.tabIndex = selected ? 0 : -1;
     const summary = createElement("span", "algo-tab-summary");
-    summary.append(createElement("strong", "algo-tab-title", algo.name.toUpperCase()));
+    summary.append(createElement("strong", "algo-tab-title", displayName.toUpperCase()));
     button.append(summary, renderAlgoMetrics(algo));
     fragment.append(button);
   });
