@@ -148,6 +148,7 @@ It has these algo functions:
 | `failed_gap` | `session`, `prior_session`, `atr_session`, `last_close` | `gap_min_pct`, `risk_atr_frac`, `target_r`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
 | `gap_continuation` | `session`, `prior_session`, `opening_range`, `atr_session`, `rvol_open`, `last_close` | `gap_min_pct`, `risk_atr_frac`, `target_r`, `min_rvol`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
 | `extreme_fade` | `session`, `session_extremes`, `atr_session`, `rvol_open`, `last_close` | `min_range_atr`, `stop_atr_frac`, `target_r`, `confirmation_bars`, `min_rvol`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
+| `opening_drive` | `session`, `atr_session`, `last_close` | `confirm_minutes`, `minute_min`, `minute_max`, `min_drive_pct`, `drive_atr_frac`, `target_frac`, `stop_frac`, `entry_cutoff_minutes`, `flat_minutes` |
 
 Every algo output is `[is_entry, is_close_all, direction]`. Direction is `1`
 for long, `-1` for short, and `0` when quiet. Both actions cannot be true. A
@@ -192,6 +193,13 @@ Their brackets use the entry price and the day-constant fourteen-session ATR.
 All exits use the minute close. The algo context exposes regular bars through a
 read-only accessor capped at the evaluation timestamp; the extreme fade uses
 it to freeze the session extreme that existed when the position opened.
+
+`opening_drive` measures the drive from the session open to the minute-15
+close. It enters once per session, immediately, in the drive direction,
+between minutes 15 and 20. The drive must clear an absolute floor and an
+ATR-scaled floor. The target is 0.25 times the drive and the stop is 1.0
+times the drive from the entry price. All exits use the minute close. The
+algo goes flat five minutes before the close.
 
 Example:
 
