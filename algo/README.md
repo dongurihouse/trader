@@ -156,8 +156,8 @@ another parameter set of these functions.
 
 `orb5` forms the first ten regular-session bars, requires elapsed relative
 volume above `1.0`, and enters on the first close outside that range before
-minute 30 (10:00 ET). The opposite range edge is the stop and the target is
-`0.25R`. It enters at most once per session, blocks new entries inside ten
+minute 15 (09:45 ET). The opposite range edge is the stop and the target is
+`0.10R`. It enters at most once per session, blocks new entries inside ten
 minutes to close, and closes any open unit five minutes before the configured
 regular or early close.
 

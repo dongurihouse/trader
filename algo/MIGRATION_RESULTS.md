@@ -58,8 +58,9 @@ to `0.25R` and blocks entries at or after minute 30 (10:00 ET).
 
 The cost-aware results subtract 0.10 percentage points per round trip and use
 the same 50% capital cap described above. The lower target adds only one winner
-over the measured `0.30R` alternative, so smaller targets were not extrapolated.
-These remain same-data paper results and require new forward evidence.
+over the measured `0.30R` alternative. At this stage smaller targets were not
+extrapolated. These remain same-data paper results and require new forward
+evidence.
 
 The post-merge full replay then backfilled the five added tickers. Across the
 complete eleven-ticker universe, the previous parameters produced 136 trades,
@@ -68,6 +69,22 @@ cost-aware maximum drawdown. The adopted parameters produced 123 trades, an
 81.3% win rate, +35.70% gross return, +11.70% cost-aware return, and -15.07%
 cost-aware maximum drawdown. The live ledger completed with 100 wins, 23
 losses, and no open ORB5 positions.
+
+After the expanded ledger completed, a bounded eleven-ticker sweep compared
+targets from `0.10R` through `0.50R` and entry ceilings at minutes 15, 20, 25,
+30, 45, and 380. The final selection maximizes gross win rate among candidates
+that retain positive cost-aware return: `0.10R`, with entries before minute 15
+(09:45 ET).
+
+| period | trades / win rate | gross return | cost-aware return / max drawdown |
+| --- | ---: | ---: | ---: |
+| discovery | 39 / 89.7% | +13.09% | +4.59% / -3.66% |
+| forward | 23 / 95.7% | +14.45% | +6.07% / -0.31% |
+| all | 62 / 91.9% | +27.54% | +10.67% / -3.66% |
+
+The `0.20R` / minute-15 alternative produced a 90.3% gross win rate and
++19.13% cost-aware return. The `0.10R` variant deliberately gives up that
+return to satisfy the requested highest-win-rate objective.
 
 ## Sentiment overlap
 
