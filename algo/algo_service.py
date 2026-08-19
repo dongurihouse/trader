@@ -696,13 +696,19 @@ def _evaluate_pair(
 ) -> dict[str, Any]:
     if not target_algos:
         return run_core(connection, settings, ticker, ts, state=state)
+    required_inputs = _targeted_input_names(settings, target_algos)
     if stored_inputs is None:
         stored_inputs = _outputs_for_timestamps(
             connection,
             ticker,
             (ts,),
-            _targeted_input_names(settings, target_algos),
+            required_inputs,
         ).get(ts, {})
+    if any(name not in stored_inputs for name in required_inputs):
+        # The pair has no persisted upstream outputs. A bar can arrive
+        # while a targeted batch runs, or a killed rebuild can orphan a
+        # bar. Evaluate the full pair and store every output.
+        return run_core(connection, settings, ticker, ts, state=state)
     if bar_close is None:
         bar_close = _bar_close(connection, ticker, ts)
     if bar_close is None:

@@ -18,7 +18,8 @@ completion marker.
 A signal definition change or explicit full recalculation replaces every live
 output. An algo-only definition change preserves stored signals and unaffected
 algo outputs. It loads the changed algo's persisted inputs in ticker batches,
-then replaces only that algo's outputs and trades. An interrupted targeted
+then replaces only that algo's outputs and trades. A pair without persisted
+inputs runs the full evaluation and stores every output. An interrupted targeted
 recalculation resumes at each ticker's first missing output.
 
 Every entry or exit produced by a configured algo writes a trade, whether the
