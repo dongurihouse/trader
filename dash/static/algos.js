@@ -16,7 +16,6 @@ const pacificDate = new Intl.DateTimeFormat("en-US", {
 });
 let algorithms = [];
 let selectedAlgorithmName = new URLSearchParams(window.location.search).get("algo");
-let revealSelectedAlgorithm = Boolean(selectedAlgorithmName);
 let selectedTicker = null;
 
 function chartUrl(trade) {
@@ -349,8 +348,7 @@ function selectAlgorithm(name, { focus = false } = {}) {
   renderSelectedAlgorithm();
   const selectedButton = [...$("#algo-strip").querySelectorAll("button[data-algo-name]")]
     .find((button) => button.dataset.algoName === name);
-  selectedButton?.scrollIntoView({ block: "nearest", inline: "center" });
-  if (focus) selectedButton?.focus();
+  if (focus) selectedButton?.focus({ preventScroll: true });
   window.traderHeader?.rememberView("algos", { algo: selectedAlgorithmName });
 }
 
@@ -377,12 +375,6 @@ function render(payload) {
   renderAlgorithmSwitcher();
   renderSelectedAlgorithm();
   window.traderHeader?.rememberView("algos", { algo: selectedAlgorithmName });
-  if (revealSelectedAlgorithm) {
-    revealSelectedAlgorithm = false;
-    requestAnimationFrame(() => {
-      $("#algo-strip .algo-tab.active")?.scrollIntoView({ block: "nearest", inline: "center" });
-    });
-  }
 }
 
 $("#algo-strip").addEventListener("click", (event) => {
