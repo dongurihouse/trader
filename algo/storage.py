@@ -337,6 +337,64 @@ def _previous_outputs(
     }
 
 
+def _outputs_for_timestamps(
+    connection: sqlite3.Connection,
+    ticker: str,
+    timestamps: Sequence[int],
+    kinds: Sequence[str],
+) -> dict[int, dict[str, Any]]:
+    """Load a bounded ticker batch of persisted inputs in one query."""
+    if not timestamps or not kinds:
+        return {}
+    requested = {int(ts) for ts in timestamps}
+    placeholders = ",".join("?" for _ in kinds)
+    rows = connection.execute(
+        f"""
+        SELECT ts,kind,output FROM outputs
+        WHERE ticker=? AND ts>=? AND ts<=?
+          AND kind IN ({placeholders})
+        ORDER BY ts
+        """,
+        (
+            ticker,
+            min(requested),
+            max(requested),
+            *tuple(kinds),
+        ),
+    ).fetchall()
+    result: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        ts = int(row["ts"])
+        if ts not in requested:
+            continue
+        result.setdefault(ts, {})[str(row["kind"])] = json.loads(row["output"])
+    return result
+
+
+def _bar_closes_for_timestamps(
+    connection: sqlite3.Connection,
+    ticker: str,
+    timestamps: Sequence[int],
+) -> dict[int, float]:
+    """Load bar closes for one bounded ticker batch."""
+    if not timestamps:
+        return {}
+    requested = {int(ts) for ts in timestamps}
+    rows = connection.execute(
+        """
+        SELECT ts,close FROM bars
+        WHERE ticker=? AND ts>=? AND ts<=?
+        ORDER BY ts
+        """,
+        (ticker, min(requested), max(requested)),
+    ).fetchall()
+    return {
+        int(row["ts"]): float(row["close"])
+        for row in rows
+        if int(row["ts"]) in requested
+    }
+
+
 
 def _bar_close(
     connection: sqlite3.Connection, ticker: str, ts: int
@@ -622,7 +680,7 @@ def _pending(
             ),
         ).fetchall()
         ticker_rows.append((ticker, [int(row["ts"]) for row in rows]))
-    return _round_robin_pairs(ticker_rows, limit)
+    return _round_robin_pairs(ticker_rows, limit * len(ticker_rows))
 
 
 def _round_robin_pairs(
@@ -678,7 +736,113 @@ def _recalculation_pairs(
             ),
         ).fetchall()
         ticker_rows.append((ticker, [int(row["ts"]) for row in rows]))
-    return _round_robin_pairs(ticker_rows, limit)
+    return _round_robin_pairs(ticker_rows, limit * len(ticker_rows))
+
+
+def _incomplete_algo_kinds(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    stop_event: Optional[threading.Event] = None,
+) -> tuple[str, ...]:
+    """Find algo tails missing behind each ticker's complete signal tail."""
+    if not settings.signal_order or not settings.algo_order:
+        return ()
+    signal_marker = settings.signal_order[-1]
+    incomplete: set[str] = set()
+    for ticker in settings.tickers:
+        if stop_event is not None and stop_event.is_set():
+            break
+        latest_bar = connection.execute(
+            "SELECT MAX(ts) FROM bars WHERE ticker=?", (ticker,)
+        ).fetchone()[0]
+        if latest_bar is None:
+            continue
+        signal_tail = connection.execute(
+            """
+            SELECT MAX(b.ts) FROM bars b
+            JOIN outputs s
+              ON s.ticker=b.ticker AND s.ts=b.ts AND s.kind=?
+            WHERE b.ticker=? AND b.ts>=?
+            """,
+            (
+                signal_marker,
+                ticker,
+                int(latest_bar) - settings.evaluation_days * 86_400,
+            ),
+        ).fetchone()[0]
+        if signal_tail is None:
+            continue
+        stored = {
+            str(row["kind"])
+            for row in connection.execute(
+                """
+                SELECT kind FROM outputs
+                WHERE ticker=? AND ts=? AND kind IN (%s)
+                """ % ",".join("?" for _ in settings.algo_order),
+                (ticker, int(signal_tail), *settings.algo_order),
+            ).fetchall()
+        }
+        incomplete.update(set(settings.algo_order) - stored)
+    return tuple(name for name in settings.algo_order if name in incomplete)
+
+
+def _targeted_recalculation_pairs(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    algos: Sequence[str],
+    limit: int = CYCLE_PAIR_LIMIT,
+    stop_event: Optional[threading.Event] = None,
+) -> list[tuple[str, int]]:
+    """Return each ticker's suffix from its first missing selected algo."""
+    if not algos or not settings.signal_order or limit < 1:
+        return []
+    signal_marker = settings.signal_order[-1]
+    missing_checks = " OR ".join(
+        "NOT EXISTS ("
+        "SELECT 1 FROM outputs a "
+        "WHERE a.ticker=b.ticker AND a.ts=b.ts AND a.kind=?"
+        ")"
+        for _name in algos
+    )
+    ticker_rows: list[tuple[str, list[int]]] = []
+    for ticker in settings.tickers:
+        if stop_event is not None and stop_event.is_set():
+            break
+        latest = connection.execute(
+            "SELECT MAX(ts) FROM bars WHERE ticker=?", (ticker,)
+        ).fetchone()[0]
+        if latest is None:
+            continue
+        cutoff = int(latest) - settings.evaluation_days * 86_400
+        first_missing = connection.execute(
+            f"""
+            SELECT b.ts FROM bars b
+            WHERE b.ticker=? AND b.ts>=?
+              AND EXISTS (
+                SELECT 1 FROM outputs s
+                WHERE s.ticker=b.ticker AND s.ts=b.ts AND s.kind=?
+              )
+              AND ({missing_checks})
+            ORDER BY b.ts LIMIT 1
+            """,
+            (ticker, cutoff, signal_marker, *tuple(algos)),
+        ).fetchone()
+        if first_missing is None:
+            continue
+        rows = connection.execute(
+            """
+            SELECT b.ts FROM bars b
+            WHERE b.ticker=? AND b.ts>=?
+              AND EXISTS (
+                SELECT 1 FROM outputs s
+                WHERE s.ticker=b.ticker AND s.ts=b.ts AND s.kind=?
+              )
+            ORDER BY b.ts LIMIT ?
+            """,
+            (ticker, int(first_missing["ts"]), signal_marker, limit),
+        ).fetchall()
+        ticker_rows.append((ticker, [int(row["ts"]) for row in rows]))
+    return _round_robin_pairs(ticker_rows, limit * len(ticker_rows))
 
 
 def _upsert_output_rows(
@@ -844,6 +1008,7 @@ def _write_result(
     result: Mapping[str, Any],
     replace_algos: Optional[Sequence[str]] = None,
     *,
+    replace_all_outputs: bool = True,
     commit: bool = True,
 ) -> tuple[dict[str, int], list[dict[str, Any]]]:
     computed_at = int(time.time())
@@ -891,7 +1056,14 @@ def _write_result(
         connection.execute("BEGIN IMMEDIATE")
     try:
         if replace_algos is not None:
-            connection.execute("DELETE FROM outputs")
+            if replace_all_outputs:
+                connection.execute("DELETE FROM outputs")
+            elif replace_algos:
+                placeholders = ",".join("?" for _ in replace_algos)
+                connection.execute(
+                    f"DELETE FROM outputs WHERE kind IN ({placeholders})",
+                    tuple(replace_algos),
+                )
         _upsert_output_rows(connection, rows)
         replaced_names = set(replace_algos or ())
         if replace_algos is not None and replaced_names:
@@ -953,13 +1125,23 @@ def _write_result(
 
 
 def _replace_empty_calculation(
-    connection: sqlite3.Connection, replace_algos: Sequence[str]
+    connection: sqlite3.Connection,
+    replace_algos: Sequence[str],
+    *,
+    replace_all_outputs: bool = True,
 ) -> None:
     """Finish a recalculation when its source window contains no bars."""
     if not connection.in_transaction:
         connection.execute("BEGIN IMMEDIATE")
     try:
-        connection.execute("DELETE FROM outputs")
+        if replace_all_outputs:
+            connection.execute("DELETE FROM outputs")
+        elif replace_algos:
+            placeholders = ",".join("?" for _ in replace_algos)
+            connection.execute(
+                f"DELETE FROM outputs WHERE kind IN ({placeholders})",
+                tuple(replace_algos),
+            )
         if replace_algos:
             placeholders = ",".join("?" for _ in replace_algos)
             connection.execute(

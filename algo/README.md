@@ -4,16 +4,22 @@
 `algos`, and `trades` rows. It reads minute bars, evaluates
 every enabled signal and algo, and stores one unversioned live output per node.
 
-The service has no market clock. Every cycle takes at most 2,000 configured
-ticker/bar pairs inside the evaluation window that do not have live outputs.
+The service has no market clock. Every cycle takes at most 2,000 bars per
+configured ticker inside the evaluation window that do not have live outputs.
 It shares historical batches across the configured tickers and keeps each
 ticker oldest first. Batches with at least 200 pairs across multiple tickers use
 one worker process per ticker. Worker calculations run together, while database
-writes remain serialized and are committed in small ordered chunks. Small live
-cycles stay in the service process. All outputs for a pair are committed
-together, so one configured output is the completion marker. A definition
-change clears the live output cache and fills the same bounded window without a
-separate backtest path.
+writes remain serialized and are committed in small ordered chunks. The larger
+per-ticker batches preserve signal caches and avoid restarting worker processes
+several times per session. Small live cycles stay in the service process. All
+outputs for a pair are committed together, so one configured output is the
+completion marker.
+
+A signal definition change or explicit full recalculation replaces every live
+output. An algo-only definition change preserves stored signals and unaffected
+algo outputs. It loads the changed algo's persisted inputs in ticker batches,
+then replaces only that algo's outputs and trades. An interrupted targeted
+recalculation resumes at each ticker's first missing output.
 
 Every entry or exit produced by a configured algo writes a trade, whether the
 evaluated bar is historical or new.

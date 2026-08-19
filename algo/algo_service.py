@@ -58,12 +58,15 @@ from signals import (
 )
 from storage import (
     _bar_close,
+    _bar_closes_for_timestamps,
     _connect,
     _context_bars,
+    _incomplete_algo_kinds,
     _init_database,
     _live_trade_alerts,
     _log,
     _output_state,
+    _outputs_for_timestamps,
     _pending,
     _prior_output,
     _previous_outputs,
@@ -74,6 +77,7 @@ from storage import (
     _replace_empty_calculation,
     _shape_warm_targets,
     _sync_live_definitions,
+    _targeted_recalculation_pairs,
     _upsert_output_rows,
     _warm_primary,
     _write_result,
@@ -409,7 +413,7 @@ class _EvaluationState:
         )
 
     def advance(self, result: Mapping[str, Any]) -> None:
-        self.previous.update(result["signals"])
+        self.previous.update(result.get("_state_inputs", result["signals"]))
         close = float(result["_bar_close"])
         ts = int(result["ts"])
         for name, output in result["algos"].items():
@@ -467,6 +471,61 @@ def _empty_evaluation_state(
         open_entries={name: [] for name in settings.enabled_algos()},
         session_outputs={name: [] for name in settings.enabled_algos()},
     )
+
+
+def _evaluate_algo_node(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    ticker: str,
+    ts: int,
+    name: str,
+    inputs: Mapping[str, Any],
+    previous: Mapping[str, Any],
+    state: Optional[_EvaluationState],
+) -> tuple[tuple[bool, bool, int], tuple[Mapping[str, Any], ...]]:
+    node = settings.algos[name]
+    if state is None:
+        open_entries, session_outputs = _output_state(
+            connection, settings, ticker, name, ts
+        )
+    else:
+        open_entries = state.open_entries[name]
+        session_outputs = state.session_outputs[name]
+    position = tuple(open_entries)
+    try:
+        output = ALGO_FUNCTIONS[node["function"]].function(
+            AlgoContext(
+                ticker=ticker,
+                ts=ts,
+                parameters=node["params"],
+                inputs=inputs,
+                previous=previous,
+                open_entries=position,
+                session_outputs=tuple(session_outputs),
+                read_bars=lambda start_ts, through_ts=None: _context_bars(
+                    connection,
+                    ticker,
+                    ts,
+                    start_ts,
+                    through_ts,
+                ),
+            )
+        )
+    except Exception as exc:
+        raise EvaluationError("algo %s failed: %s" % (name, exc)) from exc
+    try:
+        result = _algo_output(output)
+    except EvaluationError as exc:
+        raise EvaluationError(
+            "algo %s returned invalid output: %s" % (name, exc)
+        ) from exc
+    if result[1]:
+        result = (
+            (False, True, int(position[0]["direction"]))
+            if position
+            else (False, False, 0)
+        )
+    return result, position
 
 
 
@@ -535,48 +594,17 @@ def run_core(
                 if state is not None
                 else _prior_output(connection, ticker, ts, target)
             )
-        if state is None:
-            open_entries, session_outputs = _output_state(
-                connection, settings, ticker, name, ts
-            )
-        else:
-            open_entries = state.open_entries[name]
-            session_outputs = state.session_outputs[name]
-        position = tuple(open_entries)
+        result, position = _evaluate_algo_node(
+            connection,
+            settings,
+            ticker,
+            ts,
+            name,
+            inputs,
+            previous,
+            state,
+        )
         algo_open_entries[name] = position
-        try:
-            output = ALGO_FUNCTIONS[node["function"]].function(
-                AlgoContext(
-                    ticker=ticker,
-                    ts=ts,
-                    parameters=node["params"],
-                    inputs=inputs,
-                    previous=previous,
-                    open_entries=position,
-                    session_outputs=tuple(session_outputs),
-                    read_bars=lambda start_ts, through_ts=None: _context_bars(
-                        connection,
-                        ticker,
-                        ts,
-                        start_ts,
-                        through_ts,
-                    ),
-                )
-            )
-        except Exception as exc:
-            raise EvaluationError("algo %s failed: %s" % (name, exc)) from exc
-        try:
-            result = _algo_output(output)
-        except EvaluationError as exc:
-            raise EvaluationError(
-                "algo %s returned invalid output: %s" % (name, exc)
-            ) from exc
-        if result[1]:
-            result = (
-                (False, True, int(position[0]["direction"]))
-                if position
-                else (False, False, 0)
-            )
         algo_values[name] = result
         serialized[name] = _json(result)
 
@@ -592,6 +620,107 @@ def run_core(
             name: serialized[name]
             for name in (*signal_values, *selected_values)
         },
+        "_bar_close": bar_close,
+    }
+
+
+def _targeted_input_names(
+    settings: Settings, algos: Sequence[str]
+) -> tuple[str, ...]:
+    selected = set(algos)
+    names: list[str] = []
+    for name in settings.algo_order:
+        if name not in selected:
+            continue
+        for target in settings.algos[name]["inputs"]:
+            if target not in selected and target not in names:
+                names.append(target)
+    return tuple(names)
+
+
+def _seed_targeted_evaluation_state(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    ticker: str,
+    ts: int,
+    algos: Sequence[str],
+) -> _EvaluationState:
+    """Seed a resumed target stream, but keep a fresh target window empty."""
+    marker = next((name for name in settings.algo_order if name in algos), None)
+    if marker is None or _prior_output(connection, ticker, ts, marker) is None:
+        return _empty_evaluation_state(settings, ticker, ts)
+    return _seed_evaluation_state(connection, settings, ticker, ts)
+
+
+def run_targeted_core(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    ticker: str,
+    ts: int,
+    algos: Sequence[str],
+    state: _EvaluationState,
+    stored_inputs: Mapping[str, Any],
+    bar_close: float,
+) -> dict[str, Any]:
+    """Evaluate selected algos from persisted, unchanged upstream outputs."""
+    ticker = ticker.strip().upper()
+    if ticker not in settings.tickers:
+        raise EvaluationError("ticker is not in config: %s" % ticker)
+    if not state.accepts(settings, ticker, ts):
+        raise EvaluationError("evaluation state does not precede %s %s" % (ticker, ts))
+
+    requested = set(algos)
+    selected = tuple(name for name in settings.algo_order if name in requested)
+    unknown = requested - set(selected)
+    if unknown:
+        raise EvaluationError("unknown algo: %s" % sorted(unknown)[0])
+    required_inputs = _targeted_input_names(settings, selected)
+    missing = [name for name in required_inputs if name not in stored_inputs]
+    if missing:
+        raise EvaluationError(
+            "persisted input %s is missing for %s %s"
+            % (missing[0], ticker, ts)
+        )
+
+    selected_set = set(selected)
+    algo_values: dict[str, tuple[bool, bool, int]] = {}
+    algo_open_entries: dict[str, tuple[Mapping[str, Any], ...]] = {}
+    serialized: dict[str, str] = {}
+    for name in settings.algo_order:
+        if name not in selected_set:
+            continue
+        node = settings.algos[name]
+        inputs: dict[str, Any] = {}
+        previous: dict[str, Any] = {"_self": state.previous.get(name)}
+        for target in node["inputs"]:
+            inputs[target] = (
+                list(algo_values[target])
+                if target in selected_set
+                else stored_inputs[target]
+            )
+            previous[target] = state.previous.get(target)
+        result, position = _evaluate_algo_node(
+            connection,
+            settings,
+            ticker,
+            ts,
+            name,
+            inputs,
+            previous,
+            state,
+        )
+        algo_open_entries[name] = position
+        algo_values[name] = result
+        serialized[name] = _json(result)
+
+    return {
+        "ticker": ticker,
+        "ts": ts,
+        "signals": {},
+        "algos": algo_values,
+        "_open_entries": algo_open_entries,
+        "_serialized": serialized,
+        "_state_inputs": dict(stored_inputs),
         "_bar_close": bar_close,
     }
 
@@ -625,6 +754,7 @@ def _parallel_ticker_batch(
     settings: Settings,
     ticker: str,
     timestamps: Sequence[int],
+    target_algos: Sequence[str] = (),
 ) -> tuple[str, dict[str, int], list[dict[str, Any]]]:
     """Evaluate one ticker chronologically and serialize each database write."""
     clear_signal_caches()
@@ -635,6 +765,22 @@ def _parallel_ticker_batch(
     state: Optional[_EvaluationState] = None
     pending_results: list[Mapping[str, Any]] = []
     connection = _connect(settings.database)
+    targeted = bool(target_algos)
+    stored_by_ts = (
+        _outputs_for_timestamps(
+            connection,
+            ticker,
+            timestamps,
+            _targeted_input_names(settings, target_algos),
+        )
+        if targeted
+        else {}
+    )
+    closes_by_ts = (
+        _bar_closes_for_timestamps(connection, ticker, timestamps)
+        if targeted
+        else {}
+    )
 
     def flush_results() -> None:
         if not pending_results:
@@ -668,8 +814,30 @@ def _parallel_ticker_batch(
                 break
             if state is None or not state.accepts(settings, ticker, ts):
                 flush_results()
-                state = _seed_evaluation_state(connection, settings, ticker, ts)
-            result = run_core(connection, settings, ticker, ts, state=state)
+                state = (
+                    _seed_targeted_evaluation_state(
+                        connection, settings, ticker, ts, target_algos
+                    )
+                    if targeted
+                    else _seed_evaluation_state(connection, settings, ticker, ts)
+                )
+            if targeted:
+                if ts not in closes_by_ts:
+                    raise EvaluationError(
+                        "timestamp is not a stored bar: %s %s" % (ticker, ts)
+                    )
+                result = run_targeted_core(
+                    connection,
+                    settings,
+                    ticker,
+                    ts,
+                    target_algos,
+                    state,
+                    stored_by_ts.get(ts, {}),
+                    closes_by_ts[ts],
+                )
+            else:
+                result = run_core(connection, settings, ticker, ts, state=state)
             state.advance(result)
             pending_results.append(result)
             if len(pending_results) == PARALLEL_WRITE_BATCH_SIZE:
@@ -798,11 +966,25 @@ def _report_broker_result(config_path: Path, level: str, message: str) -> None:
 
 
 
+@dataclass(frozen=True)
+class _CyclePlan:
+    mode: str
+    replace_algos: tuple[str, ...] = ()
+    replacement_pending: bool = False
+
+    def target_algos(self, settings: Settings) -> tuple[str, ...]:
+        if self.mode != "targeted":
+            return ()
+        selected = set(self.replace_algos)
+        return tuple(name for name in settings.algo_order if name in selected)
+
+
 def _prepare_cycle(
     connection: sqlite3.Connection,
     settings: Settings,
     force_recalculate: bool,
-) -> tuple[bool, tuple[str, ...]]:
+    stop_event: Optional[threading.Event] = None,
+) -> _CyclePlan:
     now = int(time.time())
     definition_sync = _sync_live_definitions(connection, settings, now)
     changed_algos = tuple(definition_sync["changed_algos"])
@@ -819,8 +1001,6 @@ def _prepare_cycle(
             now,
         )
 
-    recalculating = bool(force_recalculate or signals_changed or changed_algos)
-    replace_algos = settings.enabled_algos() if force_recalculate else changed_algos
     if force_recalculate:
         _log(
             connection,
@@ -828,8 +1008,24 @@ def _prepare_cycle(
             "explicit algorithm recalculation requested",
             now,
         )
-    if recalculating:
-        return True, replace_algos
+    if force_recalculate or signals_changed:
+        replace_algos = tuple(
+            dict.fromkeys((*settings.enabled_algos(), *changed_algos))
+        )
+        return _CyclePlan("full", replace_algos, True)
+    if changed_algos and settings.signal_order:
+        return _CyclePlan("targeted", changed_algos, True)
+    if changed_algos:
+        replace_algos = tuple(
+            dict.fromkeys((*settings.enabled_algos(), *changed_algos))
+        )
+        return _CyclePlan("full", replace_algos, True)
+
+    incomplete_algos = _incomplete_algo_kinds(
+        connection, settings, stop_event=stop_event
+    )
+    if incomplete_algos:
+        return _CyclePlan("targeted", incomplete_algos, False)
 
     connection.commit()
     shape_ticker, shape_rows = _warm_primary_shape(connection, settings)
@@ -855,7 +1051,7 @@ def _prepare_cycle(
             logging.info(message)
     if any(row_count for row_count, _message in maintenance):
         connection.commit()
-    return False, replace_algos
+    return _CyclePlan("pending")
 
 
 
@@ -913,6 +1109,7 @@ def _evaluate_parallel_pairs(
     replace_algos: Sequence[str],
     replacement_pending: bool,
     stop_event: Optional[threading.Event],
+    target_algos: Sequence[str] = (),
 ) -> tuple[dict[str, int], list[dict[str, Any]], bool]:
     stats = {"pairs": 0, "outputs": 0, "entries": 0, "exits": 0}
     trade_alerts: list[dict[str, Any]] = []
@@ -925,12 +1122,36 @@ def _evaluate_parallel_pairs(
             return stats, trade_alerts, replacement_pending
         ticker, ts = remaining.pop(0)
         state = _empty_evaluation_state(settings, ticker, ts)
-        result = run_core(connection, settings, ticker, ts, state=state)
+        if target_algos:
+            stored = _outputs_for_timestamps(
+                connection,
+                ticker,
+                (ts,),
+                _targeted_input_names(settings, target_algos),
+            ).get(ts, {})
+            bar_close = _bar_close(connection, ticker, ts)
+            if bar_close is None:
+                raise EvaluationError(
+                    "timestamp is not a stored bar: %s %s" % (ticker, ts)
+                )
+            result = run_targeted_core(
+                connection,
+                settings,
+                ticker,
+                ts,
+                target_algos,
+                state,
+                stored,
+                bar_close,
+            )
+        else:
+            result = run_core(connection, settings, ticker, ts, state=state)
         part, first_alerts = _write_result(
             connection,
             settings,
             result,
             replace_algos=replace_algos,
+            replace_all_outputs=not target_algos,
         )
         _add_stats(stats, part)
         trade_alerts.extend(first_alerts)
@@ -983,6 +1204,7 @@ def _evaluate_parallel_pairs(
                     settings,
                     ticker,
                     tuple(timestamps),
+                    tuple(target_algos),
                 ): ticker
                 for ticker, timestamps in ticker_batches.items()
             }
@@ -1015,28 +1237,41 @@ def _evaluate_cycle(
     connection: sqlite3.Connection,
     settings: Settings,
     config_path: Path,
-    recalculating: bool,
-    replace_algos: Sequence[str],
+    plan: _CyclePlan,
     stop_event: Optional[threading.Event],
     alert_resume_after: Optional[int],
 ) -> dict[str, int]:
     stats = {"pairs": 0, "outputs": 0, "entries": 0, "exits": 0}
     states: dict[str, _EvaluationState] = {}
-    pairs = (
-        _recalculation_pairs(connection, settings, stop_event=stop_event)
-        if recalculating
-        else _pending(connection, settings, stop_event=stop_event)
-    )
-    replacement_pending = recalculating
+    target_algos = plan.target_algos(settings)
+    if plan.mode == "full":
+        pairs = _recalculation_pairs(connection, settings, stop_event=stop_event)
+    elif plan.mode == "targeted" and plan.replacement_pending:
+        pairs = (
+            _recalculation_pairs(connection, settings, stop_event=stop_event)
+            if target_algos
+            else []
+        )
+    elif plan.mode == "targeted":
+        pairs = _targeted_recalculation_pairs(
+            connection,
+            settings,
+            target_algos,
+            stop_event=stop_event,
+        )
+    else:
+        pairs = _pending(connection, settings, stop_event=stop_event)
+    replacement_pending = plan.replacement_pending
     parallel = _should_parallelize(pairs, replacement_pending)
     if parallel:
         stats, trade_alerts, replacement_pending = _evaluate_parallel_pairs(
             connection,
             settings,
             pairs,
-            replace_algos,
+            plan.replace_algos,
             replacement_pending,
             stop_event,
+            target_algos,
         )
         _dispatch_trade_alerts(
             connection,
@@ -1054,15 +1289,49 @@ def _evaluate_cycle(
                 state = (
                     _empty_evaluation_state(settings, ticker, ts)
                     if replacement_pending
-                    else _seed_evaluation_state(connection, settings, ticker, ts)
+                    else (
+                        _seed_targeted_evaluation_state(
+                            connection, settings, ticker, ts, target_algos
+                        )
+                        if target_algos
+                        else _seed_evaluation_state(
+                            connection, settings, ticker, ts
+                        )
+                    )
                 )
                 states[ticker] = state
-            result = run_core(connection, settings, ticker, ts, state=state)
+            if target_algos:
+                stored = _outputs_for_timestamps(
+                    connection,
+                    ticker,
+                    (ts,),
+                    _targeted_input_names(settings, target_algos),
+                ).get(ts, {})
+                bar_close = _bar_close(connection, ticker, ts)
+                if bar_close is None:
+                    raise EvaluationError(
+                        "timestamp is not a stored bar: %s %s" % (ticker, ts)
+                    )
+                result = run_targeted_core(
+                    connection,
+                    settings,
+                    ticker,
+                    ts,
+                    target_algos,
+                    state,
+                    stored,
+                    bar_close,
+                )
+            else:
+                result = run_core(connection, settings, ticker, ts, state=state)
             part, trade_alerts = _write_result(
                 connection,
                 settings,
                 result,
-                replace_algos=replace_algos if replacement_pending else None,
+                replace_algos=(
+                    plan.replace_algos if replacement_pending else None
+                ),
+                replace_all_outputs=not target_algos,
             )
             replacement_pending = False
             state.advance(result)
@@ -1089,7 +1358,11 @@ def _evaluate_cycle(
                 logging.info(progress)
 
     if replacement_pending and not pairs:
-        _replace_empty_calculation(connection, replace_algos)
+        _replace_empty_calculation(
+            connection,
+            plan.replace_algos,
+            replace_all_outputs=plan.mode == "full",
+        )
     label = (
         "cycle stopped"
         if stop_event is not None and stop_event.is_set()
@@ -1126,15 +1399,17 @@ def cycle(
     _init_database(settings.database)
     connection = _connect(settings.database)
     try:
-        recalculating, replace_algos = _prepare_cycle(
-            connection, settings, force_recalculate
+        plan = _prepare_cycle(
+            connection,
+            settings,
+            force_recalculate,
+            stop_event=stop_event,
         )
         stats = _evaluate_cycle(
             connection,
             settings,
             config_path,
-            recalculating,
-            replace_algos,
+            plan,
             stop_event,
             alert_resume_after,
         )
@@ -1310,7 +1585,7 @@ class Service:
                         recalculation_running = False
                     delay = (
                         0
-                        if stats["pairs"] == CYCLE_PAIR_LIMIT
+                        if stats["pairs"] >= CYCLE_PAIR_LIMIT
                         else settings.poll_seconds
                     )
                 except ConfigError as exc:
