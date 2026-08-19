@@ -330,7 +330,9 @@ function renderAlgo(algo, tabId) {
   card.id = "algo-panel";
   card.setAttribute("role", "tabpanel");
   card.setAttribute("aria-labelledby", tabId);
-  card.append(renderDefinition(algo), renderTickerTable(algo));
+  const overview = createElement("div", "algo-overview");
+  overview.append(renderDefinition(algo), renderTickerTable(algo));
+  card.append(overview);
   const open = renderOpenPositions(algo);
   if (open) card.append(open);
   card.append(renderTrades(algo));

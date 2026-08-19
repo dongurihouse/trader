@@ -1995,6 +1995,26 @@ pre {
   padding: clamp(22px, 3vw, 34px);
 }
 
+.algo-overview {
+  display: grid;
+  min-width: 0;
+  gap: 26px;
+}
+
+.algo-overview > .algo-section {
+  margin-top: 0;
+}
+
+@media (min-width: 1101px) {
+  .algo-overview {
+    grid-template-columns: minmax(300px, 0.72fr) minmax(0, 1.28fr);
+  }
+
+  .algo-overview .algo-definition {
+    grid-template-columns: 1fr;
+  }
+}
+
 .algo-tab-metric-grid {
   display: grid;
   grid-template-columns:
