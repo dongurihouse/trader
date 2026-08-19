@@ -86,6 +86,24 @@ to +3.8211%. The guard removed the July 21 SPCX loss, the July 24 MU loss, and
 an August 12 MU gain of +0.0437%. These results exclude fees, slippage, and
 sizing, and the sample remains small.
 
+## Sentiment pullback give-back exit
+
+Measured on 2026-08-18 with the current six-ticker fixed-history ledger, the
+exit now tracks the best close-based profit since entry, floored at zero. It
+closes when the current close is 0.9 percentage points below that peak. The
+existing close-based 1.0% take-profit and 1.5% stop remain unchanged.
+
+Only the two flagged WDC shorts changed. The July 13 exit moved from minute 10
+at -0.8778% to minute 9 at -0.2140%. The July 28 exit moved from minute 6 at
+-1.5669% to minute 3 at -1.0836%. WDC's five-trade return improved from
+-1.5404% to -0.3933%.
+
+The exact service replay kept 22 trades and a 63.6% win rate. Gross return
+changed from +6.9821% to +8.1292%, and maximum drawdown changed from -2.3383%
+to -1.8550%. Discovery return through July 31 changed from +3.1610% to
++4.3081%; forward return from August 3 remained +3.8211%. These results exclude
+fees, slippage, and sizing, and the sample remains small.
+
 ## Lateday momentum win-rate refinement
 
 Measured 2026-08-18 on the recorded close-window replay: 2026-07-27 through
