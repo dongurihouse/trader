@@ -258,9 +258,9 @@
         "last_close"
       ],
       "params": {
-        "first30_min_pct": 1.0,
+        "first30_min_pct": 2.0,
         "risk_atr_frac": 0.15,
-        "target_r": 1.5,
+        "target_r": 0.5,
         "min_rvol": 1.25,
         "minute_min": 359,
         "minute_max": 380,

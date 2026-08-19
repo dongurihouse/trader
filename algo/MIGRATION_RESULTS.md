@@ -85,3 +85,33 @@ from +1.9181% to +3.1610%. Forward return from August 3 changed from +3.8648%
 to +3.8211%. The guard removed the July 21 SPCX loss, the July 24 MU loss, and
 an August 12 MU gain of +0.0437%. These results exclude fees, slippage, and
 sizing, and the sample remains small.
+
+## Lateday momentum win-rate refinement
+
+Measured 2026-08-18 on the recorded close-window replay: 2026-07-27 through
+2026-08-18, all six tickers, 31 trades. Each trade entered at minute 359 in
+the direction of the first-half-hour return. Losses concentrated in trades
+with a first-half-hour move below 2%; that band held four wins and five
+losses. Trend-confirmation gates were also measured. A same-sign-as-open gate
+and a minute-30-to-entry drift gate both lowered the win rate, because the
+strongest wins come when the afternoon drifts against the morning move and
+the close resumes it.
+
+Two parameter changes follow. `first30_min_pct` rises from 1.0 to 2.0.
+`target_r` falls from 1.5 to 0.5. A bracket simulation reproduced all 31
+recorded exits before the sweep. Returns below are unweighted sums of
+per-trade close-to-close moves. They omit the fee and capital adjustments of
+the tables above.
+
+| params | trades | win rate | return |
+| --- | ---: | ---: | ---: |
+| previous (1.0 / 1.5R) | 31 | 67.7% | +18.50 |
+| threshold only (2.0 / 1.5R) | 22 | 77.3% | +18.90 |
+| adopted (2.0 / 0.5R) | 22 | 81.8% | +11.34 |
+
+The adopted set trades total return for win rate on request. Three of the
+four remaining losses are flat exits smaller than 0.3 points. With the
+0.10-point round-trip cost of the tables above, the win rate is 61.3% before
+the change and 77.3% after it. The prior 14:45-entry window measured 25%
+wins on SNDK. The move to the close window on 2026-08-17 removed that
+failure mode; these parameters refine the close window.
