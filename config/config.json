@@ -56,6 +56,10 @@
       "ASTS": {
         "long": "ASTX",
         "short": "ASTN"
+      },
+      "MU": {
+        "long": "MUU",
+        "short": "MUZ"
       }
     }
   },
