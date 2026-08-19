@@ -29,7 +29,7 @@ class EvaluationError(RuntimeError):
 @dataclass(frozen=True)
 class BrokerSettings:
     enabled: bool
-    quantity: str
+    dollar_amount: str
     account_env: str
     execution_tickers: Mapping[str, Mapping[str, str]]
 

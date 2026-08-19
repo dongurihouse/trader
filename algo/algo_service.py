@@ -63,6 +63,7 @@ from signals import (
 from storage import (
     _bar_close,
     _bar_closes_for_timestamps,
+    _broker_entry_order_ids,
     _connect,
     _context_bars,
     _incomplete_algo_kinds,
@@ -79,6 +80,7 @@ from storage import (
     _relative_momentum_repair_candidates,
     _relative_momentum_warm_targets,
     _replace_empty_calculation,
+    _record_broker_order,
     _shape_warm_targets,
     _sync_live_definitions,
     _targeted_recalculation_pairs,
@@ -141,7 +143,7 @@ def _broker_settings(
         raise ConfigError("broker must be an object")
     unknown = set(raw) - {
         "enabled",
-        "quantity",
+        "dollar_amount",
         "account_env",
         "execution_tickers",
     }
@@ -150,11 +152,13 @@ def _broker_settings(
     enabled = raw.get("enabled", False)
     if not isinstance(enabled, bool):
         raise ConfigError("broker.enabled must be boolean")
-    quantity = raw.get("quantity", "0")
-    if not isinstance(quantity, str) or not re.fullmatch(
-        r"\d+(?:\.\d{1,6})?", quantity
+    dollar_amount = raw.get("dollar_amount", "0")
+    if not isinstance(dollar_amount, str) or not re.fullmatch(
+        r"\d+(?:\.\d{1,2})?", dollar_amount
     ):
-        raise ConfigError("broker.quantity must be a non-negative decimal string")
+        raise ConfigError(
+            "broker.dollar_amount must be a non-negative USD decimal string"
+        )
     account_env = raw.get("account_env", "TRADER_ROBINHOOD_ACCOUNT")
     if not isinstance(account_env, str) or not re.fullmatch(
         r"[A-Z_][A-Z0-9_]*", account_env
@@ -195,7 +199,7 @@ def _broker_settings(
         execution_tickers[ticker] = mapping
     return BrokerSettings(
         enabled=enabled,
-        quantity=quantity,
+        dollar_amount=dollar_amount,
         account_env=account_env,
         execution_tickers=execution_tickers,
     )
@@ -1069,8 +1073,14 @@ def _dispatch_trade_alerts(
             live_records,
             config_path=config_path,
             account_env=settings.broker.account_env,
-            quantity=settings.broker.quantity,
+            dollar_amount=settings.broker.dollar_amount,
             execution_tickers=settings.broker.execution_tickers,
+            entry_order_ids=lambda record: _broker_entry_order_ids(
+                settings.database, record
+            ),
+            on_submitted=lambda record, order_id: _record_broker_order(
+                settings.database, record, order_id
+            ),
             on_result=lambda level, message: _report_broker_result(
                 config_path, level, message
             ),

@@ -179,6 +179,15 @@ def _init_database(path: Path) -> None:
                     "ALTER TABLE trades ADD COLUMN direction INTEGER NOT NULL "
                     "DEFAULT 1 CHECK(direction IN (-1, 1))"
                 )
+            if "real_order" not in trade_columns:
+                connection.execute(
+                    "ALTER TABLE trades ADD COLUMN real_order INTEGER NOT NULL "
+                    "DEFAULT 0 CHECK(real_order IN (0, 1))"
+                )
+            if "broker_order_id" not in trade_columns:
+                connection.execute(
+                    "ALTER TABLE trades ADD COLUMN broker_order_id TEXT"
+                )
             removed_history = _remove_definition_history(connection)
             migrated_outputs = _migrate_outputs(connection)
             if removed_history:
@@ -198,6 +207,152 @@ def _init_database(path: Path) -> None:
         finally:
             connection.close()
         _INITIALIZED_DATABASES.add(path)
+
+
+def _broker_entry_order_ids(
+    path: Path, record: Mapping[str, Any]
+) -> tuple[str, ...]:
+    """Return accepted entry orders still open at one live exit event."""
+    if record.get("action") != "exit_all":
+        return ()
+    _init_database(path)
+    connection = _connect(path, read_only=True)
+    try:
+        rows = connection.execute(
+            "SELECT entry_order_id FROM broker_positions "
+            "WHERE ticker=? AND algo=? AND direction=? AND exit_order_id IS NULL "
+            "ORDER BY entry_ts",
+            (
+                str(record["ticker"]),
+                str(record["algo"]),
+                int(record["direction"]),
+            ),
+        ).fetchall()
+        return tuple(str(row["entry_order_id"]) for row in rows)
+    finally:
+        connection.close()
+
+
+def _record_broker_order(
+    path: Path, record: Mapping[str, Any], order_id: str
+) -> None:
+    """Mark a live trade only after Robinhood accepts its broker order."""
+    normalized_order_id = order_id.strip()
+    if not normalized_order_id:
+        raise EvaluationError("broker order id is empty")
+    action = str(record["action"])
+    if action not in ("entry", "exit_all"):
+        raise EvaluationError("broker trade action is invalid")
+    _init_database(path)
+    connection = _connect(path)
+    try:
+        key = (
+            str(record["ticker"]),
+            str(record["algo"]),
+            int(record["ts"]),
+            action,
+        )
+        trade = connection.execute(
+            "SELECT real_order,broker_order_id FROM trades "
+            "WHERE ticker=? AND algo=? AND ts=? AND action=?",
+            key,
+        ).fetchone()
+        if trade is None:
+            raise EvaluationError("broker trade row no longer exists")
+        if action == "entry":
+            symbol = str(record.get("symbol", "")).strip().upper()
+            if not symbol:
+                raise EvaluationError("broker entry symbol is empty")
+            existing = connection.execute(
+                "SELECT entry_order_id FROM broker_positions "
+                "WHERE ticker=? AND algo=? AND entry_ts=?",
+                key[:3],
+            ).fetchone()
+            if (
+                existing is not None
+                and str(existing["entry_order_id"]) != normalized_order_id
+            ):
+                raise EvaluationError(
+                    "broker entry already has a different order id"
+                )
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO broker_positions("
+                    "ticker,algo,entry_ts,direction,symbol,entry_order_id"
+                    ") VALUES (?,?,?,?,?,?)",
+                    (
+                        key[0],
+                        key[1],
+                        key[2],
+                        int(record["direction"]),
+                        symbol,
+                        normalized_order_id,
+                    ),
+                )
+            connection.execute(
+                "UPDATE trades SET real_order=1,broker_order_id=? "
+                "WHERE ticker=? AND algo=? AND ts=? AND action=?",
+                (normalized_order_id, *key),
+            )
+        else:
+            entry_order_ids = tuple(
+                str(value) for value in record.get("entry_order_ids", ())
+            )
+            if not entry_order_ids:
+                raise EvaluationError("broker close has no entry order ids")
+            placeholders = ",".join("?" for _ in entry_order_ids)
+            positions = connection.execute(
+                "SELECT entry_order_id FROM broker_positions "
+                f"WHERE entry_order_id IN ({placeholders}) "
+                "AND ticker=? AND algo=? AND direction=? "
+                "AND exit_order_id IS NULL",
+                (
+                    *entry_order_ids,
+                    key[0],
+                    key[1],
+                    int(record["direction"]),
+                ),
+            ).fetchall()
+            if {str(row["entry_order_id"]) for row in positions} != set(
+                entry_order_ids
+            ):
+                raise EvaluationError("broker close entry state changed")
+            connection.execute(
+                "UPDATE broker_positions SET exit_ts=?,exit_order_id=? "
+                f"WHERE entry_order_id IN ({placeholders})",
+                (key[2], normalized_order_id, *entry_order_ids),
+            )
+            connection.execute(
+                "UPDATE trades SET real_order=1,broker_order_id=? "
+                "WHERE ticker=? AND algo=? AND ts=? AND action=?",
+                (normalized_order_id, *key),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _trade_broker_state(
+    connection: sqlite3.Connection,
+    row: tuple[str, str, int, str, int],
+) -> tuple[int, Optional[str]]:
+    ticker, algo, ts, action, _direction = row
+    if action == "entry":
+        stored = connection.execute(
+            "SELECT entry_order_id AS order_id FROM broker_positions "
+            "WHERE ticker=? AND algo=? AND entry_ts=?",
+            (ticker, algo, ts),
+        ).fetchone()
+    else:
+        stored = connection.execute(
+            "SELECT exit_order_id AS order_id FROM broker_positions "
+            "WHERE ticker=? AND algo=? AND exit_ts=? AND exit_order_id IS NOT NULL "
+            "LIMIT 1",
+            (ticker, algo, ts),
+        ).fetchone()
+    if stored is None:
+        return 0, None
+    return 1, str(stored["order_id"])
 
 
 
@@ -1037,6 +1192,9 @@ def _write_result(
     if not connection.in_transaction:
         connection.execute("BEGIN IMMEDIATE")
     try:
+        stored_trade_rows = [
+            (*row, *_trade_broker_state(connection, row)) for row in trade_rows
+        ]
         if replace_algos is not None:
             if replace_all_outputs:
                 connection.execute("DELETE FROM outputs")
@@ -1055,11 +1213,20 @@ def _write_result(
                 tuple(sorted(replaced_names)),
             )
             connection.executemany(
-                "INSERT INTO trades(ticker,algo,ts,action,direction) "
-                "VALUES (?,?,?,?,?)",
-                [row for row in trade_rows if row[1] in replaced_names],
+                "INSERT INTO trades("
+                "ticker,algo,ts,action,direction,real_order,broker_order_id"
+                ") VALUES (?,?,?,?,?,?,?)",
+                [row for row in stored_trade_rows if row[1] in replaced_names],
             )
-        for ticker, name, ts, action, direction in trade_rows:
+        for (
+            ticker,
+            name,
+            ts,
+            action,
+            direction,
+            real_order,
+            broker_order_id,
+        ) in stored_trade_rows:
             if name not in replaced_names:
                 existing = connection.execute(
                     "SELECT action,direction FROM trades "
@@ -1079,9 +1246,18 @@ def _write_result(
                     )
                 else:
                     connection.execute(
-                        "INSERT INTO trades(ticker,algo,ts,action,direction) "
-                        "VALUES (?,?,?,?,?)",
-                        (ticker, name, ts, action, direction),
+                        "INSERT INTO trades("
+                        "ticker,algo,ts,action,direction,real_order,broker_order_id"
+                        ") VALUES (?,?,?,?,?,?,?)",
+                        (
+                            ticker,
+                            name,
+                            ts,
+                            action,
+                            direction,
+                            real_order,
+                            broker_order_id,
+                        ),
                     )
             price = connection.execute(
                 "SELECT close FROM bars WHERE ticker=? AND ts=?",

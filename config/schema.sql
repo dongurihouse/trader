@@ -48,14 +48,34 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE TABLE IF NOT EXISTS trades (
-    ticker    TEXT    NOT NULL,
-    algo      TEXT    NOT NULL,
-    ts        INTEGER NOT NULL,
-    action    TEXT    NOT NULL,
-    direction INTEGER NOT NULL DEFAULT 1,
+    ticker          TEXT    NOT NULL,
+    algo            TEXT    NOT NULL,
+    ts              INTEGER NOT NULL,
+    action          TEXT    NOT NULL,
+    direction       INTEGER NOT NULL DEFAULT 1,
+    real_order      INTEGER NOT NULL DEFAULT 0,
+    broker_order_id TEXT,
     PRIMARY KEY (ticker, algo, ts, action),
     CHECK (action IN ('entry', 'exit_all')),
-    CHECK (direction IN (-1, 1))
+    CHECK (direction IN (-1, 1)),
+    CHECK (real_order IN (0, 1))
+);
+
+CREATE TABLE IF NOT EXISTS broker_positions (
+    ticker          TEXT    NOT NULL,
+    algo            TEXT    NOT NULL,
+    entry_ts        INTEGER NOT NULL,
+    direction       INTEGER NOT NULL,
+    symbol          TEXT    NOT NULL,
+    entry_order_id  TEXT    NOT NULL UNIQUE,
+    exit_ts         INTEGER,
+    exit_order_id   TEXT,
+    PRIMARY KEY (ticker, algo, entry_ts),
+    CHECK (direction IN (-1, 1)),
+    CHECK (
+        (exit_ts IS NULL AND exit_order_id IS NULL) OR
+        (exit_ts IS NOT NULL AND exit_order_id IS NOT NULL)
+    )
 );
 
 CREATE TABLE IF NOT EXISTS outputs (

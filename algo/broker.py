@@ -19,6 +19,10 @@ BROKER_WORKER = Path(__file__).resolve().with_name("robinhood_order.py")
 BROKER_PYTHON = TRADER_ROOT / "bars" / ".venv" / "bin" / "python"
 BROKER_TIMEOUT_SECONDS = 330
 ORDER_ACTIONS = frozenset(("entry", "exit_all"))
+REJECTED_ORDER_STATES = frozenset(
+    ("cancelled", "failed", "locate_failed", "rejected", "voided")
+)
+_SUBMISSION_LOCK = threading.Lock()
 
 
 def _env_value(path: Path, name: str) -> str:
@@ -42,9 +46,9 @@ def _request(
     record: Mapping[str, Any],
     *,
     account_number: str,
-    quantity: str,
+    dollar_amount: str,
     symbol: str,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     direction = int(record["direction"])
     action = str(record["action"])
     side = "buy" if action == "entry" else "sell"
@@ -58,38 +62,49 @@ def _request(
             str(direction),
             symbol,
             side,
+            ",".join(str(value) for value in record.get("entry_order_ids", ())),
         )
     )
-    return {
+    request = {
         "account_number": account_number,
         "symbol": symbol,
         "side": side,
         "type": "market",
-        "quantity": quantity,
         "time_in_force": "gfd",
         "market_hours": "regular_hours",
         "ref_id": str(uuid.uuid5(uuid.NAMESPACE_URL, identity)),
     }
+    if action == "entry":
+        request["dollar_amount"] = dollar_amount
+    else:
+        request["entry_order_ids"] = list(record["entry_order_ids"])
+    return request
 
 
-def _label(record: Mapping[str, Any], request: Mapping[str, str]) -> str:
+def _label(record: Mapping[str, Any], request: Mapping[str, Any]) -> str:
+    size = (
+        "dollar_amount=%s" % request["dollar_amount"]
+        if "dollar_amount" in request
+        else "entry_orders=%d" % len(request["entry_order_ids"])
+    )
     return (
-        "algo=%s action=%s symbol=%s side=%s quantity=%s"
+        "algo=%s action=%s symbol=%s side=%s %s"
         % (
             _clean(record.get("algo"), 64),
             _clean(record.get("action"), 16),
             request["symbol"],
             request["side"],
-            request["quantity"],
+            size,
         )
     )
 
 
 def _submit_one(
     record: Mapping[str, Any],
-    request: Mapping[str, str],
+    request: Mapping[str, Any],
     config_path: Path,
     on_result: Callable[[str, str], None],
+    on_submitted: Callable[[Mapping[str, Any], str], None],
 ) -> None:
     label = _label(record, request)
     try:
@@ -124,10 +139,37 @@ def _submit_one(
         response = json.loads(completed.stdout)
     except json.JSONDecodeError:
         response = {}
+    skipped = _clean(response.get("skipped")) if isinstance(response, dict) else ""
+    if skipped:
+        on_result("warn", "broker close skipped %s: %s" % (label, skipped))
+        return
     data = response.get("data", {}) if isinstance(response, dict) else {}
     order = data.get("order", data) if isinstance(data, dict) else {}
     order_id = _clean(order.get("id"), 80) if isinstance(order, dict) else ""
     state = _clean(order.get("state"), 40) if isinstance(order, dict) else ""
+    if state in REJECTED_ORDER_STATES:
+        reason = _clean(order.get("reject_reason")) if isinstance(order, dict) else ""
+        on_result(
+            "error",
+            "broker order rejected %s: state=%s%s"
+            % (label, state, " reason=%s" % reason if reason else ""),
+        )
+        return
+    if not order_id:
+        on_result(
+            "error",
+            "broker order failed %s: response did not contain an order id" % label,
+        )
+        return
+    try:
+        on_submitted(record, order_id)
+    except BaseException as exc:
+        on_result(
+            "error",
+            "broker order state failed %s order_id=%s: %s: %s"
+            % (label, order_id, type(exc).__name__, _clean(exc)),
+        )
+        return
     suffix = ""
     if order_id or state:
         suffix = " order_id=%s state=%s" % (order_id or "n/a", state or "n/a")
@@ -138,21 +180,62 @@ def _submit_all(
     records: Sequence[Mapping[str, Any]],
     *,
     account_number: str,
-    quantity: str,
+    dollar_amount: str,
     config_path: Path,
     execution_tickers: Mapping[str, Mapping[str, str]],
+    entry_order_ids: Callable[[Mapping[str, Any]], Sequence[str]],
     on_result: Callable[[str, str], None],
+    on_submitted: Callable[[Mapping[str, Any], str], None],
 ) -> None:
-    for record in records:
-        mapping = execution_tickers[str(record["ticker"])]
-        symbol = mapping["long" if int(record["direction"]) == 1 else "short"]
-        request = _request(
-            record,
-            account_number=account_number,
-            quantity=quantity,
-            symbol=symbol,
-        )
-        _submit_one(record, request, config_path, on_result)
+    with _SUBMISSION_LOCK:
+        for record in records:
+            mapping = execution_tickers[str(record["ticker"])]
+            symbol = mapping["long" if int(record["direction"]) == 1 else "short"]
+            if record["action"] == "entry":
+                actionable = ({**record, "symbol": symbol},)
+            else:
+                try:
+                    order_ids = tuple(entry_order_ids(record))
+                except BaseException as exc:
+                    on_result(
+                        "error",
+                        "broker close state failed algo=%s symbol=%s: %s: %s"
+                        % (
+                            _clean(record.get("algo"), 64),
+                            symbol,
+                            type(exc).__name__,
+                            _clean(exc),
+                        ),
+                    )
+                    continue
+                if not order_ids:
+                    on_result(
+                        "info",
+                        "broker close skipped algo=%s symbol=%s: no accepted real entry"
+                        % (_clean(record.get("algo"), 64), symbol),
+                    )
+                    continue
+                actionable = (
+                    {
+                        **record,
+                        "symbol": symbol,
+                        "entry_order_ids": order_ids,
+                    },
+                )
+            for actionable_record in actionable:
+                request = _request(
+                    actionable_record,
+                    account_number=account_number,
+                    dollar_amount=dollar_amount,
+                    symbol=symbol,
+                )
+                _submit_one(
+                    actionable_record,
+                    request,
+                    config_path,
+                    on_result,
+                    on_submitted,
+                )
 
 
 def send_broker_orders(
@@ -160,9 +243,11 @@ def send_broker_orders(
     *,
     config_path: Path,
     account_env: str,
-    quantity: str,
+    dollar_amount: str,
     execution_tickers: Mapping[str, Mapping[str, str]],
+    entry_order_ids: Callable[[Mapping[str, Any]], Sequence[str]],
     on_result: Callable[[str, str], None],
+    on_submitted: Callable[[Mapping[str, Any], str], None],
 ) -> int:
     """Queue mapped live orders and skip tickers without an execution mapping."""
     eligible = [
@@ -186,10 +271,12 @@ def send_broker_orders(
         kwargs={
             "records": eligible,
             "account_number": account_number,
-            "quantity": quantity,
+            "dollar_amount": dollar_amount,
             "config_path": config_path,
             "execution_tickers": execution_tickers,
+            "entry_order_ids": entry_order_ids,
             "on_result": on_result,
+            "on_submitted": on_submitted,
         },
         name="broker-orders",
         daemon=True,
