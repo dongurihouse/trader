@@ -42,7 +42,9 @@ python3 dash/server.py --config /absolute/path/to/config.json --host 0.0.0.0 --p
 The server uses only the Python standard library. It opens SQLite in read-only
 mode with `PRAGMA query_only = ON`, serves the interface from `dash/static`,
 refreshes the live view every 30 seconds, and reads Bars and Algo status from
-the loopback ports configured by `bars.api_port` and `algo.api_port`.
+the loopback ports configured by `bars.api_port` and `algo.api_port`. The Trade
+view starts the existing Bars virtual-environment runtime for read-only
+Robinhood account snapshots.
 
 ## Chart
 
@@ -82,3 +84,13 @@ Open <http://127.0.0.1:8790/logs> to see service logs in Dash. The view reads
 the shared SQLite `logs` table, refreshes every five seconds, and filters by
 service, level, and row count. The Trader menu on every view shows live Bars
 and Algo health from the loopback service endpoints.
+
+## Trades
+
+Open <http://127.0.0.1:8790/trades> for the combined strategy trade book. It
+shows gross strategy results, active units, and closed units grouped by their
+exit market date. Broker-routed entries and closes come from the durable local
+broker-position ledger. A separate, manually refreshable section calls
+Robinhood for the configured account's current value, buying power, cash,
+equity positions, and recent agentic equity orders. Account numbers are masked
+before data reaches the browser.

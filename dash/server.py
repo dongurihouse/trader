@@ -8,8 +8,10 @@ import gzip
 import json
 import math
 import mimetypes
+import os
 import re
 import sqlite3
+import subprocess
 import sys
 from contextlib import contextmanager
 from datetime import datetime, time
@@ -35,6 +37,8 @@ UTC = ZoneInfo("UTC")
 STATIC_DIR = DASH_ROOT / "static"
 SERVICE_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 CHART_HISTORY_START = int(datetime(2026, 7, 6, tzinfo=EASTERN).timestamp())
+ROBINHOOD_WORKER = DASH_ROOT / "robinhood_snapshot.py"
+ROBINHOOD_TIMEOUT_SECONDS = 330
 
 
 class DashboardError(Exception):
@@ -654,6 +658,160 @@ class DashboardData:
             "algorithms": algorithms,
         }
 
+    def trades(self) -> dict[str, Any]:
+        """Return one combined trade book with daily and active summaries."""
+        algorithm_payload = self.algorithms()
+        broker_entries: dict[tuple[str, str, int], dict[str, Any]] = {}
+        with self.connection() as connection:
+            tables = {
+                str(row["name"])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            if "broker_positions" in tables:
+                for row in connection.execute(
+                    """
+                    SELECT ticker, algo, entry_ts, direction, symbol,
+                           entry_order_id, exit_ts, exit_order_id
+                    FROM broker_positions
+                    ORDER BY entry_ts
+                    """
+                ):
+                    broker_entries[
+                        (str(row["ticker"]), str(row["algo"]), int(row["entry_ts"]))
+                    ] = {
+                        "execution_symbol": str(row["symbol"]),
+                        "real_entry": True,
+                        "real_close": row["exit_order_id"] is not None,
+                        "broker_exit_ts": row["exit_ts"],
+                    }
+
+        closed: list[dict[str, Any]] = []
+        active: list[dict[str, Any]] = []
+        for algorithm in algorithm_payload["algorithms"]:
+            algorithm_name = str(algorithm["name"])
+            display_name = algorithm.get("display_name") or algorithm_name
+            for trade in algorithm.get("trades", []):
+                key = (str(trade["ticker"]), algorithm_name, int(trade["entry_ts"]))
+                broker = broker_entries.get(key)
+                closed.append(
+                    {
+                        **trade,
+                        "algo": algorithm_name,
+                        "display_name": display_name,
+                        **self._broker_trade_state(broker, closed=True),
+                    }
+                )
+            for position in algorithm.get("open_positions", []):
+                key = (
+                    str(position["ticker"]),
+                    algorithm_name,
+                    int(position["entry_ts"]),
+                )
+                broker = broker_entries.get(key)
+                active.append(
+                    {
+                        **position,
+                        "algo": algorithm_name,
+                        "display_name": display_name,
+                        **self._broker_trade_state(broker, closed=False),
+                    }
+                )
+
+        closed.sort(key=lambda item: int(item["exit_ts"]), reverse=True)
+        active.sort(key=lambda item: int(item["entry_ts"]), reverse=True)
+        daily_trades: dict[str, list[dict[str, Any]]] = {}
+        for trade in closed:
+            market_date = datetime.fromtimestamp(
+                int(trade["exit_ts"]), tz=EASTERN
+            ).date().isoformat()
+            daily_trades.setdefault(market_date, []).append(trade)
+        daily = [
+            {
+                "date": market_date,
+                "stats": self._outcome_stats(day_trades, []),
+                "trades": day_trades,
+            }
+            for market_date, day_trades in sorted(daily_trades.items(), reverse=True)
+        ]
+        summary = self._outcome_stats(closed, active)
+        summary.update(
+            {
+                "real_open_units": sum(
+                    item["broker_state"] == "real_open" for item in active
+                ),
+                "paper_open_units": sum(
+                    item["broker_state"] == "paper" for item in active
+                ),
+                "missing_real_closes": sum(
+                    item["broker_state"] == "close_missing" for item in closed
+                ),
+                "trading_days": len(daily),
+            }
+        )
+        return {
+            "generated_at": int(datetime.now(tz=UTC).timestamp()),
+            "market": algorithm_payload["market"],
+            "return_basis": algorithm_payload["return_basis"],
+            "summary": summary,
+            "active": active,
+            "daily": daily,
+        }
+
+    def robinhood(self) -> dict[str, Any]:
+        """Fetch a fresh, sanitized snapshot from the configured Robinhood account."""
+        config = self.config()
+        broker = config.get("broker")
+        if not isinstance(broker, dict):
+            raise DashboardError("Broker config is unavailable")
+        account_env = broker.get("account_env")
+        if not isinstance(account_env, str) or not account_env.strip():
+            raise DashboardError("Broker account config is unavailable")
+        runtime_root = self.config_path.parent.parent
+        account_number = os.environ.get(account_env, "").strip() or self._env_value(
+            runtime_root / ".env", account_env
+        )
+        if not account_number:
+            raise DashboardError("Robinhood account is not configured")
+        python_path = Path(
+            os.environ.get(
+                "TRADER_ROBINHOOD_PYTHON",
+                str(runtime_root / "bars" / ".venv" / "bin" / "python"),
+            )
+        )
+        if not python_path.is_file():
+            raise DashboardError("Robinhood runtime is unavailable")
+        try:
+            completed = subprocess.run(
+                [str(python_path), str(ROBINHOOD_WORKER), str(self.config_path)],
+                input=json.dumps({"account_number": account_number}),
+                text=True,
+                capture_output=True,
+                timeout=ROBINHOOD_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise DashboardError(
+                "Robinhood did not respond before the timeout"
+            ) from exc
+        except OSError as exc:
+            raise DashboardError("Robinhood runtime could not start") from exc
+        if completed.returncode:
+            detail = self._clean_error(completed.stderr or completed.stdout).replace(
+                account_number, "configured account"
+            )
+            raise DashboardError(
+                "Robinhood data is unavailable%s" % (f": {detail}" if detail else "")
+            )
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise DashboardError("Robinhood returned an invalid response") from exc
+        if not isinstance(payload, dict):
+            raise DashboardError("Robinhood returned an invalid response")
+        return payload
+
     def health(self) -> dict[str, Any]:
         with self.connection() as connection:
             connection.execute("SELECT 1 FROM bars LIMIT 1").fetchone()
@@ -667,6 +825,47 @@ class DashboardData:
                 "algo": self._service_health(config, "algo", 8791),
             },
         }
+
+    @staticmethod
+    def _broker_trade_state(
+        broker: dict[str, Any] | None, *, closed: bool
+    ) -> dict[str, Any]:
+        if broker is None:
+            return {
+                "execution_symbol": None,
+                "real_entry": False,
+                "real_close": False,
+                "broker_state": "paper",
+            }
+        real_close = bool(broker["real_close"])
+        if closed:
+            state = "real_closed" if real_close else "close_missing"
+        else:
+            state = "closed_mismatch" if real_close else "real_open"
+        return {**broker, "broker_state": state}
+
+    @staticmethod
+    def _env_value(path: Path, name: str) -> str:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return ""
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() != name:
+                continue
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            return value.strip()
+        return ""
+
+    @staticmethod
+    def _clean_error(value: str, limit: int = 240) -> str:
+        return " ".join(str(value or "").split())[:limit]
 
     def _quote(self, connection: sqlite3.Connection, ticker: str) -> dict[str, Any]:
         row = connection.execute(
@@ -1138,6 +1337,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 )
             elif path == "/api/algorithms":
                 payload = self.data.algorithms()
+            elif path == "/api/trades":
+                payload = self.data.trades()
+            elif path == "/api/robinhood":
+                payload = self.data.robinhood()
             elif path == "/api/health":
                 payload = self.data.health()
             else:
@@ -1158,6 +1361,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "/logs/": "logs.html",
             "/algos": "algos.html",
             "/algos/": "algos.html",
+            "/trades": "trades.html",
+            "/trades/": "trades.html",
         }
         relative = route_files.get(path, path.lstrip("/"))
         candidate = (STATIC_DIR / relative).resolve()

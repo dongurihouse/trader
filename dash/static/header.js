@@ -1,5 +1,5 @@
 (() => {
-  const viewPaths = Object.freeze({ chart: "/", algos: "/algos" });
+  const viewPaths = Object.freeze({ chart: "/", algos: "/algos", trades: "/trades" });
   const viewStoragePrefix = "trader.last-view.";
   const button = document.querySelector("#trader-menu-button");
   const dropdown = document.querySelector("#trader-menu-dropdown");

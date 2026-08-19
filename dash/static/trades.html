@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0b1017" />
+    <meta name="description" content="Strategy trades and live Robinhood account data." />
+    <title>Trader — Trades</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/common.js" defer></script>
+    <script src="/header.js" defer></script>
+    <script src="/trades.js" defer></script>
+  </head>
+  <body class="trades-page">
+    <a class="skip-link" href="#main">Skip to trades</a>
+
+    <header class="topbar">
+      <div class="trader-menu">
+        <button class="brand" id="trader-menu-button" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="trader-menu-dropdown">
+          <span class="brand-mark market-status-mark" id="market-dot" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span>TRADER</span>
+          <span class="brand-chevron" aria-hidden="true">⌄</span>
+        </button>
+        <span class="market-status-copy" id="market-status" role="status" aria-label="Checking market"></span>
+        <div class="trader-menu-dropdown" id="trader-menu-dropdown" aria-label="Trader menu" hidden>
+          <small>Services</small>
+          <div class="menu-health-list" aria-label="Live service health">
+            <div class="health-indicator is-checking" id="health-bars">
+              <span class="health-indicator-dot" aria-hidden="true"></span>
+              <span class="health-indicator-copy">
+                <small>Bars</small>
+                <strong id="health-bars-status">Checking</strong>
+              </span>
+              <span class="health-indicator-detail" id="health-bars-detail" hidden>Waiting for response</span>
+            </div>
+            <div class="health-indicator is-checking" id="health-algo">
+              <span class="health-indicator-dot" aria-hidden="true"></span>
+              <span class="health-indicator-copy">
+                <small>Algo</small>
+                <strong id="health-algo-status">Checking</strong>
+              </span>
+              <span class="health-indicator-detail" id="health-algo-detail" hidden>Waiting for response</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <nav class="topbar-nav" aria-label="Dashboard views">
+        <a href="/" data-dashboard-view="chart">Chart</a>
+        <a href="/algos" data-dashboard-view="algos">Algos</a>
+        <a class="active" href="/trades" data-dashboard-view="trades" aria-current="page">Trade</a>
+        <a href="/logs">Logs</a>
+      </nav>
+      <div class="topbar-meta" aria-hidden="true"></div>
+    </header>
+
+    <main id="main" class="trades-main">
+      <section class="trade-heading">
+        <div>
+          <span class="trade-kicker">Execution book</span>
+          <h1>Trades</h1>
+          <p>Strategy outcomes from the local ledger, with a separate live account snapshot from Robinhood.</p>
+        </div>
+        <time id="trade-updated">Loading local ledger…</time>
+      </section>
+
+      <section class="trade-summary-grid" id="trade-summary" aria-label="Trade summary">
+        <div class="trade-loading surface"><span></span>Loading trade summary</div>
+      </section>
+
+      <div class="trade-primary-grid">
+        <section class="trade-panel surface robinhood-panel" aria-labelledby="robinhood-heading">
+          <header class="trade-panel-header">
+            <div>
+              <span class="trade-kicker live-source">Actual Robinhood data</span>
+              <h2 id="robinhood-heading">Agentic account</h2>
+            </div>
+            <button class="trade-refresh" id="refresh-robinhood" type="button">Refresh</button>
+          </header>
+          <div id="robinhood-account" aria-live="polite">
+            <div class="trade-loading"><span></span>Connecting to Robinhood</div>
+          </div>
+        </section>
+
+        <section class="trade-panel surface" aria-labelledby="active-heading">
+          <header class="trade-panel-header">
+            <div>
+              <span class="trade-kicker">Strategy ledger</span>
+              <h2 id="active-heading">Active trades</h2>
+            </div>
+            <span class="trade-panel-count" id="active-count">—</span>
+          </header>
+          <div id="active-trades" aria-live="polite">
+            <div class="trade-loading"><span></span>Loading active trades</div>
+          </div>
+        </section>
+      </div>
+
+      <section class="trade-panel surface" aria-labelledby="daily-heading">
+        <header class="trade-panel-header daily-header">
+          <div>
+            <span class="trade-kicker">Closed strategy units</span>
+            <h2 id="daily-heading">Trades by market day</h2>
+          </div>
+          <p id="return-basis">Gross returns use exact stored bar-close prices.</p>
+        </header>
+        <div class="trade-days" id="trade-days" aria-live="polite">
+          <div class="trade-loading"><span></span>Loading daily trades</div>
+        </div>
+      </section>
+    </main>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  </body>
+</html>
