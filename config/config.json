@@ -1,6 +1,6 @@
 {
   "database": "../data/trader.sqlite3",
-  "tickers": ["SNDK", "MU", "WDC", "SPY", "QQQ", "SPCX", "CBRS", "CRWV", "SKHY", "ASTS", "RKLB"],
+  "tickers": ["SNDK", "MU", "SPY", "QQQ", "SPCX", "CBRS", "CRWV", "SKHY", "ASTS", "RKLB"],
   "early_closes": ["2026-11-27", "2026-12-24"],
   "live_polling": {
     "start": "04:00",
@@ -60,6 +60,18 @@
       "MU": {
         "long": "MUU",
         "short": "MUZ"
+      },
+      "CBRS": {
+        "long": "CBRG",
+        "short": "CBRZ"
+      },
+      "CRWV": {
+        "long": "CRWU",
+        "short": "CORD"
+      },
+      "SKHY": {
+        "long": "SKUU",
+        "short": "SKDD"
       }
     }
   },
