@@ -147,7 +147,7 @@ It has these algo functions:
 | function | inputs | params |
 | --- | --- | --- |
 | `crossover` | `fast`, `slow` | none |
-| `range_breakout` | `session`, `opening_range`, `rvol_open`, `last_close` | `direction`, `target_r`, `min_rvol`, `entry_cutoff_minutes`, `flat_minutes` |
+| `range_breakout` | `session`, `opening_range`, `rvol_open`, `last_close` | `direction`, `target_r`, `min_rvol`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
 | `sentiment_pullback` | `session`, `opening_sentiment`, `pullback`, `last_close` | `early_minutes`, `early_hold_minutes`, `late_hold_minutes`, `take_profit_pct`, `stop_loss_pct`, `giveback_pct`, `pattern_exit`, `flat_minutes`, `capital_fraction` |
 | `momentum_continuation` | `session`, `first30_ret`, `atr_session`, `rvol_open`, `last_close` | `first30_min_pct`, `risk_atr_frac`, `target_r`, `min_rvol`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
 | `failed_gap` | `session`, `prior_session`, `atr_session`, `last_close` | `gap_min_pct`, `risk_atr_frac`, `target_r`, `minute_min`, `minute_max`, `entry_cutoff_minutes`, `flat_minutes` |
@@ -160,10 +160,11 @@ new code function is needed only when a strategy cannot be expressed as
 another parameter set of these functions.
 
 `orb5` forms the first ten regular-session bars, requires elapsed relative
-volume above `1.0`, and enters on the first close outside that range. The
-opposite range edge is the stop and the target is `0.5R`. It enters at most once
-per session, blocks new entries inside ten minutes to close, and closes any
-open unit five minutes before the configured regular or early close.
+volume above `1.0`, and enters on the first close outside that range before
+minute 30 (10:00 ET). The opposite range edge is the stop and the target is
+`0.25R`. It enters at most once per session, blocks new entries inside ten
+minutes to close, and closes any open unit five minutes before the configured
+regular or early close.
 
 `sentiment_pullback` fixes the opening direction after five minutes from the
 median SPY and QQQ return and requires the ticker being evaluated to agree. It

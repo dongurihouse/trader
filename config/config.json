@@ -236,8 +236,9 @@
       "inputs": ["session", "orb5_range", "orb5_rvol", "last_close"],
       "params": {
         "direction": "both",
-        "target_r": 0.5,
+        "target_r": 0.25,
         "min_rvol": 1.0,
+        "minute_max": 30,
         "entry_cutoff_minutes": 10,
         "flat_minutes": 5
       }

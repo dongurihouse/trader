@@ -61,6 +61,7 @@ def _algo_range_breakout(context: AlgoContext) -> tuple[bool, bool, int]:
     direction_param = context.parameters["direction"]
     target_r = float(context.parameters["target_r"])
     min_rvol = float(context.parameters["min_rvol"])
+    minute_max = int(context.parameters["minute_max"])
     entry_cutoff = float(context.parameters["entry_cutoff_minutes"])
     flat_minutes = float(context.parameters["flat_minutes"])
     if session is None or opening_range is None or rvol is None or price is None:
@@ -86,7 +87,11 @@ def _algo_range_breakout(context: AlgoContext) -> tuple[bool, bool, int]:
 
     if any(_algo_output(row["output"])[0] for row in context.session_outputs):
         return False, False, 0
-    if float(session["to_close"]) < entry_cutoff or rvol <= min_rvol:
+    if (
+        int(session["minute"]) >= minute_max
+        or float(session["to_close"]) < entry_cutoff
+        or rvol <= min_rvol
+    ):
         return False, False, 0
     high = float(opening_range["high"])
     low = float(opening_range["low"])
@@ -580,6 +585,7 @@ def _normalize_range_breakout(
         "direction",
         "target_r",
         "min_rvol",
+        "minute_max",
         "entry_cutoff_minutes",
         "flat_minutes",
     }
@@ -591,6 +597,7 @@ def _normalize_range_breakout(
         "direction": direction,
         "target_r": _parameter_number(parameters, "target_r"),
         "min_rvol": _parameter_number(parameters, "min_rvol"),
+        "minute_max": _parameter_int(parameters, "minute_max"),
         "entry_cutoff_minutes": _parameter_number(
             parameters, "entry_cutoff_minutes"
         ),

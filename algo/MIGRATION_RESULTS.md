@@ -41,6 +41,23 @@ continuation remains negative in the forward period.
 - The early-close map converts the regular late window from 270..380 to
   170..200 on a 210-minute session.
 
+## ORB5 win-rate refinement
+
+Measured 2026-08-18 on the complete fixed-history ledger for SNDK, MU, WDC,
+SPY, QQQ, and SPCX. CBRS, CRWV, SKHY, ASTS, and RKLB had no stored bars and are
+not part of these results. The adopted variant lowers the target from `0.5R`
+to `0.25R` and blocks entries at or after minute 30 (10:00 ET).
+
+| params | discovery trades / win rate | forward trades / win rate | all trades / win rate | gross return | cost-aware return / max drawdown |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| previous (`0.5R`, no early ceiling) | 40 / 72.5% | 31 / 74.2% | 71 / 73.2% | +35.63% | +14.27% / -4.79% |
+| adopted (`0.25R`, minute < 30) | 38 / 86.8% | 26 / 88.5% | 64 / 87.5% | +34.93% | +14.27% / -2.30% |
+
+The cost-aware results subtract 0.10 percentage points per round trip and use
+the same 50% capital cap described above. The lower target adds only one winner
+over the measured `0.30R` alternative, so smaller targets were not extrapolated.
+These remain same-data paper results and require new forward evidence.
+
 ## Sentiment overlap
 
 `sentiment_tranches` was not migrated because its counter-impulse path overlaps
