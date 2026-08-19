@@ -180,6 +180,11 @@ ATR-scaled floor. The target is 0.25 times the drive and the stop is 1.0
 times the drive from the entry price. All exits use the minute close. The
 algo goes flat five minutes before the close.
 
+`opening_drive30` is the same function with a 30-minute confirmation. It
+measures the drive to the minute-30 close, enters between minutes 30 and
+35, uses a 0.3 ATR-scaled floor, and exits at 0.25 times the drive for the
+target and 0.75 times for the stop.
+
 `second_leg` measures leg one from the session open to the minute-30 close.
 Leg one must clear an absolute floor and an ATR-scaled floor. The algo enters
 once per session, between minutes 35 and 90, on the first close beyond the

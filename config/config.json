@@ -228,6 +228,21 @@
         "entry_cutoff_minutes": 10,
         "flat_minutes": 5
       }
+    },
+    "opening_drive30": {
+      "function": "opening_drive",
+      "inputs": ["session", "atr_session", "last_close"],
+      "params": {
+        "confirm_minutes": 30,
+        "minute_min": 30,
+        "minute_max": 35,
+        "min_drive_pct": 0.5,
+        "drive_atr_frac": 0.3,
+        "target_frac": 0.25,
+        "stop_frac": 0.75,
+        "entry_cutoff_minutes": 10,
+        "flat_minutes": 5
+      }
     }
   }
 }
