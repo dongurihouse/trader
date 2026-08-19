@@ -269,3 +269,33 @@ ticker, and there is no per-algo ticker gate to exclude it.
 The config entry was removed; the `second_leg` function stays in
 strategies.py for a future retune. A retune must scan with close-based
 exits, a larger target fraction, and a steeper leg-one gate.
+
+## Opening drive 30 and the second-leg retune grid
+
+Measured 2026-08-19 from the live service recalculation after the
+`opening_drive30` merge. The node reuses the `opening_drive` function with
+a 30-minute confirmation: it enters between minutes 30 and 35 in the drive
+direction, gated by a 0.5% floor and 0.3 times the session ATR, with a
+0.25-times-drive target and a 0.75-times-drive stop.
+
+The design scan for this round used a close-based fill model calibrated
+against the two prior live replays. It reproduced `opening_drive` at 89.7%
+(live 91.3%) and `second_leg` at 74.6% (live 77.5%) before any new
+configuration was trusted. The same harness rejected every `second_leg`
+retune: across ATR gates from 0.2 to 0.4 and targets from 0.25 to 0.5, the
+break-entry structure stayed at or below its breakeven, and WDC lost 9 to
+13 points in every row. The break entry fills too late under close-based
+exits; `second_leg` stays retired.
+
+| period | trades | win rate | gross return | cost-aware return |
+| --- | ---: | ---: | ---: | ---: |
+| discovery (through 2026-07-31) | 28 | 85.7% | +19.34 | +16.54 |
+| forward (2026-08-03 on) | 23 | 91.3% | +25.21 | +22.91 |
+| all | 51 | 88.2% | +44.55 | +39.45 |
+
+The breakeven win rate for the geometry is 75%. The profit factor is 3.77,
+the average hold is 38 minutes, the worst trade is -6.05 points, and the
+maximum drawdown is -11.01 gross points. Every ticker is positive except
+WDC (-4.43 points at 57.1%). The node shares 78% of its ticker-days with
+`opening_drive`, so it acts as a second, later-confirmed unit on strong
+mornings rather than an independent edge.
