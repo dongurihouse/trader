@@ -172,13 +172,11 @@ minute 15 (09:45 ET). The opposite range edge is the stop and the target is
 minutes to close, and closes any open unit five minutes before the configured
 regular or early close.
 
-The four migrated algorithms run on every configured ticker and enter at most
-once per regular session. `lateday_momentum` follows a large first-half-hour
-move late in the session. `failed_gap_reversal` fades a gap after price returns
-inside the prior range. `gap_play` follows a gap through the fifteen-minute
-opening range. `day_extreme_reversal` arms at a qualifying fresh high or low,
-then enters only when a later closed bar within `confirmation_bars` closes
-beyond the extreme bar's opposite edge.
+Of the four migrated algorithms, `failed_gap_reversal` and `gap_play` are
+enabled on every configured ticker and enter at most once per regular session.
+`lateday_momentum` and `day_extreme_reversal` remain implemented but are not
+configured. `failed_gap_reversal` fades a gap after price returns inside the
+prior range. `gap_play` follows a gap through the fifteen-minute opening range.
 Their brackets use the entry price and the day-constant fourteen-session ATR.
 All exits use the minute close. The algo context exposes regular bars through a
 read-only accessor capped at the evaluation timestamp; the extreme fade uses

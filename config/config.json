@@ -70,10 +70,8 @@
   },
   "algo_display_names": {
     "orb5": "10-Minute Opening Range Breakout",
-    "lateday_momentum": "Late-Day Momentum Continuation",
     "failed_gap_reversal": "Failed Gap Reversal",
-    "gap_play": "15-Minute Gap Continuation",
-    "day_extreme_reversal": "Intraday Extreme Reversal"
+    "gap_play": "15-Minute Gap Continuation"
   },
   "signals": {
     "session": {
@@ -99,16 +97,6 @@
     },
     "prior_session": {
       "inputs": ["bars", "session"],
-      "params": {}
-    },
-    "first30_ret": {
-      "inputs": ["bars", "session"],
-      "params": {
-        "bars": 30
-      }
-    },
-    "session_extremes": {
-      "inputs": ["bars", "session", "atr_session"],
       "params": {}
     },
     "orb5_range": {
@@ -165,26 +153,6 @@
         "flat_minutes": 5
       }
     },
-    "lateday_momentum": {
-      "function": "momentum_continuation",
-      "inputs": [
-        "session",
-        "first30_ret",
-        "atr_session",
-        "orb5_rvol",
-        "last_close"
-      ],
-      "params": {
-        "first30_min_pct": 2.0,
-        "risk_atr_frac": 0.15,
-        "target_r": 0.5,
-        "min_rvol": 1.25,
-        "minute_min": 359,
-        "minute_max": 380,
-        "entry_cutoff_minutes": 10,
-        "flat_minutes": 5
-      }
-    },
     "failed_gap_reversal": {
       "function": "failed_gap",
       "inputs": ["session", "prior_session", "atr_session", "last_close"],
@@ -215,27 +183,6 @@
         "min_rvol": 1.0,
         "minute_min": 15,
         "minute_max": 60,
-        "entry_cutoff_minutes": 10,
-        "flat_minutes": 5
-      }
-    },
-    "day_extreme_reversal": {
-      "function": "extreme_fade",
-      "inputs": [
-        "session",
-        "session_extremes",
-        "atr_session",
-        "orb5_rvol",
-        "last_close"
-      ],
-      "params": {
-        "min_range_atr": 1.0,
-        "stop_atr_frac": 0.35,
-        "target_r": 0.35,
-        "confirmation_bars": 2,
-        "min_rvol": 1.0,
-        "minute_min": 60,
-        "minute_max": 380,
         "entry_cutoff_minutes": 10,
         "flat_minutes": 5
       }
