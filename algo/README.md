@@ -6,10 +6,13 @@ every enabled signal and algo, and stores one unversioned live output per node.
 
 The service has no market clock. Every cycle takes at most 2,000 configured
 ticker/bar pairs inside the evaluation window that do not have live outputs.
-It processes each ticker oldest first. All outputs for a pair are committed
-together, so one configured output is the completion marker. A definition
-change clears the live output cache and fills the same bounded window without a
-separate backtest path.
+It shares historical batches across the configured tickers and keeps each
+ticker oldest first. Batches with at least 200 pairs across multiple tickers use
+one worker process per ticker. Worker calculations run together, while database
+writes remain serialized. Small live cycles stay in the service process. All
+outputs for a pair are committed together, so one configured output is the
+completion marker. A definition change clears the live output cache and fills
+the same bounded window without a separate backtest path.
 
 Every entry or exit produced by a configured algo writes a trade, whether the
 evaluated bar is historical or new.
@@ -39,9 +42,10 @@ from the DT roster. The `shape` path forecast remains read-only.
 The service exposes process health and the current operation at
 `http://127.0.0.1:8791/health` for Dash. Its loopback API accepts
 `POST /cycle` and `POST /recalculate`; the named commands below call those
-endpoints. A non-empty cycle logs progress every 1,000 pairs and a batch
-summary. It also stores warnings and errors in `logs`. It does not write
-heartbeat or idle-cycle rows.
+endpoints. A non-empty serial cycle logs progress every 1,000 pairs. Parallel
+historical batches log each ticker's completion to the service output. Every
+non-empty cycle stores a batch summary. The service stores warnings and errors
+in `logs`. It does not write heartbeat or idle-cycle rows.
 
 ## Config
 

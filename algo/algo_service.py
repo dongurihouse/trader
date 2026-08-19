@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import multiprocessing
 import os
 import re
 import signal
@@ -13,6 +14,7 @@ import sqlite3
 import sys
 import threading
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -84,7 +86,10 @@ from strategies import ALGO_FUNCTIONS, _algo_output
 
 DEFAULT_CONFIG = ROOT.parent / "config" / "config.json"
 CYCLE_PROGRESS_INTERVAL = 1_000
+PARALLEL_PAIR_THRESHOLD = 200
 _RELATIVE_MOMENTUM_REPAIR_ATTEMPTS: set[tuple[str, str, int]] = set()
+_PARALLEL_WRITE_LOCK: Any = None
+_PARALLEL_STOP_EVENT: Any = None
 
 
 
@@ -609,6 +614,45 @@ def core(
         connection.close()
 
 
+def _parallel_worker_init(write_lock: Any, stop_event: Any) -> None:
+    global _PARALLEL_WRITE_LOCK, _PARALLEL_STOP_EVENT
+    _PARALLEL_WRITE_LOCK = write_lock
+    _PARALLEL_STOP_EVENT = stop_event
+
+
+def _parallel_ticker_batch(
+    settings: Settings,
+    ticker: str,
+    timestamps: Sequence[int],
+) -> tuple[str, dict[str, int], list[dict[str, Any]]]:
+    """Evaluate one ticker chronologically and serialize each database write."""
+    clear_signal_caches()
+    clear_output_state_cache()
+    clear_shape_cache()
+    stats = {"pairs": 0, "outputs": 0, "entries": 0, "exits": 0}
+    alerts: list[dict[str, Any]] = []
+    state: Optional[_EvaluationState] = None
+    connection = _connect(settings.database)
+    try:
+        for ts in timestamps:
+            if _PARALLEL_STOP_EVENT is not None and _PARALLEL_STOP_EVENT.is_set():
+                break
+            if state is None or not state.accepts(settings, ticker, ts):
+                state = _seed_evaluation_state(connection, settings, ticker, ts)
+            result = run_core(connection, settings, ticker, ts, state=state)
+            if _PARALLEL_WRITE_LOCK is None:
+                raise RuntimeError("parallel database write lock is unavailable")
+            with _PARALLEL_WRITE_LOCK:
+                part, trade_alerts = _write_result(connection, settings, result)
+            state.advance(result)
+            for key in stats:
+                stats[key] += part[key]
+            alerts.extend(trade_alerts)
+        return ticker, stats, alerts
+    finally:
+        connection.close()
+
+
 
 def _warm_primary_shape(
     connection: sqlite3.Connection,
@@ -820,6 +864,125 @@ def _dispatch_trade_alerts(
         )
 
 
+def _add_stats(total: dict[str, int], part: Mapping[str, int]) -> None:
+    for key in total:
+        total[key] += int(part[key])
+
+
+def _should_parallelize(
+    pairs: Sequence[tuple[str, int]], replacement_pending: bool
+) -> bool:
+    candidates = pairs[1:] if replacement_pending else pairs
+    return (
+        len(candidates) >= PARALLEL_PAIR_THRESHOLD
+        and len({ticker for ticker, _ts in candidates}) > 1
+    )
+
+
+def _evaluate_parallel_pairs(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    pairs: Sequence[tuple[str, int]],
+    replace_algos: Sequence[str],
+    replacement_pending: bool,
+    stop_event: Optional[threading.Event],
+) -> tuple[dict[str, int], list[dict[str, Any]], bool]:
+    stats = {"pairs": 0, "outputs": 0, "entries": 0, "exits": 0}
+    trade_alerts: list[dict[str, Any]] = []
+    remaining = list(pairs)
+
+    # Keep cache replacement atomic with the first new result before workers
+    # begin writing independent ticker streams.
+    if replacement_pending:
+        if stop_event is not None and stop_event.is_set():
+            return stats, trade_alerts, replacement_pending
+        ticker, ts = remaining.pop(0)
+        state = _empty_evaluation_state(settings, ticker, ts)
+        result = run_core(connection, settings, ticker, ts, state=state)
+        part, first_alerts = _write_result(
+            connection,
+            settings,
+            result,
+            replace_algos=replace_algos,
+        )
+        _add_stats(stats, part)
+        trade_alerts.extend(first_alerts)
+        replacement_pending = False
+
+    ticker_batches: dict[str, list[int]] = {
+        ticker: [] for ticker in settings.tickers
+    }
+    for ticker, ts in remaining:
+        ticker_batches[ticker].append(ts)
+    ticker_batches = {
+        ticker: timestamps
+        for ticker, timestamps in ticker_batches.items()
+        if timestamps
+    }
+    if not ticker_batches:
+        return stats, trade_alerts, replacement_pending
+
+    context = multiprocessing.get_context("spawn")
+    write_lock = context.Lock()
+    worker_stop_event = context.Event()
+    monitor_done = threading.Event()
+    monitor_thread: Optional[threading.Thread] = None
+    if stop_event is not None:
+
+        def mirror_stop() -> None:
+            while not monitor_done.wait(0.1):
+                if stop_event.is_set():
+                    worker_stop_event.set()
+                    return
+
+        monitor_thread = threading.Thread(
+            target=mirror_stop,
+            name="algo-parallel-stop",
+            daemon=True,
+        )
+        monitor_thread.start()
+
+    max_workers = min(len(ticker_batches), os.cpu_count() or 1)
+    try:
+        with ProcessPoolExecutor(
+            max_workers=max_workers,
+            mp_context=context,
+            initializer=_parallel_worker_init,
+            initargs=(write_lock, worker_stop_event),
+        ) as executor:
+            futures = {
+                executor.submit(
+                    _parallel_ticker_batch,
+                    settings,
+                    ticker,
+                    tuple(timestamps),
+                ): ticker
+                for ticker, timestamps in ticker_batches.items()
+            }
+            for future in as_completed(futures):
+                try:
+                    ticker, part, alerts = future.result()
+                except Exception:
+                    worker_stop_event.set()
+                    raise
+                _add_stats(stats, part)
+                trade_alerts.extend(alerts)
+                logging.info(
+                    "parallel ticker batch complete ticker=%s pairs=%d "
+                    "outputs=%d entries=%d exits=%d",
+                    ticker,
+                    part["pairs"],
+                    part["outputs"],
+                    part["entries"],
+                    part["exits"],
+                )
+    finally:
+        monitor_done.set()
+        if monitor_thread is not None:
+            monitor_thread.join(timeout=1)
+    return stats, trade_alerts, replacement_pending
+
+
 
 def _evaluate_cycle(
     connection: sqlite3.Connection,
@@ -838,28 +1001,16 @@ def _evaluate_cycle(
         else _pending(connection, settings, stop_event=stop_event)
     )
     replacement_pending = recalculating
-    for ticker, ts in pairs:
-        if stop_event is not None and stop_event.is_set():
-            break
-        state = states.get(ticker)
-        if state is None or not state.accepts(settings, ticker, ts):
-            state = (
-                _empty_evaluation_state(settings, ticker, ts)
-                if replacement_pending
-                else _seed_evaluation_state(connection, settings, ticker, ts)
-            )
-            states[ticker] = state
-        result = run_core(connection, settings, ticker, ts, state=state)
-        part, trade_alerts = _write_result(
+    parallel = _should_parallelize(pairs, replacement_pending)
+    if parallel:
+        stats, trade_alerts, replacement_pending = _evaluate_parallel_pairs(
             connection,
             settings,
-            result,
-            replace_algos=replace_algos if replacement_pending else None,
+            pairs,
+            replace_algos,
+            replacement_pending,
+            stop_event,
         )
-        replacement_pending = False
-        state.advance(result)
-        for key in stats:
-            stats[key] += part[key]
         _dispatch_trade_alerts(
             connection,
             settings,
@@ -867,16 +1018,48 @@ def _evaluate_cycle(
             alert_resume_after,
             config_path,
         )
-        if stats["pairs"] % CYCLE_PROGRESS_INTERVAL == 0:
-            progress = "cycle progress pairs=%d outputs=%d entries=%d exits=%d" % (
-                stats["pairs"],
-                stats["outputs"],
-                stats["entries"],
-                stats["exits"],
+    else:
+        for ticker, ts in pairs:
+            if stop_event is not None and stop_event.is_set():
+                break
+            state = states.get(ticker)
+            if state is None or not state.accepts(settings, ticker, ts):
+                state = (
+                    _empty_evaluation_state(settings, ticker, ts)
+                    if replacement_pending
+                    else _seed_evaluation_state(connection, settings, ticker, ts)
+                )
+                states[ticker] = state
+            result = run_core(connection, settings, ticker, ts, state=state)
+            part, trade_alerts = _write_result(
+                connection,
+                settings,
+                result,
+                replace_algos=replace_algos if replacement_pending else None,
             )
-            _log(connection, "info", progress)
-            connection.commit()
-            logging.info(progress)
+            replacement_pending = False
+            state.advance(result)
+            _add_stats(stats, part)
+            _dispatch_trade_alerts(
+                connection,
+                settings,
+                trade_alerts,
+                alert_resume_after,
+                config_path,
+            )
+            if stats["pairs"] % CYCLE_PROGRESS_INTERVAL == 0:
+                progress = (
+                    "cycle progress pairs=%d outputs=%d entries=%d exits=%d"
+                    % (
+                        stats["pairs"],
+                        stats["outputs"],
+                        stats["entries"],
+                        stats["exits"],
+                    )
+                )
+                _log(connection, "info", progress)
+                connection.commit()
+                logging.info(progress)
 
     if replacement_pending and not pairs:
         _replace_empty_calculation(connection, replace_algos)

@@ -594,9 +594,7 @@ def _pending(
     if not kinds or limit < 1:
         return []
     marker = kinds[-1]
-    pending: list[tuple[str, int]] = []
-    # Respect config priority so the primary chart ticker is not starved by a
-    # large historical backfill for alphabetically earlier symbols.
+    ticker_rows: list[tuple[str, list[int]]] = []
     for ticker in settings.tickers:
         if stop_event is not None and stop_event.is_set():
             break
@@ -605,7 +603,6 @@ def _pending(
         ).fetchone()[0]
         if latest is None:
             continue
-        remaining = limit - len(pending)
         rows = connection.execute(
             """
             SELECT b.ts FROM bars b
@@ -620,13 +617,33 @@ def _pending(
                 ticker,
                 int(latest) - settings.evaluation_days * 86_400,
                 marker,
-                remaining,
+                limit,
             ),
         ).fetchall()
-        pending.extend((ticker, int(row["ts"])) for row in rows)
-        if len(pending) == limit:
+        ticker_rows.append((ticker, [int(row["ts"]) for row in rows]))
+    return _round_robin_pairs(ticker_rows, limit)
+
+
+def _round_robin_pairs(
+    ticker_rows: Sequence[tuple[str, Sequence[int]]], limit: int
+) -> list[tuple[str, int]]:
+    """Share a bounded batch fairly while preserving each ticker's order."""
+    pairs: list[tuple[str, int]] = []
+    offsets = [0] * len(ticker_rows)
+    while len(pairs) < limit:
+        added = False
+        for index, (ticker, timestamps) in enumerate(ticker_rows):
+            offset = offsets[index]
+            if offset >= len(timestamps):
+                continue
+            pairs.append((ticker, int(timestamps[offset])))
+            offsets[index] += 1
+            added = True
+            if len(pairs) == limit:
+                break
+        if not added:
             break
-    return pending
+    return pairs
 
 
 def _recalculation_pairs(
@@ -638,7 +655,7 @@ def _recalculation_pairs(
     """Return a fresh bounded evaluation window without reading live outputs."""
     if not settings.output_kinds() or limit < 1:
         return []
-    pairs: list[tuple[str, int]] = []
+    ticker_rows: list[tuple[str, list[int]]] = []
     for ticker in settings.tickers:
         if stop_event is not None and stop_event.is_set():
             break
@@ -647,7 +664,6 @@ def _recalculation_pairs(
         ).fetchone()[0]
         if latest is None:
             continue
-        remaining = limit - len(pairs)
         rows = connection.execute(
             """
             SELECT ts FROM bars
@@ -657,13 +673,11 @@ def _recalculation_pairs(
             (
                 ticker,
                 int(latest) - settings.evaluation_days * 86_400,
-                remaining,
+                limit,
             ),
         ).fetchall()
-        pairs.extend((ticker, int(row["ts"])) for row in rows)
-        if len(pairs) == limit:
-            break
-    return pairs
+        ticker_rows.append((ticker, [int(row["ts"]) for row in rows]))
+    return _round_robin_pairs(ticker_rows, limit)
 
 
 def _upsert_output_rows(
