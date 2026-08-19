@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, time as clock_time
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
-from zoneinfo import ZoneInfo
+
+from common.config import EASTERN
 
 from bar_provider import (
     UTC,
@@ -17,7 +18,6 @@ from bar_provider import (
 
 
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "config" / "schema.sql"
-EASTERN = ZoneInfo("America/New_York")
 BAR_COLUMNS = (
     "ticker",
     "ts",

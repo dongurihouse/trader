@@ -28,11 +28,10 @@ REPO_ROOT = DASH_ROOT.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from common.config import market_schedule, read_config
+from common.config import EASTERN, market_schedule, read_config
 from common.validation import normalize_symbol
 
 
-EASTERN = ZoneInfo("America/New_York")
 UTC = ZoneInfo("UTC")
 STATIC_DIR = DASH_ROOT / "static"
 SERVICE_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")

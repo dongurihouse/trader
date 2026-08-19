@@ -9,12 +9,11 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from functools import lru_cache
 from typing import Any, Callable, Mapping, Optional, Sequence
-from zoneinfo import ZoneInfo
 
+from common.config import EASTERN
 from common.validation import require_float, require_int
 
 
-EASTERN = ZoneInfo("America/New_York")
 SHAPES = (
     "trend_up",
     "trend_down",

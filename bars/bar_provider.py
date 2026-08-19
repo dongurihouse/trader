@@ -84,8 +84,6 @@ class BarRow:
 
 
 def _bar_row(ticker: str, raw: object) -> BarRow:
-    if not is_symbol(ticker):
-        raise RelayError("Robinhood result has an invalid symbol")
     if not isinstance(raw, dict):
         raise RelayError("Robinhood returned a malformed bar")
     interpolated = raw.get("interpolated", False)

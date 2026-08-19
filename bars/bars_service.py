@@ -19,7 +19,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 from urllib.parse import urlparse
-from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
@@ -27,6 +26,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from common.config import (
+    EASTERN,
     MarketSchedule,
     configured_tickers,
     market_schedule,
@@ -52,7 +52,6 @@ from bar_store import BAR_COLUMNS, BarStore, JobRef, JobState
 
 
 DEFAULT_CONFIG_PATH = ROOT.parent / "config" / "config.json"
-EASTERN = ZoneInfo("America/New_York")
 LIVE_INT_FIELDS = (
     ("poll_seconds", 60, 30),
 )
@@ -224,16 +223,6 @@ class Collector:
             )
         return total
 
-    async def fetch_range(
-        self,
-        symbols: Sequence[str],
-        start: datetime,
-        end: datetime,
-        job: Optional[JobRef] = None,
-    ) -> Dict[str, int]:
-        async with self.provider.session() as session:
-            return await self._fetch_range(session, symbols, start, end, job)
-
     async def _run_jobs(
         self,
         kind: str,
@@ -312,7 +301,10 @@ class Collector:
         start = current - timedelta(days=self.settings.sweep_days)
         scheduled = scheduled_day is not None
         if not scheduled:
-            stats = await self.fetch_range(self.settings.tickers, start, current)
+            async with self.provider.session() as session:
+                stats = await self._fetch_range(
+                    session, self.settings.tickers, start, current
+                )
         else:
             target = scheduled_day.isoformat()
             selected = tuple(self.settings.tickers)

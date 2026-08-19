@@ -26,12 +26,6 @@ function chartUrl(trade) {
   return `/?${parameters}`;
 }
 
-function humanize(value) {
-  return String(value || "")
-    .replaceAll("_", " ")
-    .replace(/^./, (letter) => letter.toUpperCase());
-}
-
 function algorithmDisplayName(algo) {
   return algo.display_name || humanize(algo.name);
 }

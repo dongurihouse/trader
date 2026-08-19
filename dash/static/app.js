@@ -10,7 +10,7 @@ function algorithmUrl(name) {
 }
 
 function algorithmDisplayName(trade) {
-  return trade.display_name || formatShapeName(trade.algo);
+  return trade.display_name || humanize(trade.algo);
 }
 
 function rememberChartView() {
@@ -114,12 +114,6 @@ function roundedRectPath(ctx, x, y, width, height, radius) {
   ctx.arcTo(x, y + height, x, y, corner);
   ctx.arcTo(x, y, x + width, y, corner);
   ctx.closePath();
-}
-
-function formatShapeName(value) {
-  return String(value || "")
-    .replaceAll("_", " ")
-    .replace(/^./, (letter) => letter.toUpperCase());
 }
 
 function formatProbability(value) {
@@ -1626,7 +1620,7 @@ function renderShapeForest(shape) {
     const row = createElement("div", `shape-row rank-${index + 1}`);
     row.append(
       createElement("span", "shape-rank", String(index + 1)),
-      createElement("span", "shape-name", formatShapeName(item.shape)),
+      createElement("span", "shape-name", humanize(item.shape)),
       createElement("strong", "shape-probability", formatProbability(item.probability)),
     );
     fragment.append(row);

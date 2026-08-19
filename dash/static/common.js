@@ -14,6 +14,10 @@ function createElement(tag, className, text) {
   return element;
 }
 
+function humanize(value) {
+  return String(value || "").replaceAll("_", " ").replace(/^./, (letter) => letter.toUpperCase());
+}
+
 async function api(path) {
   const response = await fetch(path, { headers: { Accept: "application/json" } });
   const payload = await response.json().catch(() => ({}));
