@@ -61,6 +61,14 @@ the same 50% capital cap described above. The lower target adds only one winner
 over the measured `0.30R` alternative, so smaller targets were not extrapolated.
 These remain same-data paper results and require new forward evidence.
 
+The post-merge full replay then backfilled the five added tickers. Across the
+complete eleven-ticker universe, the previous parameters produced 136 trades,
+a 61.8% win rate, +9.67% gross return, -1.96% cost-aware return, and -23.40%
+cost-aware maximum drawdown. The adopted parameters produced 123 trades, an
+81.3% win rate, +35.70% gross return, +11.70% cost-aware return, and -15.07%
+cost-aware maximum drawdown. The live ledger completed with 100 wins, 23
+losses, and no open ORB5 positions.
+
 ## Sentiment overlap
 
 `sentiment_tranches` was not migrated because its counter-impulse path overlaps
