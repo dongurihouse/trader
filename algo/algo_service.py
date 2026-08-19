@@ -6,156 +6,86 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import math
 import os
 import re
 import signal
 import sqlite3
-import statistics
 import sys
 import threading
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, time as clock_time, timedelta, timezone
+from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
-from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from common.metadata import normalize_provider_indicator
 from common.validation import (
     normalize_symbol,
     require_clock,
-    require_float,
     require_int,
 )
 
+from algo_types import (
+    AlgoContext,
+    CYCLE_PAIR_LIMIT,
+    BrokerSettings,
+    ConfigError,
+    EvaluationError,
+    Settings,
+    UTC,
+    _json,
+    _session_window,
+)
 from broker import send_broker_orders
 from notify import send_trade_alerts
-from shape_signal import clear_shape_cache, normalize_shape_parameters, shape_v1
+from shape_signal import clear_shape_cache
+from signals import (
+    SIGNAL_FUNCTIONS,
+    clear_signal_caches,
+    _signal_relative_momentum,
+    _signal_session,
+    _signal_shape_v1,
+)
+from storage import (
+    _bar_close,
+    _connect,
+    _context_bars,
+    _init_database,
+    _live_trade_alerts,
+    _log,
+    _output_state,
+    _pending,
+    _prior_output,
+    _previous_outputs,
+    _recalculation_pairs,
+    _relative_momentum_has_score,
+    _relative_momentum_repair_candidates,
+    _relative_momentum_warm_targets,
+    _replace_empty_calculation,
+    _shape_warm_targets,
+    _sync_live_definitions,
+    _upsert_output_rows,
+    _warm_primary,
+    _write_result,
+    clear_output_state_cache,
+    recent_logs,
+    status,
+)
+from strategies import ALGO_FUNCTIONS, _algo_output
 
 
 DEFAULT_CONFIG = ROOT.parent / "config" / "config.json"
-SCHEMA = ROOT.parent / "config" / "schema.sql"
-UTC = timezone.utc
-EASTERN = ZoneInfo("America/New_York")
-BAR_FIELDS = {"open", "high", "low", "close", "volume"}
-CYCLE_PAIR_LIMIT = 2_000
 CYCLE_PROGRESS_INTERVAL = 1_000
-ALERT_CLOSE_GRACE_SECONDS = 5 * 60
-_RVOL_BASELINES: dict[
-    tuple[str, str, date, int, int], Optional[tuple[float, ...]]
-] = {}
-_PULLBACK_BASELINES: dict[
-    tuple[str, str, date, int, int, int, int, int, int, float],
-    Optional[tuple[float, float]],
-] = {}
-_OUTPUT_SESSION_SEEDS: dict[
-    tuple[str, str, str, int], tuple[tuple[int, float, int], ...]
-] = {}
-_SESSION_SUMMARIES: dict[
-    tuple[str, str, date], Optional[Mapping[str, float]]
-] = {}
-_ATR_SESSION_VALUES: dict[tuple[str, str, date, int], Optional[float]] = {}
-_RELATIVE_MOMENTUM_SESSION_FEATURES: dict[
-    tuple[str, str, date, int, float],
-    Optional[tuple[Optional[Mapping[str, float]], ...]],
-] = {}
-_RELATIVE_MOMENTUM_BASELINES: dict[
-    tuple[str, str, date, int, int, int, float, int],
-    Optional[Mapping[int, tuple[tuple[float, ...], tuple[float, ...]]]],
-] = {}
 _RELATIVE_MOMENTUM_REPAIR_ATTEMPTS: set[tuple[str, str, int]] = set()
-_INITIALIZED_DATABASES: set[Path] = set()
-_DATABASE_INIT_LOCK = threading.Lock()
 
-
-class ConfigError(ValueError):
-    pass
-
-
-class EvaluationError(RuntimeError):
-    pass
-
-
-@dataclass(frozen=True)
-class BrokerSettings:
-    enabled: bool
-    quantity: str
-    account_env: str
-    execution_tickers: Mapping[str, Mapping[str, str]]
-
-
-@dataclass(frozen=True)
-class Settings:
-    database: Path
-    tickers: tuple[str, ...]
-    evaluation_days: int
-    poll_seconds: int
-    api_port: int
-    regular_open: clock_time
-    regular_close: clock_time
-    early_close: clock_time
-    early_close_days: frozenset[date]
-    signals: Mapping[str, Mapping[str, Any]]
-    algos: Mapping[str, Mapping[str, Any]]
-    signal_order: tuple[str, ...]
-    algo_order: tuple[str, ...]
-    algo_requirements: Mapping[str, frozenset[str]]
-    broker: BrokerSettings
-    content: str
-
-    def enabled_signals(self) -> tuple[str, ...]:
-        return tuple(self.signals)
-
-    def enabled_algos(self) -> tuple[str, ...]:
-        return tuple(self.algos)
-
-    def output_kinds(self) -> tuple[str, ...]:
-        return self.enabled_signals() + self.enabled_algos()
-
-
-def _json(value: Any) -> str:
-    try:
-        return json.dumps(value, allow_nan=False, separators=(",", ":"), sort_keys=True)
-    except (TypeError, ValueError) as exc:
-        raise ConfigError("value is not finite JSON") from exc
-
-
-@dataclass(frozen=True)
-class SignalSpec:
-    function: Callable[..., Any]
-    inputs: tuple[str, ...]
-    normalize: Callable[[Mapping[str, Any], tuple[str, ...]], Mapping[str, Any]]
-
-
-@dataclass(frozen=True)
-class AlgoSpec:
-    function: Callable[..., tuple[bool, bool, int]]
-    input_count: int
-    normalize: Callable[[Mapping[str, Any], tuple[str, ...]], Mapping[str, Any]]
-
-
-@dataclass(frozen=True)
-class AlgoContext:
-    ticker: str
-    ts: int
-    parameters: Mapping[str, Any]
-    inputs: Mapping[str, Any]
-    previous: Mapping[str, Any]
-    open_entries: tuple[Mapping[str, Any], ...]
-    session_outputs: tuple[Mapping[str, Any], ...]
-    read_bars: Callable[
-        [int, Optional[int]], tuple[Mapping[str, Any], ...]
-    ]
 
 
 def _nodes(document: Mapping[str, Any], key: str) -> dict[str, Mapping[str, Any]]:
@@ -170,13 +100,20 @@ def _nodes(document: Mapping[str, Any], key: str) -> dict[str, Mapping[str, Any]
         inputs = value.get("inputs", [])
         function = value.get("function")
         if function is None:
-            function = "metadata" if key == "signals" and inputs == ["bar_metadata"] else name
+            function = (
+                "metadata"
+                if key == "signals" and inputs == ["bar_metadata"]
+                else name
+            )
         if "trades" in value:
             raise ConfigError("%s.%s.trades is not supported" % (key, name))
         if not isinstance(function, str) or not function:
             raise ConfigError("%s.%s.function must be a name" % (key, name))
         if not isinstance(params, dict) or not isinstance(inputs, list):
-            raise ConfigError("%s.%s params must be an object and inputs must be a list" % (key, name))
+            raise ConfigError(
+                "%s.%s params must be an object and inputs must be a list"
+                % (key, name)
+            )
         if not all(isinstance(target, str) and target for target in inputs):
             raise ConfigError("%s.%s inputs must contain node names" % (key, name))
         nodes[name] = {
@@ -185,6 +122,7 @@ def _nodes(document: Mapping[str, Any], key: str) -> dict[str, Mapping[str, Any]
             "inputs": inputs,
         }
     return nodes
+
 
 
 def _broker_settings(
@@ -255,6 +193,7 @@ def _broker_settings(
     )
 
 
+
 def _compile_dependencies(
     signals: Mapping[str, Mapping[str, Any]],
     algos: Mapping[str, Mapping[str, Any]],
@@ -302,6 +241,7 @@ def _compile_dependencies(
     return tuple(signal_order), tuple(algo_order), algo_requirements
 
 
+
 def load_settings(
     path: Path,
     document: Optional[Mapping[str, Any]] = None,
@@ -336,7 +276,9 @@ def load_settings(
     if not isinstance(early_closes, list):
         raise ConfigError("early_closes must be a list")
     try:
-        early_close_days = frozenset(date.fromisoformat(value) for value in early_closes)
+        early_close_days = frozenset(
+            date.fromisoformat(value) for value in early_closes
+        )
     except (TypeError, ValueError) as exc:
         raise ConfigError("early_closes must contain YYYY-MM-DD strings") from exc
     database_value = document.get("database", "../data/trader.sqlite3")
@@ -442,2352 +384,6 @@ def load_settings(
     return settings
 
 
-def _connect(path: Path, read_only: bool = False) -> sqlite3.Connection:
-    if read_only:
-        if not path.is_file():
-            raise ConfigError("database does not exist: %s" % path)
-        connection = sqlite3.connect("file:%s?mode=ro" % path, uri=True, timeout=30)
-        connection.execute("PRAGMA query_only=ON")
-    else:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(str(path), timeout=30)
-        connection.execute("PRAGMA journal_mode=WAL")
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA busy_timeout=30000")
-    return connection
-
-
-def _table_exists(connection: sqlite3.Connection, name: str) -> bool:
-    return connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
-    ).fetchone() is not None
-
-
-def _document_mapping(document: Mapping[str, Any], name: str) -> dict[str, Any]:
-    value = document.get(name)
-    return dict(value) if isinstance(value, Mapping) else {}
-
-
-def _algo_snapshots(
-    document: Mapping[str, Any],
-) -> dict[str, tuple[str, str]]:
-    """Return each raw algo definition and its effective config dependencies."""
-    signals = _document_mapping(document, "signals")
-    algos = _document_mapping(document, "algos")
-    schedule = {
-        "early_closes": document.get("early_closes", []),
-        "live_polling": document.get("live_polling", {}),
-    }
-    snapshots: dict[str, tuple[str, str]] = {}
-
-    for name, definition in algos.items():
-        signal_names: set[str] = set()
-        algo_names: set[str] = set()
-
-        def visit_signal(target: str) -> None:
-            if target in signal_names or target not in signals:
-                return
-            signal_names.add(target)
-            node = signals[target]
-            if not isinstance(node, Mapping):
-                return
-            for dependency in node.get("inputs", []):
-                if isinstance(dependency, str):
-                    visit_signal(dependency)
-
-        def visit_algo(target: str) -> None:
-            if target in algo_names or target not in algos:
-                return
-            algo_names.add(target)
-            node = algos[target]
-            if not isinstance(node, Mapping):
-                return
-            for dependency in node.get("inputs", []):
-                if not isinstance(dependency, str):
-                    continue
-                if dependency in algos:
-                    visit_algo(dependency)
-                else:
-                    visit_signal(dependency)
-
-        visit_algo(name)
-        algo_names.discard(name)
-        dependencies = {
-            "signals": {key: signals[key] for key in sorted(signal_names)},
-            "algos": {key: algos[key] for key in sorted(algo_names)},
-            "schedule": schedule,
-        }
-        snapshots[str(name)] = (_json(definition), _json(dependencies))
-    return snapshots
-
-
-def _remove_definition_history(connection: sqlite3.Connection) -> bool:
-    """Remove database-backed config history retained by older releases."""
-    changed = _table_exists(connection, "algo_history") or _table_exists(
-        connection, "configs"
-    )
-    connection.execute("DROP TRIGGER IF EXISTS archive_algo_update")
-    connection.execute("DROP TRIGGER IF EXISTS archive_algo_delete")
-    connection.execute("DROP TABLE IF EXISTS algo_history")
-    connection.execute("DROP TABLE IF EXISTS configs")
-    return changed
-
-
-def _migrate_outputs(connection: sqlite3.Connection) -> bool:
-    columns = {
-        row["name"] for row in connection.execute("PRAGMA table_info(outputs)")
-    }
-    if "config" not in columns:
-        return False
-    connection.execute("DROP TABLE outputs")
-    connection.execute(
-        """
-        CREATE TABLE outputs (
-            ticker      TEXT    NOT NULL,
-            ts          INTEGER NOT NULL,
-            kind        TEXT    NOT NULL,
-            output      TEXT    NOT NULL,
-            computed_at INTEGER NOT NULL,
-            PRIMARY KEY (ticker, ts, kind)
-        )
-        """
-    )
-    return True
-
-
-def _init_database(path: Path) -> None:
-    path = path.resolve()
-    if path in _INITIALIZED_DATABASES:
-        return
-    with _DATABASE_INIT_LOCK:
-        if path in _INITIALIZED_DATABASES:
-            return
-        try:
-            schema = SCHEMA.read_text()
-        except FileNotFoundError as exc:
-            raise ConfigError("schema file does not exist: %s" % SCHEMA) from exc
-        connection = _connect(path)
-        try:
-            connection.executescript(schema)
-            connection.execute("BEGIN IMMEDIATE")
-            trade_columns = {
-                row["name"] for row in connection.execute("PRAGMA table_info(trades)")
-            }
-            if "direction" not in trade_columns:
-                connection.execute(
-                    "ALTER TABLE trades ADD COLUMN direction INTEGER NOT NULL DEFAULT 1 "
-                    "CHECK(direction IN (-1, 1))"
-                )
-            removed_history = _remove_definition_history(connection)
-            migrated_outputs = _migrate_outputs(connection)
-            if removed_history:
-                _log(
-                    connection,
-                    "info",
-                    "removed database definition history; config and git are authoritative",
-                )
-            if migrated_outputs:
-                _log(
-                    connection,
-                    "info",
-                    "migrated live storage to unversioned outputs",
-                )
-            connection.commit()
-        finally:
-            connection.close()
-        _INITIALIZED_DATABASES.add(path)
-
-
-def _bars(
-    connection: sqlite3.Connection,
-    ticker: str,
-    ts: int,
-    period: int,
-    include_interpolated: bool,
-) -> list[sqlite3.Row]:
-    quality = "" if include_interpolated else "AND interpolated=0"
-    rows = connection.execute(
-        """
-        SELECT ts, open, high, low, close, volume, interpolated
-        FROM bars WHERE ticker=? AND ts<=? %s
-        ORDER BY ts DESC LIMIT ?
-        """ % quality,
-        (ticker, ts, period),
-    ).fetchall()
-    return list(reversed(rows))
-
-
-def _session_bars(
-    connection: sqlite3.Connection,
-    ticker: str,
-    session_open: int,
-    session_close: int,
-    through: int,
-    *,
-    limit: Optional[int] = None,
-    include_interpolated: bool = True,
-) -> list[sqlite3.Row]:
-    quality = "" if include_interpolated else "AND interpolated=0"
-    limit_sql = "" if limit is None else "LIMIT ?"
-    arguments: tuple[Any, ...] = (ticker, session_open, session_close, through)
-    if limit is not None:
-        arguments += (limit,)
-    return connection.execute(
-        """
-        SELECT ts,open,high,low,close,volume,interpolated
-        FROM bars
-        WHERE ticker=? AND ts>=? AND ts<? AND ts<=? %s
-        ORDER BY ts %s
-        """ % (quality, limit_sql),
-        arguments,
-    ).fetchall()
-
-
-def _rows_form_uniform_grid(
-    rows: Sequence[Mapping[str, Any]],
-    start: int,
-    end_exclusive: int,
-    accepted_cadences: Sequence[int],
-) -> bool:
-    duration = end_exclusive - start
-    if not rows or duration <= 0:
-        return False
-    timestamps = [int(row["ts"]) for row in rows]
-    return any(
-        cadence > 0
-        and duration % cadence == 0
-        and len(timestamps) == duration // cadence
-        and all(
-            timestamp == start + index * cadence
-            for index, timestamp in enumerate(timestamps)
-        )
-        for cadence in accepted_cadences
-    )
-
-
-def _parameter_keys(parameters: Mapping[str, Any], allowed: set[str]) -> None:
-    unknown = set(parameters) - allowed
-    if unknown:
-        raise ConfigError("unknown parameters: %s" % ", ".join(sorted(unknown)))
-
-
-def _no_parameters(
-    parameters: Mapping[str, Any], tickers: tuple[str, ...]
-) -> Mapping[str, Any]:
-    _parameter_keys(parameters, set())
-    return {}
-
-
-def _configured_tickers(
-    value: Any, name: str, tickers: tuple[str, ...]
-) -> tuple[str, ...]:
-    if not isinstance(value, list) or not value:
-        raise ConfigError("%s must be a non-empty ticker list" % name)
-    result: list[str] = []
-    for item in value:
-        ticker = item.strip().upper() if isinstance(item, str) else ""
-        if ticker not in tickers:
-            raise ConfigError("%s contains an unconfigured ticker: %r" % (name, item))
-        if ticker not in result:
-            result.append(ticker)
-    return tuple(result)
-
-
-def _boolean(value: Any, name: str) -> bool:
-    if not isinstance(value, bool):
-        raise ConfigError("%s must be boolean" % name)
-    return value
-
-
-def _number(value: Any, name: str, minimum: float = 0.0) -> float:
-    return float(require_float(value, name, minimum=minimum, error=ConfigError))
-
-
-def _parameter_int(
-    parameters: Mapping[str, Any], name: str, minimum: int = 1
-) -> int:
-    return require_int(
-        parameters.get(name), name, minimum=minimum, error=ConfigError
-    )
-
-
-def _parameter_number(
-    parameters: Mapping[str, Any], name: str, minimum: float = 0.0
-) -> float:
-    return _number(parameters.get(name), name, minimum=minimum)
-
-
-def _parameter_bool(parameters: Mapping[str, Any], name: str) -> bool:
-    return _boolean(parameters.get(name), name)
-
-
-def _normalize_sma(
-    parameters: Mapping[str, Any], tickers: tuple[str, ...]
-) -> Mapping[str, Any]:
-    _parameter_keys(parameters, {"field", "period", "include_interpolated"})
-    field = parameters.get("field")
-    if field not in BAR_FIELDS:
-        raise ConfigError("field must name a stored bar field")
-    return {
-        "field": field,
-        "period": _parameter_int(parameters, "period"),
-        "include_interpolated": _parameter_bool(
-            parameters, "include_interpolated"
-        ),
-    }
-
-
-def _normalize_metadata(
-    parameters: Mapping[str, Any], tickers: tuple[str, ...]
-) -> Mapping[str, Any]:
-    name, query_key = normalize_provider_indicator(parameters, error=ConfigError)
-    return {"name": name, "query_key": query_key}
-
-
-def _normalize_int_parameter(
-    parameters: Mapping[str, Any], name: str, minimum: int = 1
-) -> Mapping[str, Any]:
-    _parameter_keys(parameters, {name})
-    return {name: _parameter_int(parameters, name, minimum)}
-
-
-def _normalize_last_close(
-    parameters: Mapping[str, Any], tickers: tuple[str, ...]
-) -> Mapping[str, Any]:
-    _parameter_keys(parameters, {"include_interpolated"})
-    return {
-        "include_interpolated": _parameter_bool(
-            parameters, "include_interpolated"
-        )
-    }
-
-
-def _normalize_rvol(
-    parameters: Mapping[str, Any], tickers: tuple[str, ...]
-) -> Mapping[str, Any]:
-    _parameter_keys(parameters, {"cap_bars", "baseline_sessions"})
-    return {
-        "cap_bars": _parameter_int(parameters, "cap_bars"),
-        "baseline_sessions": _parameter_int(parameters, "baseline_sessions"),
-    }
-
-
-def _normalize_relative_momentum(
-    parameters: Mapping[str, Any], tickers: tuple[str, ...]
-) -> Mapping[str, Any]:
-    _parameter_keys(
-        parameters,
-        {
-            "window_minutes",
-            "baseline_sessions",
-            "min_sessions",
-            "time_tolerance_minutes",
-            "min_momentum_pct",
-            "strong_percentile",
-        },
-    )
-    result = {
-        "window_minutes": _parameter_int(parameters, "window_minutes"),
-        "baseline_sessions": _parameter_int(parameters, "baseline_sessions"),
-        "min_sessions": _parameter_int(parameters, "min_sessions"),
-        "time_tolerance_minutes": _parameter_int(
-            parameters, "time_tolerance_minutes", minimum=0
-        ),
-        "min_momentum_pct": _parameter_number(parameters, "min_momentum_pct"),
-        "strong_percentile": _parameter_number(parameters, "strong_percentile"),
-    }
-    if result["min_sessions"] > result["baseline_sessions"]:
-        raise ConfigError("min_sessions cannot exceed baseline_sessions")
-    if result["strong_percentile"] > 100.0:
-        raise ConfigError("strong_percentile must be <= 100")
-    return result
-
-
-def _normalize_opening_sentiment(
-    parameters: Mapping[str, Any], tickers: tuple[str, ...]
-) -> Mapping[str, Any]:
-    _parameter_keys(
-        parameters,
-        {
-            "market_tickers",
-            "minutes",
-            "min_market_move_pct",
-            "require_ticker_agreement",
-        },
-    )
-    return {
-        "market_tickers": _configured_tickers(
-            parameters.get("market_tickers"), "market_tickers", tickers
-        ),
-        "minutes": _parameter_int(parameters, "minutes"),
-        "min_market_move_pct": _parameter_number(
-            parameters, "min_market_move_pct"
-        ),
-        "require_ticker_agreement": _parameter_bool(
-            parameters, "require_ticker_agreement"
-        ),
-    }
-
-
-def _normalize_pullback(
-    parameters: Mapping[str, Any], tickers: tuple[str, ...]
-) -> Mapping[str, Any]:
-    names = {
-        "early_minutes",
-        "early_window_minutes",
-        "late_window_minutes",
-        "late_market_strength_ratio",
-        "max_threshold_ratio",
-        "max_ticker_flip_ratio",
-        "entry_cutoff_minutes",
-        "baseline_sessions",
-        "min_baseline_sessions",
-        "percentile",
-        "min_extreme_distance_pct",
-    }
-    _parameter_keys(parameters, names)
-    result: dict[str, Any] = {
-        "early_minutes": _parameter_int(parameters, "early_minutes"),
-        "early_window_minutes": _parameter_int(parameters, "early_window_minutes"),
-        "late_window_minutes": _parameter_int(parameters, "late_window_minutes"),
-        "late_market_strength_ratio": _parameter_number(
-            parameters, "late_market_strength_ratio"
-        ),
-        "max_threshold_ratio": _parameter_number(
-            parameters, "max_threshold_ratio", minimum=1.0
-        ),
-        "max_ticker_flip_ratio": _parameter_number(
-            parameters, "max_ticker_flip_ratio"
-        ),
-        "entry_cutoff_minutes": _parameter_int(
-            parameters, "entry_cutoff_minutes", minimum=0
-        ),
-        "baseline_sessions": _parameter_int(parameters, "baseline_sessions"),
-        "min_baseline_sessions": _parameter_int(
-            parameters, "min_baseline_sessions"
-        ),
-        "percentile": _parameter_number(parameters, "percentile"),
-        "min_extreme_distance_pct": _parameter_number(
-            parameters, "min_extreme_distance_pct"
-        ),
-    }
-    if result["min_baseline_sessions"] > result["baseline_sessions"]:
-        raise ConfigError("min_baseline_sessions cannot exceed baseline_sessions")
-    if result["percentile"] > 1.0:
-        raise ConfigError("percentile must be <= 1")
-    return result
-
-
-def _normalize_shape(
-    parameters: Mapping[str, Any], tickers: tuple[str, ...]
-) -> Mapping[str, Any]:
-    return normalize_shape_parameters(parameters, ConfigError)
-
-
-def _signal_sma(
-    connection, ticker, ts, parameters, inputs, settings=None
-) -> Optional[float]:
-    field = str(parameters["field"])
-    period = int(parameters["period"])
-    include = bool(parameters["include_interpolated"])
-    rows = _bars(connection, ticker, ts, period, include)
-    if len(rows) < period:
-        return None
-    return sum(float(row[field]) for row in rows) / period
-
-
-def _signal_metadata(
-    connection, ticker, ts, parameters, inputs, settings=None
-) -> Any:
-    name = parameters["name"]
-    row = connection.execute(
-        """
-        SELECT value FROM bar_metadata
-        WHERE ticker=? AND ts=? AND name=? AND params=?
-        """,
-        (ticker, ts, name, parameters["query_key"]),
-    ).fetchone()
-    return json.loads(row["value"]) if row else None
-
-
-def _session_window(settings: Settings, ts: int) -> tuple[date, int, int]:
-    local_day = datetime.fromtimestamp(ts, tz=EASTERN).date()
-    session_close_time = (
-        settings.early_close
-        if local_day in settings.early_close_days
-        else settings.regular_close
-    )
-    session_open = datetime.combine(
-        local_day, settings.regular_open, tzinfo=EASTERN
-    )
-    session_close = datetime.combine(
-        local_day, session_close_time, tzinfo=EASTERN
-    )
-    return local_day, int(session_open.timestamp()), int(session_close.timestamp())
-
-
-def _signal_session(
-    connection, ticker, ts, parameters, inputs, settings
-) -> Optional[dict[str, Any]]:
-    local_day, session_open, session_close = _session_window(settings, ts)
-    if ts < session_open or ts >= session_close:
-        return None
-    return {
-        "date": local_day.isoformat(),
-        "minute": int((ts - session_open) // 60),
-        "to_close": (session_close - ts) / 60.0,
-        "total": int((session_close - session_open) // 60),
-        "ts": ts,
-        "open_ts": session_open,
-    }
-
-
-def _complete_session_summary(
-    connection: sqlite3.Connection,
-    settings: Settings,
-    ticker: str,
-    local_day: date,
-) -> Optional[Mapping[str, float]]:
-    key = (str(settings.database), ticker, local_day)
-    if key in _SESSION_SUMMARIES:
-        return _SESSION_SUMMARIES[key]
-    probe = int(
-        datetime.combine(local_day, clock_time(12), tzinfo=EASTERN).timestamp()
-    )
-    _, session_open, session_close = _session_window(settings, probe)
-    rows = _session_bars(
-        connection,
-        ticker,
-        session_open,
-        session_close,
-        session_close - 1,
-        include_interpolated=False,
-    )
-    if not _rows_form_uniform_grid(
-        rows, session_open, session_close, (60, 120, 300)
-    ):
-        _SESSION_SUMMARIES[key] = None
-        return None
-    summary: Mapping[str, float] = {
-        "open": float(rows[0]["open"]),
-        "high": max(float(row["high"]) for row in rows),
-        "low": min(float(row["low"]) for row in rows),
-        "close": float(rows[-1]["close"]),
-    }
-    _SESSION_SUMMARIES[key] = summary
-    return summary
-
-
-def _prior_complete_session_summaries(
-    connection: sqlite3.Connection,
-    settings: Settings,
-    ticker: str,
-    local_day: date,
-    count: int,
-) -> list[Mapping[str, float]]:
-    summaries: list[Mapping[str, float]] = []
-    candidate = local_day - timedelta(days=1)
-    for _ in range(count * 4 + 60):
-        summary = _complete_session_summary(
-            connection, settings, ticker, candidate
-        )
-        if summary is not None:
-            summaries.append(summary)
-            if len(summaries) == count:
-                break
-        candidate -= timedelta(days=1)
-    return summaries
-
-
-def _signal_atr_session(
-    connection, ticker, ts, parameters, inputs, settings
-) -> Optional[float]:
-    sessions = int(parameters["sessions"])
-    session = inputs["session"]
-    if session is None:
-        return None
-    local_day = date.fromisoformat(session["date"])
-    key = (str(settings.database), ticker, local_day, sessions)
-    if key in _ATR_SESSION_VALUES:
-        return _ATR_SESSION_VALUES[key]
-    summaries = _prior_complete_session_summaries(
-        connection, settings, ticker, local_day, sessions + 1
-    )
-    if len(summaries) < sessions + 1:
-        _ATR_SESSION_VALUES[key] = None
-        return None
-    ordered = list(reversed(summaries))
-    ranges: list[float] = []
-    for previous, current in zip(ordered, ordered[1:]):
-        previous_close = float(previous["close"])
-        if previous_close <= 0.0:
-            _ATR_SESSION_VALUES[key] = None
-            return None
-        true_range = max(
-            float(current["high"]) - float(current["low"]),
-            abs(float(current["high"]) - previous_close),
-            abs(float(current["low"]) - previous_close),
-        )
-        ranges.append(true_range / previous_close)
-    value = float(statistics.mean(ranges))
-    _ATR_SESSION_VALUES[key] = value
-    return value
-
-
-def _signal_prior_session(
-    connection, ticker, ts, parameters, inputs, settings
-) -> Optional[dict[str, float]]:
-    session = inputs["session"]
-    if session is None:
-        return None
-    local_day = date.fromisoformat(session["date"])
-    summaries = _prior_complete_session_summaries(
-        connection, settings, ticker, local_day, 1
-    )
-    if not summaries:
-        return None
-    opening = connection.execute(
-        "SELECT open FROM bars WHERE ticker=? AND ts=? AND interpolated=0",
-        (ticker, int(session["open_ts"])),
-    ).fetchone()
-    current = connection.execute(
-        "SELECT close FROM bars WHERE ticker=? AND ts=? AND interpolated=0",
-        (ticker, ts),
-    ).fetchone()
-    if opening is None or current is None:
-        return None
-    previous = summaries[0]
-    previous_close = float(previous["close"])
-    if previous_close <= 0.0:
-        return None
-    session_open = float(opening["open"])
-    price = float(current["close"])
-    previous_high = float(previous["high"])
-    previous_low = float(previous["low"])
-    return {
-        "prev_close": previous_close,
-        "prev_high": previous_high,
-        "prev_low": previous_low,
-        "gap_pct": (session_open / previous_close - 1.0) * 100.0,
-        "open_vs_prior_high": session_open - previous_high,
-        "open_vs_prior_low": session_open - previous_low,
-        "price_vs_prior_high": price - previous_high,
-        "price_vs_prior_low": price - previous_low,
-    }
-
-
-def _signal_first30_ret(
-    connection, ticker, ts, parameters, inputs, settings
-) -> Optional[float]:
-    bars = int(parameters["bars"])
-    session = inputs["session"]
-    if session is None or int(session["minute"]) < bars - 1:
-        return None
-    local_day = date.fromisoformat(session["date"])
-    summaries = _prior_complete_session_summaries(
-        connection, settings, ticker, local_day, 1
-    )
-    if not summaries or float(summaries[0]["close"]) <= 0.0:
-        return None
-    closing = connection.execute(
-        "SELECT close FROM bars WHERE ticker=? AND ts=? AND interpolated=0",
-        (ticker, int(session["open_ts"]) + (bars - 1) * 60),
-    ).fetchone()
-    if closing is None:
-        return None
-    return (
-        float(closing["close"]) / float(summaries[0]["close"]) - 1.0
-    ) * 100.0
-
-
-def _signal_session_extremes(
-    connection, ticker, ts, parameters, inputs, settings
-) -> Optional[dict[str, Any]]:
-    session = inputs["session"]
-    atr_session = require_float(
-        inputs["atr_session"],
-        "atr_session",
-        nullable=True,
-        error=EvaluationError,
-    )
-    if session is None or atr_session is None:
-        return None
-    rows = _session_bars(
-        connection,
-        ticker,
-        int(session["open_ts"]),
-        int(session["open_ts"]) + int(session["total"]) * 60,
-        ts,
-        include_interpolated=False,
-    )
-    if not rows or int(rows[-1]["ts"]) != ts:
-        return None
-    current = rows[-1]
-    day_high = max(float(row["high"]) for row in rows)
-    day_low = min(float(row["low"]) for row in rows)
-    price = float(current["close"])
-    denominator = float(atr_session) * price
-    return {
-        "day_high": day_high,
-        "day_low": day_low,
-        "new_day_high": float(current["high"]) >= day_high,
-        "new_day_low": float(current["low"]) <= day_low,
-        "day_range_atr": (day_high - day_low) / denominator
-        if denominator > 0.0
-        else 0.0,
-    }
-
-
-def _signal_opening_range(
-    connection, ticker, ts, parameters, inputs, settings
-) -> Optional[dict[str, float]]:
-    minutes = int(parameters["minutes"])
-    session = inputs["session"]
-    if session is None or session.get("minute", -1) < minutes:
-        return None
-    _, session_open, session_close = _session_window(settings, ts)
-    rows = _session_bars(
-        connection,
-        ticker,
-        session_open,
-        session_close,
-        ts,
-        limit=minutes,
-        include_interpolated=False,
-    )
-    if len(rows) < minutes:
-        return None
-    high = max(float(row["high"]) for row in rows)
-    low = min(float(row["low"]) for row in rows)
-    return {"high": high, "low": low, "range": high - low}
-
-
-def _prior_volume_baseline(
-    connection: sqlite3.Connection,
-    settings: Settings,
-    ticker: str,
-    local_day: date,
-    cap_bars: int,
-    baseline_sessions: int,
-) -> Optional[tuple[float, ...]]:
-    key = (str(settings.database), ticker, local_day, cap_bars, baseline_sessions)
-    if key in _RVOL_BASELINES:
-        return _RVOL_BASELINES[key]
-    sessions: list[list[float]] = []
-    candidate = local_day - timedelta(days=1)
-    for _ in range(baseline_sessions * 4 + 60):
-        probe = int(datetime.combine(candidate, clock_time(12), tzinfo=EASTERN).timestamp())
-        _, session_open, session_close = _session_window(settings, probe)
-        rows = _session_bars(
-            connection,
-            ticker,
-            session_open,
-            session_close,
-            session_close - 1,
-            limit=cap_bars,
-            include_interpolated=False,
-        )
-        if _rows_form_uniform_grid(
-            rows, session_open, session_open + cap_bars * 60, (60,)
-        ):
-            sessions.append([float(row["volume"]) for row in rows])
-            if len(sessions) == baseline_sessions:
-                break
-        candidate -= timedelta(days=1)
-    if len(sessions) < baseline_sessions:
-        _RVOL_BASELINES[key] = None
-        return None
-    baseline = tuple(
-        float(statistics.median(session[slot] for session in sessions))
-        for slot in range(cap_bars)
-    )
-    _RVOL_BASELINES[key] = baseline
-    return baseline
-
-
-def _signal_rvol_open(connection, ticker, ts, parameters, inputs, settings) -> Optional[float]:
-    cap_bars = int(parameters["cap_bars"])
-    baseline_sessions = int(parameters["baseline_sessions"])
-    session = inputs["session"]
-    if session is None:
-        return None
-    local_day, session_open, session_close = _session_window(settings, ts)
-    rows = _session_bars(
-        connection,
-        ticker,
-        session_open,
-        session_close,
-        ts,
-        limit=cap_bars,
-        include_interpolated=False,
-    )
-    if not rows:
-        return None
-    baseline = _prior_volume_baseline(
-        connection, settings, ticker, local_day, cap_bars, baseline_sessions
-    )
-    if baseline is None or len(baseline) < len(rows):
-        return None
-    actual = sum(float(row["volume"]) for row in rows)
-    expected = sum(baseline[: len(rows)]) or 1.0
-    return actual / expected
-
-
-def _relative_momentum_features(
-    rows: Sequence[Mapping[str, Any]],
-    window_minutes: int,
-    min_momentum_pct: float,
-) -> tuple[Optional[Mapping[str, float]], ...]:
-    if not rows:
-        return ()
-    prices = [float(rows[0]["open"])] + [float(row["close"]) for row in rows]
-    features: list[Optional[Mapping[str, float]]] = []
-    previous_direction = 0
-    run_length = 0
-    for index, row in enumerate(rows):
-        elapsed = index + 1
-        effective_window = min(window_minutes, elapsed)
-        reference = prices[elapsed - effective_window]
-        price = float(row["close"])
-        if reference <= 0.0 or price <= 0.0:
-            features.append(None)
-            previous_direction = 0
-            run_length = 0
-            continue
-        momentum_pct = (price / reference - 1.0) * 100.0
-        direction = _momentum_direction(momentum_pct, min_momentum_pct)
-        if direction == 0:
-            run_length = 0
-        elif direction == previous_direction:
-            run_length += 1
-        else:
-            run_length = 1
-        previous_direction = direction
-        duration = (
-            min(elapsed, effective_window + run_length - 1) if direction else 0
-        )
-        if direction:
-            start = elapsed - duration
-            trend_move_pct = (price / prices[start] - 1.0) * 100.0
-            path = sum(
-                abs(prices[position] - prices[position - 1])
-                for position in range(start + 1, elapsed + 1)
-            )
-            efficiency = abs(price - prices[start]) / path if path else 0.0
-        else:
-            trend_move_pct = 0.0
-            efficiency = 0.0
-        features.append(
-            {
-                "direction": float(direction),
-                "momentum_pct": momentum_pct,
-                "magnitude_pct": abs(momentum_pct),
-                "duration_minutes": float(duration),
-                "trend_move_pct": trend_move_pct,
-                "efficiency": efficiency,
-            }
-        )
-    return tuple(features)
-
-
-def _momentum_direction(momentum_pct: float, minimum_pct: float) -> int:
-    if momentum_pct >= minimum_pct:
-        return 1
-    if momentum_pct <= -minimum_pct:
-        return -1
-    return 0
-
-
-def _momentum_direction_alignment(
-    rows: Sequence[Mapping[str, Any]],
-    direction: int,
-    windows: Sequence[int],
-    min_momentum_pct: float,
-) -> Optional[float]:
-    if not rows:
-        return None
-    if direction == 0:
-        return 0.0
-    prices = [float(rows[0]["open"])] + [float(row["close"]) for row in rows]
-    elapsed = len(rows)
-    aligned = 0
-    for window in windows:
-        reference = prices[elapsed - window]
-        price = prices[elapsed]
-        if reference <= 0.0 or price <= 0.0:
-            return None
-        momentum_pct = (price / reference - 1.0) * 100.0
-        aligned += _momentum_direction(momentum_pct, min_momentum_pct) == direction
-    return aligned / len(windows)
-
-
-def _momentum_persistence_score(
-    magnitude_percentile: float,
-    duration_percentile: float,
-    direction_alignment: Optional[float],
-) -> Optional[float]:
-    if direction_alignment is None:
-        return None
-    joint_strength = math.sqrt(magnitude_percentile * duration_percentile)
-    return 0.8 * joint_strength + 0.2 * direction_alignment * 100.0
-
-
-def _complete_relative_momentum_session(
-    connection: sqlite3.Connection,
-    settings: Settings,
-    ticker: str,
-    local_day: date,
-    window_minutes: int,
-    min_momentum_pct: float,
-) -> Optional[tuple[Optional[Mapping[str, float]], ...]]:
-    key = (
-        str(settings.database),
-        ticker,
-        local_day,
-        window_minutes,
-        min_momentum_pct,
-    )
-    if key in _RELATIVE_MOMENTUM_SESSION_FEATURES:
-        return _RELATIVE_MOMENTUM_SESSION_FEATURES[key]
-    probe = int(
-        datetime.combine(local_day, clock_time(12), tzinfo=EASTERN).timestamp()
-    )
-    _, session_open, session_close = _session_window(settings, probe)
-    rows = _session_bars(
-        connection,
-        ticker,
-        session_open,
-        session_close,
-        session_close - 1,
-        include_interpolated=False,
-    )
-    if not _rows_form_uniform_grid(
-        rows, session_open, session_close, (60,)
-    ):
-        result = None
-    else:
-        result = _relative_momentum_features(
-            rows, window_minutes, min_momentum_pct
-        )
-    _RELATIVE_MOMENTUM_SESSION_FEATURES[key] = result
-    return result
-
-
-def _relative_momentum_baseline(
-    connection: sqlite3.Connection,
-    settings: Settings,
-    ticker: str,
-    local_day: date,
-    window_minutes: int,
-    baseline_sessions: int,
-    time_tolerance_minutes: int,
-    min_momentum_pct: float,
-    target_minutes: int,
-) -> Optional[Mapping[int, tuple[tuple[float, ...], tuple[float, ...]]]]:
-    key = (
-        str(settings.database),
-        ticker,
-        local_day,
-        window_minutes,
-        baseline_sessions,
-        time_tolerance_minutes,
-        min_momentum_pct,
-        target_minutes,
-    )
-    if key in _RELATIVE_MOMENTUM_BASELINES:
-        return _RELATIVE_MOMENTUM_BASELINES[key]
-    sessions: list[tuple[Optional[Mapping[str, float]], ...]] = []
-    candidate = local_day - timedelta(days=1)
-    for _ in range(baseline_sessions * 4 + 60):
-        features = _complete_relative_momentum_session(
-            connection,
-            settings,
-            ticker,
-            candidate,
-            window_minutes,
-            min_momentum_pct,
-        )
-        if features is not None and len(features) >= target_minutes:
-            sessions.append(features)
-            if len(sessions) == baseline_sessions:
-                break
-        candidate -= timedelta(days=1)
-    if not sessions:
-        _RELATIVE_MOMENTUM_BASELINES[key] = None
-        return None
-
-    curve: dict[int, tuple[tuple[float, ...], tuple[float, ...]]] = {}
-    for minute in range(target_minutes):
-        magnitudes: list[float] = []
-        durations: list[float] = []
-        start = max(0, minute - time_tolerance_minutes)
-        end = min(target_minutes, minute + time_tolerance_minutes + 1)
-        for features in sessions:
-            nearby = [feature for feature in features[start:end] if feature is not None]
-            if not nearby:
-                continue
-            magnitudes.append(
-                float(statistics.median(feature["magnitude_pct"] for feature in nearby))
-            )
-            durations.append(
-                float(
-                    statistics.median(
-                        feature["duration_minutes"] for feature in nearby
-                    )
-                )
-            )
-        curve[minute] = (tuple(magnitudes), tuple(durations))
-    _RELATIVE_MOMENTUM_BASELINES[key] = curve
-    return curve
-
-
-def _midrank_percentile(value: float, samples: Sequence[float]) -> float:
-    lower = sum(sample < value for sample in samples)
-    equal = sum(sample == value for sample in samples)
-    return (lower + equal * 0.5) / len(samples) * 100.0
-
-
-def _signal_relative_momentum(
-    connection, ticker, ts, parameters, inputs, settings
-) -> Optional[dict[str, Any]]:
-    session = inputs["session"]
-    if session is None:
-        return None
-    window_minutes = int(parameters["window_minutes"])
-    session_minute = int(session["minute"])
-    session_open = int(session["open_ts"])
-    rows = _session_bars(
-        connection,
-        ticker,
-        session_open,
-        session_open + int(session["total"]) * 60,
-        ts,
-        include_interpolated=False,
-    )
-    if not _rows_form_uniform_grid(
-        rows,
-        session_open,
-        session_open + (session_minute + 1) * 60,
-        (60,),
-    ):
-        return None
-    current = _relative_momentum_features(
-        rows, window_minutes, float(parameters["min_momentum_pct"])
-    )[-1]
-    if current is None:
-        return None
-    baseline = _relative_momentum_baseline(
-        connection,
-        settings,
-        ticker,
-        date.fromisoformat(session["date"]),
-        window_minutes,
-        int(parameters["baseline_sessions"]),
-        int(parameters["time_tolerance_minutes"]),
-        float(parameters["min_momentum_pct"]),
-        int(session["total"]),
-    )
-    if baseline is None:
-        return None
-    magnitudes, durations = baseline.get(session_minute, ((), ()))
-    minimum = int(parameters["min_sessions"])
-    if len(magnitudes) < minimum or len(durations) < minimum:
-        return None
-    magnitude_percentile = _midrank_percentile(
-        float(current["magnitude_pct"]), magnitudes
-    )
-    duration_percentile = _midrank_percentile(
-        float(current["duration_minutes"]), durations
-    )
-    strength_percentile = max(magnitude_percentile, duration_percentile)
-    difference = abs(magnitude_percentile - duration_percentile)
-    basis = (
-        "both"
-        if difference < 0.000001
-        else "magnitude"
-        if magnitude_percentile > duration_percentile
-        else "duration"
-    )
-    direction_value = int(current["direction"])
-    direction = (
-        "up" if direction_value > 0 else "down" if direction_value < 0 else "neutral"
-    )
-    alignment_windows = (
-        max(1, window_minutes // 2),
-        window_minutes * 2,
-        window_minutes * 3,
-    )
-    alignment_windows = tuple(
-        sorted({min(window, len(rows)) for window in alignment_windows})
-    )
-    direction_alignment = _momentum_direction_alignment(
-        rows,
-        direction_value,
-        alignment_windows,
-        float(parameters["min_momentum_pct"]),
-    )
-    persistence_score = (
-        0.0
-        if direction_value == 0
-        else _momentum_persistence_score(
-            magnitude_percentile,
-            duration_percentile,
-            direction_alignment,
-        )
-    )
-    strong = (
-        direction_value != 0
-        and strength_percentile >= float(parameters["strong_percentile"])
-    )
-    persistent = (
-        direction_value != 0
-        and persistence_score is not None
-        and persistence_score >= float(parameters["strong_percentile"])
-    )
-    return {
-        "direction": direction,
-        "direction_value": direction_value,
-        "momentum_pct": round(float(current["momentum_pct"]), 6),
-        "magnitude_pct": round(float(current["magnitude_pct"]), 6),
-        "trend_duration_minutes": int(current["duration_minutes"]),
-        "trend_move_pct": round(float(current["trend_move_pct"]), 6),
-        "efficiency": round(float(current["efficiency"]), 6),
-        "magnitude_percentile": round(magnitude_percentile, 3),
-        "duration_percentile": round(duration_percentile, 3),
-        "strength_percentile": round(strength_percentile, 3),
-        "signed_strength": round(
-            direction_value * strength_percentile / 100.0, 6
-        ),
-        "direction_alignment": round(direction_alignment, 6)
-        if direction_alignment is not None
-        else None,
-        "persistence_score": round(persistence_score, 3)
-        if persistence_score is not None
-        else None,
-        "signed_persistence": round(
-            direction_value * persistence_score / 100.0, 6
-        )
-        if persistence_score is not None
-        else None,
-        "persistent": persistent,
-        "alignment_windows": list(alignment_windows),
-        "strength_basis": basis,
-        "strong": strong,
-        "sample_sessions": len(magnitudes),
-        "session_minute": session_minute,
-        "window_minutes": window_minutes,
-    }
-
-
-def _signal_last_close(connection, ticker, ts, parameters, inputs, settings) -> Optional[float]:
-    include = bool(parameters["include_interpolated"])
-    quality = "" if include else "AND interpolated=0"
-    row = connection.execute(
-        "SELECT close FROM bars WHERE ticker=? AND ts<=? %s ORDER BY ts DESC LIMIT 1"
-        % quality,
-        (ticker, ts),
-    ).fetchone()
-    return float(row["close"]) if row else None
-
-
-def _session_return_pct(
-    connection: sqlite3.Connection,
-    ticker: str,
-    session_open: int,
-    through: int,
-) -> Optional[float]:
-    opening = connection.execute(
-        "SELECT open FROM bars WHERE ticker=? AND ts=? AND interpolated=0",
-        (ticker, session_open),
-    ).fetchone()
-    latest = connection.execute(
-        "SELECT close FROM bars WHERE ticker=? AND ts=? AND interpolated=0",
-        (ticker, through),
-    ).fetchone()
-    if opening is None or latest is None or float(opening["open"]) <= 0.0:
-        return None
-    return (float(latest["close"]) / float(opening["open"]) - 1.0) * 100.0
-
-
-def _signal_opening_sentiment(
-    connection, ticker, ts, parameters, inputs, settings
-) -> Optional[dict[str, Any]]:
-    session = inputs["session"]
-    if session is None:
-        return None
-    markets = parameters["market_tickers"]
-    minutes = int(parameters["minutes"])
-    min_market_move = float(parameters["min_market_move_pct"])
-    require_agreement = bool(parameters["require_ticker_agreement"])
-    if int(session["minute"]) < minutes:
-        return None
-
-    session_open = int(session["open_ts"])
-    opening_end = session_open + (minutes - 1) * 60
-    market_opening_returns = [
-        _session_return_pct(connection, market, session_open, opening_end)
-        for market in markets
-    ]
-    ticker_return = _session_return_pct(
-        connection, ticker, session_open, opening_end
-    )
-    if ticker_return is None or any(
-        value is None for value in market_opening_returns
-    ):
-        return None
-    market_return = float(statistics.median(market_opening_returns))
-    market_direction = (
-        1
-        if market_return >= min_market_move and market_return > 0.0
-        else -1
-        if market_return <= -min_market_move and market_return < 0.0
-        else 0
-    )
-    agreed = market_direction != 0 and ticker_return * market_direction > 0.0
-    direction = market_direction if agreed or not require_agreement else 0
-
-    current_returns = [
-        _session_return_pct(connection, market, session_open, ts)
-        for market in markets
-    ]
-    current_market_return = (
-        float(statistics.median(current_returns))
-        if all(value is not None for value in current_returns)
-        else None
-    )
-    pattern_valid = bool(
-        direction
-        and current_market_return is not None
-        and current_market_return * direction > 0.0
-    )
-    return {
-        "direction": direction,
-        "market_direction": market_direction,
-        "market_return_pct": market_return,
-        "ticker_return_pct": ticker_return,
-        "ticker_agreed": agreed,
-        "current_market_return_pct": current_market_return,
-        "pattern_valid": pattern_valid,
-        "minutes": minutes,
-    }
-
-
-def _percentile(values: Sequence[float], quantile: float) -> float:
-    ordered = sorted(float(value) for value in values)
-    if not ordered:
-        raise EvaluationError("percentile requires at least one value")
-    position = (len(ordered) - 1) * quantile
-    lower = int(position)
-    upper = min(lower + 1, len(ordered) - 1)
-    portion = position - lower
-    return ordered[lower] + portion * (ordered[upper] - ordered[lower])
-
-
-def _prior_pullback_baseline(
-    connection: sqlite3.Connection,
-    settings: Settings,
-    ticker: str,
-    local_day: date,
-    early_window: int,
-    late_window: int,
-    early_minutes: int,
-    entry_cutoff: int,
-    baseline_sessions: int,
-    min_baseline_sessions: int,
-    percentile: float,
-) -> Optional[tuple[float, float]]:
-    key = (
-        str(settings.database),
-        ticker,
-        local_day,
-        early_window,
-        late_window,
-        early_minutes,
-        entry_cutoff,
-        baseline_sessions,
-        min_baseline_sessions,
-        percentile,
-    )
-    if key in _PULLBACK_BASELINES:
-        return _PULLBACK_BASELINES[key]
-    early_values: list[float] = []
-    late_values: list[float] = []
-    complete_sessions = 0
-    candidate = local_day - timedelta(days=1)
-    for _ in range(baseline_sessions * 4 + 60):
-        probe = int(
-            datetime.combine(candidate, clock_time(12), tzinfo=EASTERN).timestamp()
-        )
-        _, session_open, session_close = _session_window(settings, probe)
-        rows = _session_bars(
-            connection,
-            ticker,
-            session_open,
-            session_close,
-            session_close - 1,
-            include_interpolated=False,
-        )
-        continuous = _rows_form_uniform_grid(
-            rows, session_open, session_close, (60,)
-        )
-        if continuous:
-            early_stop = min(early_minutes, len(rows) - entry_cutoff)
-            for index in range(early_window, max(early_window, early_stop)):
-                early_values.append(
-                    abs(
-                        float(rows[index]["close"])
-                        / float(rows[index - early_window]["close"])
-                        - 1.0
-                    )
-                    * 100.0
-                )
-            late_start = max(early_minutes, late_window)
-            late_stop = max(late_start, len(rows) - entry_cutoff)
-            for index in range(late_start, late_stop):
-                late_values.append(
-                    abs(
-                        float(rows[index]["close"])
-                        / float(rows[index - late_window]["close"])
-                        - 1.0
-                    )
-                    * 100.0
-                )
-            complete_sessions += 1
-            if complete_sessions == baseline_sessions:
-                break
-        candidate -= timedelta(days=1)
-    if (
-        complete_sessions < min_baseline_sessions
-        or not early_values
-        or not late_values
-    ):
-        _PULLBACK_BASELINES[key] = None
-        return None
-    result = (
-        _percentile(early_values, percentile),
-        _percentile(late_values, percentile),
-    )
-    _PULLBACK_BASELINES[key] = result
-    return result
-
-
-def _signal_pullback(
-    connection, ticker, ts, parameters, inputs, settings
-) -> Optional[dict[str, Any]]:
-    session = inputs["session"]
-    sentiment = inputs["opening_sentiment"]
-    if session is None or sentiment is None:
-        return None
-    early_minutes = int(parameters["early_minutes"])
-    early_window = int(parameters["early_window_minutes"])
-    late_window = int(parameters["late_window_minutes"])
-    late_market_strength_ratio = float(parameters["late_market_strength_ratio"])
-    max_threshold_ratio = float(parameters["max_threshold_ratio"])
-    max_ticker_flip_ratio = float(parameters["max_ticker_flip_ratio"])
-    entry_cutoff = int(parameters["entry_cutoff_minutes"])
-    baseline_sessions = int(parameters["baseline_sessions"])
-    min_baseline_sessions = int(parameters["min_baseline_sessions"])
-    percentile = float(parameters["percentile"])
-    min_extreme_distance = float(parameters["min_extreme_distance_pct"])
-    minute = int(session["minute"])
-    direction = int(sentiment["direction"])
-    regime = "early" if minute < early_minutes else "late"
-    window = early_window if regime == "early" else late_window
-    current = connection.execute(
-        "SELECT close FROM bars WHERE ticker=? AND ts=? AND interpolated=0",
-        (ticker, ts),
-    ).fetchone()
-    previous = connection.execute(
-        "SELECT close FROM bars WHERE ticker=? AND ts=? AND interpolated=0",
-        (ticker, ts - window * 60),
-    ).fetchone()
-    if current is None:
-        return None
-    price = float(current["close"])
-    movement = (
-        (price / float(previous["close"]) - 1.0) * 100.0
-        if previous is not None and float(previous["close"]) > 0.0
-        else None
-    )
-    local_day, session_open, _ = _session_window(settings, ts)
-    extremes = connection.execute(
-        """
-        SELECT MAX(high) AS high,MIN(low) AS low
-        FROM bars
-        WHERE ticker=? AND ts>=? AND ts<=? AND interpolated=0
-        """,
-        (ticker, session_open, ts),
-    ).fetchone()
-    running_high = float(extremes["high"]) if extremes["high"] is not None else price
-    running_low = float(extremes["low"]) if extremes["low"] is not None else price
-    distance = (
-        (running_high / price - 1.0) * 100.0
-        if direction == 1 and price > 0.0
-        else (price / running_low - 1.0) * 100.0
-        if direction == -1 and running_low > 0.0
-        else 0.0
-    )
-    baseline = _prior_pullback_baseline(
-        connection,
-        settings,
-        ticker,
-        local_day,
-        early_window,
-        late_window,
-        early_minutes,
-        entry_cutoff,
-        baseline_sessions,
-        min_baseline_sessions,
-        percentile,
-    )
-    threshold = (
-        baseline[0 if regime == "early" else 1] if baseline is not None else None
-    )
-    opening_ticker_return = require_float(
-        sentiment.get("ticker_return_pct"),
-        "opening_sentiment.ticker_return_pct",
-        nullable=True,
-        error=EvaluationError,
-    )
-    current_ticker_return = _session_return_pct(
-        connection, ticker, session_open, ts
-    )
-    ticker_flip_ratio = (
-        abs(current_ticker_return) / abs(opening_ticker_return)
-        if opening_ticker_return not in (None, 0.0)
-        and current_ticker_return is not None
-        and current_ticker_return * direction < 0.0
-        else 0.0
-    )
-    ticker_direction_valid = bool(
-        current_ticker_return is not None
-        and (
-            current_ticker_return * direction >= 0.0
-            or ticker_flip_ratio < max_ticker_flip_ratio
-        )
-    )
-    opening_market_return = require_float(
-        sentiment.get("market_return_pct"),
-        "opening_sentiment.market_return_pct",
-        nullable=True,
-        error=EvaluationError,
-    )
-    current_market_return = require_float(
-        sentiment.get("current_market_return_pct"),
-        "opening_sentiment.current_market_return_pct",
-        nullable=True,
-        error=EvaluationError,
-    )
-    market_strength_ratio = (
-        abs(current_market_return) / abs(opening_market_return)
-        if opening_market_return not in (None, 0.0)
-        and current_market_return is not None
-        else None
-    )
-    market_strength_valid = bool(
-        regime == "early"
-        or (
-            market_strength_ratio is not None
-            and market_strength_ratio >= late_market_strength_ratio
-        )
-    )
-    threshold_ratio = (
-        abs(movement) / threshold
-        if movement is not None and threshold is not None and threshold > 0.0
-        else None
-    )
-    setup_candidate = bool(
-        direction
-        and movement is not None
-        and threshold is not None
-        and movement * direction <= -threshold
-        and threshold_ratio is not None
-        and threshold_ratio <= max_threshold_ratio
-        and distance >= min_extreme_distance
-        and ticker_direction_valid
-        and market_strength_valid
-    )
-    prior_setup = False
-    if setup_candidate:
-        rows = _session_bars(
-            connection,
-            ticker,
-            session_open,
-            ts,
-            ts - 60,
-            include_interpolated=False,
-        )
-        row_by_ts = {int(row["ts"]): row for row in rows}
-        running_high: Optional[float] = None
-        running_low: Optional[float] = None
-        for row in rows:
-            row_ts = int(row["ts"])
-            row_high = float(row["high"])
-            row_low = float(row["low"])
-            running_high = (
-                row_high if running_high is None else max(running_high, row_high)
-            )
-            running_low = row_low if running_low is None else min(running_low, row_low)
-            candidate_minute = (row_ts - session_open) // 60
-            in_regime = (
-                int(sentiment["minutes"]) < candidate_minute < early_minutes
-                if regime == "early"
-                else candidate_minute >= early_minutes
-            )
-            if not in_regime:
-                continue
-            anchor = row_by_ts.get(row_ts - window * 60)
-            if anchor is None or float(anchor["close"]) <= 0.0:
-                continue
-            candidate_price = float(row["close"])
-            candidate_move = (
-                candidate_price / float(anchor["close"]) - 1.0
-            ) * 100.0
-            candidate_distance = (
-                (running_high / candidate_price - 1.0) * 100.0
-                if direction == 1 and candidate_price > 0.0
-                else (candidate_price / running_low - 1.0) * 100.0
-                if direction == -1 and running_low > 0.0
-                else 0.0
-            )
-            if (
-                candidate_move * direction <= -threshold
-                and candidate_distance >= min_extreme_distance
-            ):
-                prior_setup = True
-                break
-    trigger = bool(
-        direction
-        and minute > int(sentiment["minutes"])
-        and float(session["to_close"]) > entry_cutoff
-        and bool(sentiment["pattern_valid"])
-        and setup_candidate
-        and not prior_setup
-    )
-    return {
-        "trigger": trigger,
-        "direction": direction,
-        "regime": regime,
-        "window_minutes": window,
-        "move_pct": movement,
-        "threshold_pct": threshold,
-        "threshold_ratio": threshold_ratio,
-        "prior_setup": prior_setup,
-        "distance_from_extreme_pct": distance,
-        "opening_ticker_return_pct": opening_ticker_return,
-        "current_ticker_return_pct": current_ticker_return,
-        "ticker_flip_ratio": ticker_flip_ratio,
-        "ticker_direction_valid": ticker_direction_valid,
-        "market_strength_ratio": market_strength_ratio,
-        "market_strength_valid": market_strength_valid,
-        "pattern_valid": bool(sentiment["pattern_valid"]),
-        "price": price,
-        "ts": ts,
-    }
-
-
-def _signal_shape_v1(connection, ticker, ts, parameters, inputs, settings) -> Any:
-    return shape_v1(
-        connection,
-        ticker,
-        ts,
-        parameters,
-        inputs,
-        settings,
-        _session_window,
-        _session_bars,
-    )
-
-
-SIGNAL_FUNCTIONS: dict[str, SignalSpec] = {
-    "sma": SignalSpec(_signal_sma, ("bars",), _normalize_sma),
-    "metadata": SignalSpec(
-        _signal_metadata, ("bar_metadata",), _normalize_metadata
-    ),
-    "session": SignalSpec(_signal_session, (), _no_parameters),
-    "atr_session": SignalSpec(
-        _signal_atr_session,
-        ("bars", "session"),
-        lambda parameters, tickers: _normalize_int_parameter(
-            parameters, "sessions"
-        ),
-    ),
-    "prior_session": SignalSpec(
-        _signal_prior_session, ("bars", "session"), _no_parameters
-    ),
-    "first30_ret": SignalSpec(
-        _signal_first30_ret,
-        ("bars", "session"),
-        lambda parameters, tickers: _normalize_int_parameter(parameters, "bars"),
-    ),
-    "session_extremes": SignalSpec(
-        _signal_session_extremes,
-        ("bars", "session", "atr_session"),
-        _no_parameters,
-    ),
-    "opening_range": SignalSpec(
-        _signal_opening_range,
-        ("bars", "session"),
-        lambda parameters, tickers: _normalize_int_parameter(parameters, "minutes"),
-    ),
-    "rvol_open": SignalSpec(
-        _signal_rvol_open, ("bars", "session"), _normalize_rvol
-    ),
-    "relative_momentum": SignalSpec(
-        _signal_relative_momentum,
-        ("bars", "session"),
-        _normalize_relative_momentum,
-    ),
-    "last_close": SignalSpec(
-        _signal_last_close, ("bars",), _normalize_last_close
-    ),
-    "opening_sentiment": SignalSpec(
-        _signal_opening_sentiment,
-        ("bars", "session"),
-        _normalize_opening_sentiment,
-    ),
-    "pullback": SignalSpec(
-        _signal_pullback,
-        ("bars", "session", "opening_sentiment"),
-        _normalize_pullback,
-    ),
-    "shape_v1": SignalSpec(_signal_shape_v1, ("bars",), _normalize_shape),
-}
-
-
-def _algo_crossover(context: AlgoContext) -> tuple[bool, bool, int]:
-    inputs = context.inputs
-    previous = context.previous
-    fast_name, slow_name = inputs
-    fast = require_float(
-        inputs[fast_name], "fast", nullable=True, error=EvaluationError
-    )
-    slow = require_float(
-        inputs[slow_name], "slow", nullable=True, error=EvaluationError
-    )
-    old_fast = require_float(
-        previous.get(fast_name), "previous fast", nullable=True, error=EvaluationError
-    )
-    old_slow = require_float(
-        previous.get(slow_name), "previous slow", nullable=True, error=EvaluationError
-    )
-    if None in (fast, slow, old_fast, old_slow):
-        return False, False, 0
-    is_entry = old_fast <= old_slow and fast > slow
-    is_close = old_fast >= old_slow and fast < slow
-    direction = 1 if is_entry else (
-        int(context.open_entries[0]["direction"])
-        if is_close and context.open_entries
-        else 1 if is_close else 0
-    )
-    return is_entry, is_close, direction
-
-
-def _algo_range_breakout(context: AlgoContext) -> tuple[bool, bool, int]:
-    inputs = context.inputs
-    session_name, range_name, rvol_name, price_name = inputs
-    session = inputs[session_name]
-    opening_range = inputs[range_name]
-    rvol = require_float(
-        inputs[rvol_name], "rvol_open", nullable=True, error=EvaluationError
-    )
-    price = require_float(
-        inputs[price_name], "last_close", nullable=True, error=EvaluationError
-    )
-    direction_param = context.parameters["direction"]
-    target_r = float(context.parameters["target_r"])
-    min_rvol = float(context.parameters["min_rvol"])
-    entry_cutoff = float(context.parameters["entry_cutoff_minutes"])
-    flat_minutes = float(context.parameters["flat_minutes"])
-    if session is None or opening_range is None or rvol is None or price is None:
-        return False, False, 0
-
-    if context.open_entries:
-        entry = context.open_entries[0]
-        direction = int(entry["direction"])
-        entry_price = float(entry["price"])
-        stop = float(opening_range["low" if direction == 1 else "high"])
-        risk = entry_price - stop if direction == 1 else stop - entry_price
-        target = entry_price + direction * target_r * risk
-        hit_stop = price <= stop if direction == 1 else price >= stop
-        hit_target = price >= target if direction == 1 else price <= target
-        if risk <= 0 or hit_stop or hit_target or float(session["to_close"]) <= flat_minutes:
-            return False, True, direction
-        return False, False, 0
-
-    if any(_algo_output(row["output"])[0] for row in context.session_outputs):
-        return False, False, 0
-    if float(session["to_close"]) < entry_cutoff or rvol <= min_rvol:
-        return False, False, 0
-    high = float(opening_range["high"])
-    low = float(opening_range["low"])
-    if direction_param in ("both", "long") and price > high:
-        return True, False, 1
-    if direction_param in ("both", "short") and price < low:
-        return True, False, -1
-    return False, False, 0
-
-
-def _algo_sentiment_pullback(context: AlgoContext) -> tuple[bool, bool, int]:
-    session_name, sentiment_name, pullback_name, price_name = context.inputs
-    session = context.inputs[session_name]
-    sentiment = context.inputs[sentiment_name]
-    pullback = context.inputs[pullback_name]
-    price = require_float(
-        context.inputs[price_name], "last_close", nullable=True, error=EvaluationError
-    )
-    early_minutes = int(context.parameters["early_minutes"])
-    early_hold = int(context.parameters["early_hold_minutes"])
-    late_hold = int(context.parameters["late_hold_minutes"])
-    take_profit = float(context.parameters["take_profit_pct"])
-    stop_loss = float(context.parameters["stop_loss_pct"])
-    giveback_pct = float(context.parameters["giveback_pct"])
-    flat_minutes = float(context.parameters["flat_minutes"])
-    pattern_exit = bool(context.parameters["pattern_exit"])
-    if session is None or price is None:
-        return False, False, 0
-
-    if context.open_entries:
-        entry = context.open_entries[0]
-        direction = int(entry["direction"])
-        entry_price = float(entry["price"])
-        elapsed = (int(session["ts"]) - int(entry["ts"])) / 60.0
-        entry_minute = (int(entry["ts"]) - int(session["open_ts"])) / 60.0
-        hold_minutes = early_hold if entry_minute < early_minutes else late_hold
-        pnl_pct = direction * (float(price) / entry_price - 1.0) * 100.0
-        peak_pnl_pct = max(
-            0.0,
-            *(
-                direction * (float(row["close"]) / entry_price - 1.0) * 100.0
-                for row in context.read_bars(
-                    int(entry["ts"]), int(session["ts"])
-                )
-            ),
-        )
-        gave_back = pnl_pct <= peak_pnl_pct - giveback_pct
-        pattern_broke = (
-            pattern_exit
-            and (sentiment is None or not bool(sentiment["pattern_valid"]))
-        )
-        if (
-            (take_profit > 0.0 and pnl_pct >= take_profit)
-            or (stop_loss > 0.0 and pnl_pct <= -stop_loss)
-            or gave_back
-            or elapsed >= hold_minutes
-            or pattern_broke
-            or float(session["to_close"]) <= flat_minutes
-        ):
-            return False, True, direction
-        return False, False, 0
-
-    if any(_algo_output(row["output"])[0] for row in context.session_outputs):
-        return False, False, 0
-    if pullback is not None and bool(pullback["trigger"]):
-        return True, False, int(pullback["direction"])
-    return False, False, 0
-
-
-def _algo_has_session_entry(context: AlgoContext) -> bool:
-    return any(
-        _algo_output(row["output"])[0] for row in context.session_outputs
-    )
-
-
-def _algo_window(
-    session: Mapping[str, Any], minute_min: int, minute_max: int
-) -> tuple[int, int]:
-    total = int(session["total"])
-    if total == 390:
-        return minute_min, minute_max
-    start = (
-        minute_min
-        if minute_min <= 120
-        else round(
-            120 + (total - 120) * (minute_min - 120) / (390 - 120)
-        )
-    )
-    end = (
-        minute_max
-        if minute_max <= 120
-        else total - (390 - minute_max)
-    )
-    return max(0, start), min(total, end)
-
-
-def _fixed_atr_exit(
-    context: AlgoContext,
-    session: Mapping[str, Any],
-    atr_session: float,
-    price: float,
-    risk_atr_frac: float,
-    target_r: float,
-    flat_minutes: float,
-) -> tuple[bool, bool, int]:
-    entry = context.open_entries[0]
-    direction = int(entry["direction"])
-    entry_price = float(entry["price"])
-    risk = risk_atr_frac * atr_session * entry_price
-    stop = entry_price - direction * risk
-    target = entry_price + direction * target_r * risk
-    hit_stop = price <= stop if direction == 1 else price >= stop
-    hit_target = price >= target if direction == 1 else price <= target
-    if (
-        risk <= 0.0
-        or hit_stop
-        or hit_target
-        or float(session["to_close"]) <= flat_minutes
-    ):
-        return False, True, direction
-    return False, False, 0
-
-
-def _algo_momentum_continuation(
-    context: AlgoContext,
-) -> tuple[bool, bool, int]:
-    return _algo_atr_strategy(context, "momentum_continuation")
-
-
-def _algo_failed_gap(context: AlgoContext) -> tuple[bool, bool, int]:
-    return _algo_atr_strategy(context, "failed_gap")
-
-
-def _algo_gap_continuation(context: AlgoContext) -> tuple[bool, bool, int]:
-    return _algo_atr_strategy(context, "gap_continuation")
-
-
-def _confirmed_extreme_direction(
-    context: AlgoContext,
-    session: Mapping[str, Any],
-    atr_session: float,
-    min_range_atr: float,
-    confirmation_bars: int,
-    window_min: int,
-    window_max: int,
-) -> int:
-    """Confirm a recent session extreme without storing private algo state."""
-    rows = context.read_bars(int(session["open_ts"]), None)
-    if len(rows) <= confirmation_bars:
-        return 0
-    current_price = float(rows[-1]["close"])
-    prior_rows = rows[:-1]
-    first_candidate = max(0, len(prior_rows) - confirmation_bars)
-    for index in range(len(prior_rows) - 1, first_candidate - 1, -1):
-        candidate = prior_rows[index]
-        candidate_minute = int(
-            (int(candidate["ts"]) - int(session["open_ts"])) // 60
-        )
-        if candidate_minute < window_min or candidate_minute >= window_max:
-            continue
-        history = prior_rows[: index + 1]
-        day_high = max(float(row["high"]) for row in history)
-        day_low = min(float(row["low"]) for row in history)
-        candidate_price = float(candidate["close"])
-        denominator = atr_session * candidate_price
-        if (
-            denominator <= 0.0
-            or (day_high - day_low) / denominator < min_range_atr
-        ):
-            continue
-        if float(candidate["low"]) <= day_low:
-            if current_price > float(candidate["high"]):
-                return 1
-            continue
-        if (
-            float(candidate["high"]) >= day_high
-            and current_price < float(candidate["low"])
-        ):
-            return -1
-    return 0
-
-
-def _extreme_fade_exit(
-    context: AlgoContext,
-    session: Mapping[str, Any],
-    atr_session: float,
-    price: float,
-    stop_fraction: float,
-    target_r: float,
-    flat_minutes: float,
-) -> tuple[bool, bool, int]:
-    entry = context.open_entries[0]
-    direction = int(entry["direction"])
-    entry_price = float(entry["price"])
-    entry_rows = context.read_bars(
-        int(session["open_ts"]), int(entry["ts"])
-    )
-    if not entry_rows:
-        return False, False, 0
-    offset = stop_fraction * atr_session * entry_price
-    entry_high = max(float(row["high"]) for row in entry_rows)
-    entry_low = min(float(row["low"]) for row in entry_rows)
-    stop = entry_low - offset if direction == 1 else entry_high + offset
-    risk = entry_price - stop if direction == 1 else stop - entry_price
-    target = entry_price + direction * target_r * risk
-    hit_stop = price <= stop if direction == 1 else price >= stop
-    hit_target = price >= target if direction == 1 else price <= target
-    if (
-        risk <= 0.0
-        or hit_stop
-        or hit_target
-        or float(session["to_close"]) <= flat_minutes
-    ):
-        return False, True, direction
-    return False, False, 0
-
-
-def _algo_input_float(
-    inputs: Mapping[str, Any], name: str, label: str
-) -> Optional[float]:
-    return require_float(
-        inputs[name], label, nullable=True, error=EvaluationError
-    )
-
-
-def _algo_atr_strategy(
-    context: AlgoContext, strategy: str
-) -> tuple[bool, bool, int]:
-    inputs = context.inputs
-    parameters = context.parameters
-    names = tuple(inputs)
-    first30 = None
-    prior = None
-    opening_range = None
-    extremes = None
-    if strategy == "momentum_continuation":
-        session_name, first30_name, atr_name, rvol_name, price_name = names
-        first30 = _algo_input_float(inputs, first30_name, "first30_ret")
-        setup = [first30]
-    elif strategy == "failed_gap":
-        session_name, prior_name, atr_name, price_name = names
-        prior = inputs[prior_name]
-        rvol_name = None
-        setup = [prior]
-    elif strategy == "gap_continuation":
-        session_name, prior_name, range_name, atr_name, rvol_name, price_name = names
-        prior = inputs[prior_name]
-        opening_range = inputs[range_name]
-        setup = [prior, opening_range]
-    elif strategy == "extreme_fade":
-        session_name, extremes_name, atr_name, rvol_name, price_name = names
-        extremes = inputs[extremes_name]
-        setup = [extremes]
-    else:
-        raise EvaluationError("unsupported ATR strategy: %s" % strategy)
-
-    session = inputs[session_name]
-    atr_session = _algo_input_float(inputs, atr_name, "atr_session")
-    rvol = (
-        _algo_input_float(inputs, rvol_name, "rvol_open")
-        if rvol_name is not None
-        else None
-    )
-    price = _algo_input_float(inputs, price_name, "last_close")
-    first30_min = (
-        float(parameters["first30_min_pct"])
-        if strategy == "momentum_continuation"
-        else 0.0
-    )
-    gap_min = (
-        float(parameters["gap_min_pct"])
-        if strategy in ("failed_gap", "gap_continuation")
-        else 0.0
-    )
-    min_range_atr = (
-        float(parameters["min_range_atr"])
-        if strategy == "extreme_fade"
-        else 0.0
-    )
-    risk_fraction = float(
-        parameters[
-            "stop_atr_frac" if strategy == "extreme_fade" else "risk_atr_frac"
-        ]
-    )
-    target_r = float(parameters["target_r"])
-    confirmation_bars = (
-        int(parameters["confirmation_bars"])
-        if strategy == "extreme_fade"
-        else 0
-    )
-    min_rvol = (
-        float(parameters["min_rvol"])
-        if strategy != "failed_gap"
-        else None
-    )
-    minute_min = int(parameters["minute_min"])
-    minute_max = int(parameters["minute_max"])
-    entry_cutoff = float(parameters["entry_cutoff_minutes"])
-    flat_minutes = float(parameters["flat_minutes"])
-    required = [session, atr_session, price, *setup]
-    if rvol_name is not None:
-        required.append(rvol)
-    if any(value is None for value in required):
-        return False, False, 0
-    if context.open_entries:
-        if strategy == "extreme_fade":
-            return _extreme_fade_exit(
-                context,
-                session,
-                float(atr_session),
-                float(price),
-                risk_fraction,
-                target_r,
-                flat_minutes,
-            )
-        return _fixed_atr_exit(
-            context,
-            session,
-            float(atr_session),
-            float(price),
-            risk_fraction,
-            target_r,
-            flat_minutes,
-        )
-    if _algo_has_session_entry(context):
-        return False, False, 0
-    window_min, window_max = _algo_window(session, minute_min, minute_max)
-    minute = int(session["minute"])
-    if (
-        minute < window_min
-        or minute >= window_max
-        or float(session["to_close"]) < entry_cutoff
-        or (
-            min_rvol is not None
-            and (rvol is None or float(rvol) <= min_rvol)
-        )
-    ):
-        return False, False, 0
-
-    if strategy == "momentum_continuation":
-        if abs(float(first30)) < first30_min or float(first30) == 0.0:
-            return False, False, 0
-        return True, False, 1 if float(first30) > 0.0 else -1
-    if strategy == "failed_gap":
-        gap = float(prior["gap_pct"])
-        if (
-            gap < -gap_min
-            and float(prior["open_vs_prior_low"]) < 0.0
-            and float(prior["price_vs_prior_low"]) > 0.0
-        ):
-            return True, False, 1
-        if (
-            gap > gap_min
-            and float(prior["open_vs_prior_high"]) > 0.0
-            and float(prior["price_vs_prior_high"]) < 0.0
-        ):
-            return True, False, -1
-        return False, False, 0
-    if strategy == "gap_continuation":
-        gap = float(prior["gap_pct"])
-        if (
-            gap > gap_min
-            and float(prior["open_vs_prior_high"]) > 0.0
-            and float(price) > float(opening_range["high"])
-        ):
-            return True, False, 1
-        if (
-            gap < -gap_min
-            and float(prior["open_vs_prior_low"]) < 0.0
-            and float(price) < float(opening_range["low"])
-        ):
-            return True, False, -1
-        return False, False, 0
-    if (
-        float(extremes["day_range_atr"]) >= min_range_atr
-        and (bool(extremes["new_day_low"]) or bool(extremes["new_day_high"]))
-    ):
-        return False, False, 0
-    direction = _confirmed_extreme_direction(
-        context,
-        session,
-        float(atr_session),
-        min_range_atr,
-        confirmation_bars,
-        window_min,
-        window_max,
-    )
-    return (True, False, direction) if direction else (False, False, 0)
-
-
-def _algo_extreme_fade(context: AlgoContext) -> tuple[bool, bool, int]:
-    return _algo_atr_strategy(context, "extreme_fade")
-
-
-def _normalize_range_breakout(
-    parameters: Mapping[str, Any], tickers: tuple[str, ...]
-) -> Mapping[str, Any]:
-    names = {
-        "direction",
-        "target_r",
-        "min_rvol",
-        "entry_cutoff_minutes",
-        "flat_minutes",
-    }
-    _parameter_keys(parameters, names)
-    direction = parameters.get("direction")
-    if direction not in ("both", "long", "short"):
-        raise ConfigError("direction must be both, long, or short")
-    return {
-        "direction": direction,
-        "target_r": _parameter_number(parameters, "target_r"),
-        "min_rvol": _parameter_number(parameters, "min_rvol"),
-        "entry_cutoff_minutes": _parameter_number(
-            parameters, "entry_cutoff_minutes"
-        ),
-        "flat_minutes": _parameter_number(parameters, "flat_minutes"),
-    }
-
-
-def _normalize_sentiment_pullback(
-    parameters: Mapping[str, Any], tickers: tuple[str, ...]
-) -> Mapping[str, Any]:
-    names = {
-        "early_minutes",
-        "early_hold_minutes",
-        "late_hold_minutes",
-        "take_profit_pct",
-        "stop_loss_pct",
-        "giveback_pct",
-        "pattern_exit",
-        "flat_minutes",
-        "capital_fraction",
-    }
-    _parameter_keys(parameters, names)
-    capital_fraction = _parameter_number(parameters, "capital_fraction")
-    giveback_pct = _parameter_number(parameters, "giveback_pct")
-    if capital_fraction <= 0.0 or capital_fraction > 0.5:
-        raise ConfigError("capital_fraction must be > 0 and <= 0.5")
-    if giveback_pct <= 0.0:
-        raise ConfigError("giveback_pct must be > 0")
-    return {
-        "early_minutes": _parameter_int(parameters, "early_minutes"),
-        "early_hold_minutes": _parameter_int(parameters, "early_hold_minutes"),
-        "late_hold_minutes": _parameter_int(parameters, "late_hold_minutes"),
-        "take_profit_pct": _parameter_number(parameters, "take_profit_pct"),
-        "stop_loss_pct": _parameter_number(parameters, "stop_loss_pct"),
-        "giveback_pct": giveback_pct,
-        "pattern_exit": _parameter_bool(parameters, "pattern_exit"),
-        "flat_minutes": _parameter_number(parameters, "flat_minutes"),
-        "capital_fraction": capital_fraction,
-    }
-
-
-def _normalize_algo_window(
-    parameters: Mapping[str, Any],
-    tickers: tuple[str, ...],
-    float_names: tuple[str, ...],
-) -> dict[str, Any]:
-    _parameter_keys(parameters, {"minute_min", "minute_max", *float_names})
-    result: dict[str, Any] = {
-        "minute_min": _parameter_int(parameters, "minute_min", minimum=0),
-        "minute_max": _parameter_int(parameters, "minute_max"),
-    }
-    if result["minute_min"] >= result["minute_max"]:
-        raise ConfigError("minute_min must be less than minute_max")
-    result.update(
-        (name, _parameter_number(parameters, name)) for name in float_names
-    )
-    return result
-
-
-def _normalize_momentum_continuation(
-    parameters: Mapping[str, Any], tickers: tuple[str, ...]
-) -> Mapping[str, Any]:
-    return _normalize_algo_window(
-        parameters,
-        tickers,
-        (
-            "first30_min_pct",
-            "risk_atr_frac",
-            "target_r",
-            "min_rvol",
-            "entry_cutoff_minutes",
-            "flat_minutes",
-        ),
-    )
-
-
-def _normalize_failed_gap(
-    parameters: Mapping[str, Any], tickers: tuple[str, ...]
-) -> Mapping[str, Any]:
-    return _normalize_algo_window(
-        parameters,
-        tickers,
-        (
-            "gap_min_pct",
-            "risk_atr_frac",
-            "target_r",
-            "entry_cutoff_minutes",
-            "flat_minutes",
-        ),
-    )
-
-
-def _normalize_gap_continuation(
-    parameters: Mapping[str, Any], tickers: tuple[str, ...]
-) -> Mapping[str, Any]:
-    return _normalize_algo_window(
-        parameters,
-        tickers,
-        (
-            "gap_min_pct",
-            "risk_atr_frac",
-            "target_r",
-            "min_rvol",
-            "entry_cutoff_minutes",
-            "flat_minutes",
-        ),
-    )
-
-
-def _normalize_extreme_fade(
-    parameters: Mapping[str, Any], tickers: tuple[str, ...]
-) -> Mapping[str, Any]:
-    base_parameters = dict(parameters)
-    confirmation_bars = base_parameters.pop("confirmation_bars", None)
-    result = _normalize_algo_window(
-        base_parameters,
-        tickers,
-        (
-            "min_range_atr",
-            "stop_atr_frac",
-            "target_r",
-            "min_rvol",
-            "entry_cutoff_minutes",
-            "flat_minutes",
-        ),
-    )
-    result["confirmation_bars"] = require_int(
-        confirmation_bars, "confirmation_bars", error=ConfigError
-    )
-    return result
-
-
-ALGO_FUNCTIONS: dict[str, AlgoSpec] = {
-    "crossover": AlgoSpec(_algo_crossover, 2, _no_parameters),
-    "range_breakout": AlgoSpec(
-        _algo_range_breakout, 4, _normalize_range_breakout
-    ),
-    "sentiment_pullback": AlgoSpec(
-        _algo_sentiment_pullback, 4, _normalize_sentiment_pullback
-    ),
-    "momentum_continuation": AlgoSpec(
-        _algo_momentum_continuation, 5, _normalize_momentum_continuation
-    ),
-    "failed_gap": AlgoSpec(_algo_failed_gap, 4, _normalize_failed_gap),
-    "gap_continuation": AlgoSpec(
-        _algo_gap_continuation, 6, _normalize_gap_continuation
-    ),
-    "extreme_fade": AlgoSpec(_algo_extreme_fade, 5, _normalize_extreme_fade),
-}
-
-
-def _algo_output(value: Any) -> tuple[bool, bool, int]:
-    if not isinstance(value, (list, tuple)) or len(value) not in (2, 3):
-        raise EvaluationError("algo output must be [is_entry,is_close_all,direction]")
-    is_entry, is_close = value[:2]
-    if not isinstance(is_entry, bool) or not isinstance(is_close, bool) or (is_entry and is_close):
-        raise EvaluationError("algo actions must be exclusive booleans")
-    direction = value[2] if len(value) == 3 else (1 if is_entry or is_close else 0)
-    if isinstance(direction, bool) or not isinstance(direction, int) or direction not in (-1, 0, 1):
-        raise EvaluationError("algo direction must be -1, 0, or 1")
-    if (is_entry or is_close) and direction == 0:
-        raise EvaluationError("an algo action must include direction")
-    if not (is_entry or is_close) and direction != 0:
-        raise EvaluationError("a quiet algo output must use direction 0")
-    return is_entry, is_close, direction
-
-
-def _prior_output(
-    connection: sqlite3.Connection, ticker: str, ts: int, kind: str
-) -> Any:
-    row = connection.execute(
-        """
-        SELECT output FROM outputs
-        WHERE ticker=? AND kind=? AND ts<?
-        ORDER BY ts DESC LIMIT 1
-        """,
-        (ticker, kind, ts),
-    ).fetchone()
-    return json.loads(row["output"]) if row else None
-
-
-def _output_state(
-    connection: sqlite3.Connection,
-    settings: Settings,
-    ticker: str,
-    algo: str,
-    ts: int,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    _, session_open, _ = _session_window(settings, ts)
-    seed_key = (str(settings.database), ticker, algo, session_open)
-    if seed_key not in _OUTPUT_SESSION_SEEDS:
-        last_close = connection.execute(
-            """
-            SELECT ts FROM outputs
-            WHERE ticker=? AND kind=? AND ts<?
-              AND json_extract(output,'$[1]')=1
-            ORDER BY ts DESC LIMIT 1
-            """,
-            (ticker, algo, session_open),
-        ).fetchone()
-        rows = connection.execute(
-            """
-            SELECT o.ts, o.output, b.close
-            FROM outputs o
-            JOIN bars b ON b.ticker=o.ticker AND b.ts=o.ts
-            WHERE o.ticker=? AND o.kind=?
-              AND o.ts>? AND o.ts<?
-              AND json_extract(o.output,'$[0]')=1
-            ORDER BY o.ts
-            """,
-            (
-                ticker,
-                algo,
-                int(last_close["ts"]) if last_close else -1,
-                session_open,
-            ),
-        ).fetchall()
-        _OUTPUT_SESSION_SEEDS[seed_key] = tuple(
-            (
-                int(row["ts"]),
-                float(row["close"]),
-                _algo_output(json.loads(row["output"]))[2],
-            )
-            for row in rows
-        )
-    rows = connection.execute(
-        """
-        SELECT o.ts, o.output, b.close
-        FROM outputs o
-        JOIN bars b ON b.ticker=o.ticker AND b.ts=o.ts
-        WHERE o.ticker=? AND o.kind=?
-          AND o.ts>=? AND o.ts<?
-          AND (json_extract(o.output,'$[0]')=1 OR json_extract(o.output,'$[1]')=1)
-        ORDER BY o.ts
-        """,
-        (ticker, algo, session_open, ts),
-    ).fetchall()
-    prior: list[dict[str, Any]] = []
-    open_entries = [
-        {"ts": entry_ts, "price": price, "direction": direction}
-        for entry_ts, price, direction in _OUTPUT_SESSION_SEEDS[seed_key]
-    ]
-    for row in rows:
-        output = json.loads(row["output"])
-        is_entry, is_close, direction = _algo_output(output)
-        prior.append({"ts": int(row["ts"]), "output": output})
-        if is_close:
-            open_entries = []
-        elif is_entry:
-            open_entries.append(
-                {
-                    "ts": int(row["ts"]),
-                    "price": float(row["close"]),
-                    "direction": direction,
-                }
-            )
-    return open_entries, prior
-
 
 @dataclass
 class _EvaluationState:
@@ -2828,27 +424,14 @@ class _EvaluationState:
         self.last_ts = ts
 
 
+
 def _seed_evaluation_state(
     connection: sqlite3.Connection,
     settings: Settings,
     ticker: str,
     ts: int,
 ) -> _EvaluationState:
-    previous = {
-        str(row["kind"]): json.loads(row["output"])
-        for row in connection.execute(
-            """
-            SELECT kind,output FROM (
-                SELECT kind,output,
-                       ROW_NUMBER() OVER (PARTITION BY kind ORDER BY ts DESC) AS position
-                FROM outputs
-                WHERE ticker=? AND ts<?
-            )
-            WHERE position=1
-            """,
-            (ticker, ts),
-        ).fetchall()
-    }
+    previous = _previous_outputs(connection, ticker, ts)
     open_entries: dict[str, list[dict[str, Any]]] = {}
     session_outputs: dict[str, list[dict[str, Any]]] = {}
     for name in settings.enabled_algos():
@@ -2865,6 +448,7 @@ def _seed_evaluation_state(
     )
 
 
+
 def _empty_evaluation_state(
     settings: Settings, ticker: str, ts: int
 ) -> _EvaluationState:
@@ -2879,29 +463,6 @@ def _empty_evaluation_state(
     )
 
 
-def _context_bars(
-    connection: sqlite3.Connection,
-    ticker: str,
-    evaluation_ts: int,
-    start_ts: int,
-    through_ts: Optional[int],
-) -> tuple[Mapping[str, Any], ...]:
-    through = evaluation_ts if through_ts is None else min(
-        evaluation_ts, through_ts
-    )
-    if start_ts > through:
-        return ()
-    rows = connection.execute(
-        """
-        SELECT ts,open,high,low,close,volume,interpolated
-        FROM bars
-        WHERE ticker=? AND ts>=? AND ts<=? AND interpolated=0
-        ORDER BY ts
-        """,
-        (ticker, start_ts, through),
-    ).fetchall()
-    return tuple(rows)
-
 
 def run_core(
     connection: sqlite3.Connection,
@@ -2914,10 +475,8 @@ def run_core(
     ticker = ticker.strip().upper()
     if ticker not in settings.tickers:
         raise EvaluationError("ticker is not in config: %s" % ticker)
-    bar = connection.execute(
-        "SELECT close FROM bars WHERE ticker=? AND ts=?", (ticker, ts)
-    ).fetchone()
-    if bar is None:
+    bar_close = _bar_close(connection, ticker, ts)
+    if bar_close is None:
         raise EvaluationError("timestamp is not a stored bar: %s %s" % (ticker, ts))
     if state is not None and not state.accepts(settings, ticker, ts):
         raise EvaluationError("evaluation state does not precede %s %s" % (ticker, ts))
@@ -3003,7 +562,9 @@ def run_core(
         try:
             result = _algo_output(output)
         except EvaluationError as exc:
-            raise EvaluationError("algo %s returned invalid output: %s" % (name, exc)) from exc
+            raise EvaluationError(
+                "algo %s returned invalid output: %s" % (name, exc)
+            ) from exc
         if result[1]:
             result = (
                 (False, True, int(position[0]["direction"]))
@@ -3025,8 +586,9 @@ def run_core(
             name: serialized[name]
             for name in (*signal_values, *selected_values)
         },
-        "_bar_close": float(bar["close"]),
+        "_bar_close": bar_close,
     }
+
 
 
 def core(
@@ -3047,281 +609,6 @@ def core(
         connection.close()
 
 
-def _log(
-    connection: sqlite3.Connection,
-    level: str,
-    message: str,
-    now: Optional[int] = None,
-    once: bool = False,
-) -> None:
-    if once and connection.execute(
-        "SELECT 1 FROM logs WHERE service='algo' AND level=? AND message=? LIMIT 1",
-        (level, message),
-    ).fetchone():
-        return
-    connection.execute(
-        "INSERT INTO logs(ts,service,level,message) VALUES (?,'algo',?,?)",
-        (now if now is not None else int(time.time()), level, message),
-    )
-
-
-def _sync_live_definitions(
-    connection: sqlite3.Connection, settings: Settings, now: int
-) -> dict[str, Any]:
-    """Apply current config definitions immediately."""
-    try:
-        document = json.loads(settings.content)
-    except json.JSONDecodeError as exc:
-        raise ConfigError("config content is invalid JSON") from exc
-    if not isinstance(document, Mapping):
-        raise ConfigError("config must be a JSON object")
-
-    configured_signals = {
-        str(name): _json(definition)
-        for name, definition in _document_mapping(document, "signals").items()
-    }
-    stored_signals = {
-        str(row["name"]): str(row["definition"])
-        for row in connection.execute("SELECT name,definition FROM signals")
-    }
-    signals_changed = configured_signals != stored_signals
-    for name in sorted(set(stored_signals) - set(configured_signals)):
-        connection.execute("DELETE FROM signals WHERE name=?", (name,))
-    for name, definition in sorted(configured_signals.items()):
-        if name not in stored_signals:
-            connection.execute(
-                "INSERT INTO signals(name,definition,updated_at) VALUES (?,?,?)",
-                (name, definition, now),
-            )
-        elif stored_signals[name] != definition:
-            connection.execute(
-                "UPDATE signals SET definition=?,updated_at=? WHERE name=?",
-                (definition, now, name),
-            )
-
-    configured_algos = _algo_snapshots(document)
-    stored_algos = {
-        str(row["name"]): (str(row["definition"]), str(row["dependencies"]))
-        for row in connection.execute(
-            "SELECT name,definition,dependencies FROM algos"
-        )
-    }
-    changed_algos: list[str] = []
-    for name in sorted(set(stored_algos) - set(configured_algos)):
-        connection.execute("DELETE FROM algos WHERE name=?", (name,))
-        changed_algos.append(name)
-    for name, (definition, dependencies) in sorted(configured_algos.items()):
-        previous = stored_algos.get(name)
-        if previous is None:
-            connection.execute(
-                """
-                INSERT INTO algos(name,definition,dependencies,active_from)
-                VALUES (?,?,?,?)
-                """,
-                (name, definition, dependencies, now),
-            )
-            changed_algos.append(name)
-        elif previous != (definition, dependencies):
-            connection.execute(
-                """
-                UPDATE algos
-                SET definition=?,dependencies=?,active_from=?
-                WHERE name=?
-                """,
-                (definition, dependencies, now, name),
-            )
-            changed_algos.append(name)
-
-    return {
-        "signals_changed": signals_changed,
-        "changed_algos": changed_algos,
-    }
-
-
-def _pending(
-    connection: sqlite3.Connection,
-    settings: Settings,
-    limit: int = CYCLE_PAIR_LIMIT,
-    stop_event: Optional[threading.Event] = None,
-) -> list[tuple[str, int]]:
-    kinds = settings.output_kinds()
-    if not kinds or limit < 1:
-        return []
-    marker = kinds[-1]
-    pending: list[tuple[str, int]] = []
-    # Respect config priority so the primary chart ticker is not starved by a
-    # large historical backfill for alphabetically earlier symbols.
-    for ticker in settings.tickers:
-        if stop_event is not None and stop_event.is_set():
-            break
-        latest = connection.execute(
-            "SELECT MAX(ts) FROM bars WHERE ticker=?", (ticker,)
-        ).fetchone()[0]
-        if latest is None:
-            continue
-        remaining = limit - len(pending)
-        rows = connection.execute(
-            """
-            SELECT b.ts FROM bars b
-            WHERE b.ticker=? AND b.ts>=? AND NOT EXISTS (
-                SELECT 1 FROM outputs o
-                WHERE o.ticker=b.ticker AND o.ts=b.ts
-                  AND o.kind=?
-            )
-            ORDER BY b.ts LIMIT ?
-            """,
-            (
-                ticker,
-                int(latest) - settings.evaluation_days * 86_400,
-                marker,
-                remaining,
-            ),
-        ).fetchall()
-        pending.extend((ticker, int(row["ts"])) for row in rows)
-        if len(pending) == limit:
-            break
-    return pending
-
-
-def _recalculation_pairs(
-    connection: sqlite3.Connection,
-    settings: Settings,
-    limit: int = CYCLE_PAIR_LIMIT,
-    stop_event: Optional[threading.Event] = None,
-) -> list[tuple[str, int]]:
-    """Return a fresh bounded evaluation window without reading live outputs."""
-    if not settings.output_kinds() or limit < 1:
-        return []
-    pairs: list[tuple[str, int]] = []
-    for ticker in settings.tickers:
-        if stop_event is not None and stop_event.is_set():
-            break
-        latest = connection.execute(
-            "SELECT MAX(ts) FROM bars WHERE ticker=?", (ticker,)
-        ).fetchone()[0]
-        if latest is None:
-            continue
-        remaining = limit - len(pairs)
-        rows = connection.execute(
-            """
-            SELECT ts FROM bars
-            WHERE ticker=? AND ts>=?
-            ORDER BY ts LIMIT ?
-            """,
-            (
-                ticker,
-                int(latest) - settings.evaluation_days * 86_400,
-                remaining,
-            ),
-        ).fetchall()
-        pairs.extend((ticker, int(row["ts"])) for row in rows)
-        if len(pairs) == limit:
-            break
-    return pairs
-
-
-def _upsert_output_rows(
-    connection: sqlite3.Connection,
-    rows: Sequence[tuple[str, int, str, str, int]],
-) -> None:
-    connection.executemany(
-        """
-        INSERT INTO outputs(ticker,ts,kind,output,computed_at)
-        VALUES (?,?,?,?,?)
-        ON CONFLICT(ticker,ts,kind) DO UPDATE SET
-          output=excluded.output,computed_at=excluded.computed_at
-        """,
-        rows,
-    )
-
-
-def _warm_primary(
-    connection: sqlite3.Connection,
-    settings: Settings,
-    function_name: str,
-    targets: Callable[
-        [sqlite3.Connection, Settings, str, int, str], Sequence[int]
-    ],
-    compute: Callable[[str, int, Mapping[str, Any]], Any],
-) -> tuple[str, int]:
-    signal_entry = next(
-        (
-            (name, node)
-            for name, node in settings.signals.items()
-            if node["function"] == function_name
-        ),
-        None,
-    )
-    if signal_entry is None or not settings.tickers:
-        return "", 0
-
-    kind, node = signal_entry
-    ticker = settings.tickers[0]
-    latest = connection.execute(
-        "SELECT MAX(ts) FROM bars WHERE ticker=?", (ticker,)
-    ).fetchone()[0]
-    if latest is None:
-        return ticker, 0
-    target_timestamps = targets(
-        connection, settings, ticker, int(latest), kind
-    )
-    if not target_timestamps:
-        return ticker, 0
-
-    computed_at = int(time.time())
-    rows = [
-        (
-            ticker,
-            ts,
-            kind,
-            _json(compute(ticker, ts, node)),
-            computed_at,
-        )
-        for ts in target_timestamps
-    ]
-    _upsert_output_rows(connection, rows)
-    return ticker, len(rows)
-
-
-def _shape_warm_targets(
-    connection: sqlite3.Connection,
-    settings: Settings,
-    ticker: str,
-    latest: int,
-    kind: str,
-) -> Sequence[int]:
-    _local_day, session_open, session_close = _session_window(settings, latest)
-    if latest >= session_close:
-        return ()
-    if latest < session_open:
-        timestamps = [latest]
-    else:
-        timestamps = [
-            int(row["ts"])
-            for row in connection.execute(
-                """
-                SELECT ts FROM bars
-                WHERE ticker=? AND ts>=? AND ts<=?
-                ORDER BY ts
-                """,
-                (ticker, session_open, latest),
-            )
-        ]
-    if not timestamps:
-        return ()
-
-    stored = {
-        int(row["ts"])
-        for row in connection.execute(
-            """
-            SELECT ts FROM outputs
-            WHERE ticker=? AND kind=? AND ts>=? AND ts<=?
-            """,
-            (ticker, kind, timestamps[0], timestamps[-1]),
-        )
-    }
-    return [ts for ts in timestamps if ts not in stored]
-
 
 def _warm_primary_shape(
     connection: sqlite3.Connection,
@@ -3338,44 +625,6 @@ def _warm_primary_shape(
         ),
     )
 
-
-def _relative_momentum_warm_targets(
-    connection: sqlite3.Connection,
-    settings: Settings,
-    ticker: str,
-    latest: int,
-    kind: str,
-) -> Sequence[int]:
-    _local_day, session_open, session_close = _session_window(settings, latest)
-    timestamps = [
-        int(row["ts"])
-        for row in connection.execute(
-            """
-            SELECT ts FROM bars
-            WHERE ticker=? AND ts>=? AND ts<?
-            ORDER BY ts
-            """,
-            (ticker, session_open, session_close),
-        )
-    ]
-    if not timestamps:
-        return ()
-
-    stored = {
-        int(row["ts"]): row["output"]
-        for row in connection.execute(
-            """
-            SELECT ts,output FROM outputs
-            WHERE ticker=? AND kind=? AND ts>=? AND ts<?
-            """,
-            (ticker, kind, session_open, session_close),
-        )
-    }
-    return [
-        ts
-        for ts in timestamps
-        if ts not in stored or not _relative_momentum_has_score(stored[ts])
-    ]
 
 
 def _warm_primary_relative_momentum(
@@ -3404,20 +653,6 @@ def _warm_primary_relative_momentum(
     )
 
 
-def _relative_momentum_has_score(output: str) -> bool:
-    try:
-        value = json.loads(output)
-    except (TypeError, ValueError):
-        return False
-    if not isinstance(value, Mapping):
-        return False
-    score = value.get("persistence_score")
-    return (
-        not isinstance(score, bool)
-        and isinstance(score, (int, float))
-        and math.isfinite(score)
-    )
-
 
 def _repair_relative_momentum_gaps(
     connection: sqlite3.Connection,
@@ -3442,28 +677,9 @@ def _repair_relative_momentum_gaps(
     evaluated = 0
     database_key = str(settings.database)
     for ticker in settings.tickers:
-        latest = connection.execute(
-            "SELECT MAX(ts) FROM bars WHERE ticker=?", (ticker,)
-        ).fetchone()[0]
-        if latest is None:
-            continue
-        candidates = connection.execute(
-            """
-            SELECT ts,output FROM outputs
-            WHERE ticker=? AND kind=? AND ts>=?
-              AND (
-                output='null' OR NOT json_valid(output) OR
-                COALESCE(json_type(output, '$.persistence_score'), '')
-                  NOT IN ('integer', 'real')
-              )
-            ORDER BY ts DESC
-            """,
-            (
-                ticker,
-                kind,
-                int(latest) - settings.evaluation_days * 86_400,
-            ),
-        ).fetchall()
+        candidates = _relative_momentum_repair_candidates(
+            connection, settings, ticker, kind
+        )
         for row in candidates:
             ts = int(row["ts"])
             attempt = (database_key, ticker, ts)
@@ -3497,166 +713,6 @@ def _repair_relative_momentum_gaps(
     return len(repaired_rows)
 
 
-def _write_result(
-    connection: sqlite3.Connection,
-    settings: Settings,
-    result: Mapping[str, Any],
-    replace_algos: Optional[Sequence[str]] = None,
-) -> tuple[dict[str, int], list[dict[str, Any]]]:
-    computed_at = int(time.time())
-    rows = []
-    for name, value in result["signals"].items():
-        rows.append(
-            (
-                result["ticker"],
-                result["ts"],
-                name,
-                result["_serialized"][name],
-                computed_at,
-            )
-        )
-    for name, output in result["algos"].items():
-        rows.append(
-            (
-                result["ticker"],
-                result["ts"],
-                name,
-                result["_serialized"][name],
-                computed_at,
-            )
-        )
-
-    trade_rows: list[tuple[str, str, int, str, int]] = []
-    for name, output in result["algos"].items():
-        is_entry, is_close, direction = _algo_output(output)
-        action = "exit_all" if is_close else "entry" if is_entry else None
-        if action is None:
-            continue
-        if action == "exit_all":
-            open_entries = result["_open_entries"][name]
-            if not open_entries:
-                raise EvaluationError("algo %s closed without an open entry" % name)
-            if direction != int(open_entries[0]["direction"]):
-                raise EvaluationError("algo %s closed in the wrong direction" % name)
-        trade_rows.append(
-            (result["ticker"], name, result["ts"], action, direction)
-        )
-
-    stats = {"pairs": 1, "outputs": len(rows), "entries": 0, "exits": 0}
-    alerts: list[dict[str, Any]] = []
-    if not connection.in_transaction:
-        connection.execute("BEGIN IMMEDIATE")
-    try:
-        if replace_algos is not None:
-            connection.execute("DELETE FROM outputs")
-        _upsert_output_rows(connection, rows)
-        replaced_names = set(replace_algos or ())
-        if replace_algos is not None and replaced_names:
-            placeholders = ",".join("?" for _ in replaced_names)
-            connection.execute(
-                f"DELETE FROM trades WHERE algo IN ({placeholders})",
-                tuple(sorted(replaced_names)),
-            )
-            connection.executemany(
-                "INSERT INTO trades(ticker,algo,ts,action,direction) VALUES (?,?,?,?,?)",
-                [row for row in trade_rows if row[1] in replaced_names],
-            )
-        for ticker, name, ts, action, direction in trade_rows:
-            if name not in replaced_names:
-                existing = connection.execute(
-                    "SELECT action,direction FROM trades WHERE ticker=? AND algo=? AND ts=?",
-                    (ticker, name, ts),
-                ).fetchall()
-                if existing:
-                    if (
-                        len(existing) == 1
-                        and existing[0]["action"] == action
-                        and int(existing[0]["direction"]) == direction
-                    ):
-                        continue
-                    raise EvaluationError(
-                        "stored trade conflicts with algo output: %s %s %s"
-                        % (ticker, name, ts)
-                    )
-                else:
-                    connection.execute(
-                        "INSERT INTO trades(ticker,algo,ts,action,direction) VALUES (?,?,?,?,?)",
-                        (ticker, name, ts, action, direction),
-                    )
-            price = connection.execute(
-                "SELECT close FROM bars WHERE ticker=? AND ts=?",
-                (ticker, ts),
-            ).fetchone()
-            alerts.append(
-                {
-                    "ticker": ticker,
-                    "algo": name,
-                    "ts": ts,
-                    "action": action,
-                    "direction": direction,
-                    "price": None if price is None else price["close"],
-                }
-            )
-            stats["exits" if action == "exit_all" else "entries"] += 1
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
-    return stats, alerts
-
-
-def _replace_empty_calculation(
-    connection: sqlite3.Connection, replace_algos: Sequence[str]
-) -> None:
-    """Finish a recalculation when its source window contains no bars."""
-    if not connection.in_transaction:
-        connection.execute("BEGIN IMMEDIATE")
-    try:
-        connection.execute("DELETE FROM outputs")
-        if replace_algos:
-            placeholders = ",".join("?" for _ in replace_algos)
-            connection.execute(
-                f"DELETE FROM trades WHERE algo IN ({placeholders})",
-                tuple(replace_algos),
-            )
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
-
-
-def _live_trade_alerts(
-    connection: sqlite3.Connection,
-    settings: Settings,
-    records: Sequence[Mapping[str, Any]],
-    resume_after: int,
-    now: Optional[int] = None,
-) -> list[dict[str, Any]]:
-    """Keep only fresh latest-bar trades witnessed by the live service."""
-    current = int(time.time()) if now is None else now
-    latest_by_session: dict[tuple[str, int, int], Optional[int]] = {}
-    eligible = []
-    for record in records:
-        ticker = str(record["ticker"])
-        event_ts = int(record["ts"])
-        if event_ts <= resume_after:
-            continue
-        _day, session_open, session_close = _session_window(settings, event_ts)
-        if not (session_open <= event_ts < session_close):
-            continue
-        session_key = (ticker, session_open, session_close)
-        if session_key not in latest_by_session:
-            latest_by_session[session_key] = connection.execute(
-                "SELECT MAX(ts) FROM bars WHERE ticker=? AND ts>=? AND ts<?",
-                session_key,
-            ).fetchone()[0]
-        if latest_by_session[session_key] != event_ts:
-            continue
-        if not (session_open <= current < session_close + ALERT_CLOSE_GRACE_SECONDS):
-            continue
-        eligible.append(dict(record))
-    return eligible
-
 
 def _report_alert_failure(config_path: Path, reason: str) -> None:
     message = "alerting failed: %s" % " ".join(reason.split())
@@ -3664,9 +720,186 @@ def _report_alert_failure(config_path: Path, reason: str) -> None:
     _best_effort_log(config_path, "error", message)
 
 
+
 def _report_broker_result(config_path: Path, level: str, message: str) -> None:
     getattr(logging, level)(message)
     _best_effort_log(config_path, level, message)
+
+
+
+def _prepare_cycle(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    force_recalculate: bool,
+) -> tuple[bool, tuple[str, ...]]:
+    now = int(time.time())
+    definition_sync = _sync_live_definitions(connection, settings, now)
+    changed_algos = tuple(definition_sync["changed_algos"])
+    signals_changed = bool(definition_sync["signals_changed"])
+    if signals_changed or changed_algos:
+        _log(
+            connection,
+            "info",
+            "applied live definitions signals_changed=%s algos=%s"
+            % (
+                str(signals_changed).lower(),
+                ",".join(changed_algos) or "none",
+            ),
+            now,
+        )
+
+    recalculating = bool(force_recalculate or signals_changed or changed_algos)
+    replace_algos = settings.enabled_algos() if force_recalculate else changed_algos
+    if force_recalculate:
+        _log(
+            connection,
+            "info",
+            "explicit algorithm recalculation requested",
+            now,
+        )
+    if recalculating:
+        return True, replace_algos
+
+    connection.commit()
+    shape_ticker, shape_rows = _warm_primary_shape(connection, settings)
+    momentum_ticker, momentum_rows = _warm_primary_relative_momentum(
+        connection, settings
+    )
+    repaired_rows = _repair_relative_momentum_gaps(connection, settings)
+    maintenance = (
+        (
+            shape_rows,
+            "priority shape warmup ticker=%s rows=%d" % (shape_ticker, shape_rows),
+        ),
+        (
+            momentum_rows,
+            "priority momentum warmup ticker=%s rows=%d"
+            % (momentum_ticker, momentum_rows),
+        ),
+        (repaired_rows, "continuous momentum repair rows=%d" % repaired_rows),
+    )
+    for row_count, message in maintenance:
+        if row_count:
+            _log(connection, "info", message)
+            logging.info(message)
+    if any(row_count for row_count, _message in maintenance):
+        connection.commit()
+    return False, replace_algos
+
+
+
+def _dispatch_trade_alerts(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    trade_alerts: Sequence[Mapping[str, Any]],
+    alert_resume_after: Optional[int],
+    config_path: Path,
+) -> None:
+    if alert_resume_after is None or not trade_alerts:
+        return
+    live_records = _live_trade_alerts(
+        connection,
+        settings,
+        trade_alerts,
+        alert_resume_after,
+    )
+    send_trade_alerts(
+        live_records,
+        on_failure=lambda reason: _report_alert_failure(config_path, reason),
+    )
+    if settings.broker.enabled:
+        send_broker_orders(
+            live_records,
+            config_path=config_path,
+            account_env=settings.broker.account_env,
+            quantity=settings.broker.quantity,
+            execution_tickers=settings.broker.execution_tickers,
+            on_result=lambda level, message: _report_broker_result(
+                config_path, level, message
+            ),
+        )
+
+
+
+def _evaluate_cycle(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    config_path: Path,
+    recalculating: bool,
+    replace_algos: Sequence[str],
+    stop_event: Optional[threading.Event],
+    alert_resume_after: Optional[int],
+) -> dict[str, int]:
+    stats = {"pairs": 0, "outputs": 0, "entries": 0, "exits": 0}
+    states: dict[str, _EvaluationState] = {}
+    pairs = (
+        _recalculation_pairs(connection, settings, stop_event=stop_event)
+        if recalculating
+        else _pending(connection, settings, stop_event=stop_event)
+    )
+    replacement_pending = recalculating
+    for ticker, ts in pairs:
+        if stop_event is not None and stop_event.is_set():
+            break
+        state = states.get(ticker)
+        if state is None or not state.accepts(settings, ticker, ts):
+            state = (
+                _empty_evaluation_state(settings, ticker, ts)
+                if replacement_pending
+                else _seed_evaluation_state(connection, settings, ticker, ts)
+            )
+            states[ticker] = state
+        result = run_core(connection, settings, ticker, ts, state=state)
+        part, trade_alerts = _write_result(
+            connection,
+            settings,
+            result,
+            replace_algos=replace_algos if replacement_pending else None,
+        )
+        replacement_pending = False
+        state.advance(result)
+        for key in stats:
+            stats[key] += part[key]
+        _dispatch_trade_alerts(
+            connection,
+            settings,
+            trade_alerts,
+            alert_resume_after,
+            config_path,
+        )
+        if stats["pairs"] % CYCLE_PROGRESS_INTERVAL == 0:
+            progress = "cycle progress pairs=%d outputs=%d entries=%d exits=%d" % (
+                stats["pairs"],
+                stats["outputs"],
+                stats["entries"],
+                stats["exits"],
+            )
+            _log(connection, "info", progress)
+            connection.commit()
+            logging.info(progress)
+
+    if replacement_pending and not pairs:
+        _replace_empty_calculation(connection, replace_algos)
+    label = (
+        "cycle stopped"
+        if stop_event is not None and stop_event.is_set()
+        else "cycle batch complete"
+    )
+    message = "%s pairs=%d outputs=%d entries=%d exits=%d" % (
+        label,
+        stats["pairs"],
+        stats["outputs"],
+        stats["entries"],
+        stats["exits"],
+    )
+    if stats["pairs"]:
+        _log(connection, "info", message)
+        connection.commit()
+        logging.info(message)
+    else:
+        logging.debug(message)
+    return stats
+
 
 
 def cycle(
@@ -3675,162 +908,30 @@ def cycle(
     alert_resume_after: Optional[int] = None,
     force_recalculate: bool = False,
 ) -> tuple[dict[str, int], Settings]:
-    _RVOL_BASELINES.clear()
-    _PULLBACK_BASELINES.clear()
-    _OUTPUT_SESSION_SEEDS.clear()
-    _SESSION_SUMMARIES.clear()
-    _ATR_SESSION_VALUES.clear()
-    _RELATIVE_MOMENTUM_SESSION_FEATURES.clear()
-    _RELATIVE_MOMENTUM_BASELINES.clear()
+    clear_signal_caches()
+    clear_output_state_cache()
     clear_shape_cache()
     config_path = config_path.resolve()
-    current = load_settings(config_path)
-    _init_database(current.database)
-    connection = _connect(current.database)
+    settings = load_settings(config_path)
+    _init_database(settings.database)
+    connection = _connect(settings.database)
     try:
-        now = int(time.time())
-        settings = current
-        definition_sync = _sync_live_definitions(connection, settings, now)
-        if definition_sync["signals_changed"] or definition_sync["changed_algos"]:
-            _log(
-                connection,
-                "info",
-                "applied live definitions signals_changed=%s algos=%s"
-                % (
-                    str(definition_sync["signals_changed"]).lower(),
-                    ",".join(definition_sync["changed_algos"]) or "none",
-                ),
-                now,
-            )
-        recalculating = bool(
-            force_recalculate
-            or definition_sync["signals_changed"]
-            or definition_sync["changed_algos"]
+        recalculating, replace_algos = _prepare_cycle(
+            connection, settings, force_recalculate
         )
-        replace_algos = (
-            settings.enabled_algos()
-            if force_recalculate
-            else tuple(definition_sync["changed_algos"])
+        stats = _evaluate_cycle(
+            connection,
+            settings,
+            config_path,
+            recalculating,
+            replace_algos,
+            stop_event,
+            alert_resume_after,
         )
-        if force_recalculate:
-            _log(
-                connection,
-                "info",
-                "explicit algorithm recalculation requested",
-                now,
-            )
-        if not recalculating:
-            connection.commit()
-
-            shape_ticker, shape_rows = _warm_primary_shape(connection, settings)
-            warm_ticker, warm_rows = _warm_primary_relative_momentum(
-                connection, settings
-            )
-            repaired_rows = _repair_relative_momentum_gaps(connection, settings)
-            if shape_rows:
-                message = "priority shape warmup ticker=%s rows=%d" % (
-                    shape_ticker,
-                    shape_rows,
-                )
-                _log(connection, "info", message)
-                logging.info(message)
-            if warm_rows:
-                message = "priority momentum warmup ticker=%s rows=%d" % (
-                    warm_ticker,
-                    warm_rows,
-                )
-                _log(connection, "info", message)
-                logging.info(message)
-            if repaired_rows:
-                message = "continuous momentum repair rows=%d" % repaired_rows
-                _log(connection, "info", message)
-                logging.info(message)
-            if shape_rows or warm_rows or repaired_rows:
-                connection.commit()
-
-        stats = {"pairs": 0, "outputs": 0, "entries": 0, "exits": 0}
-        states: dict[str, _EvaluationState] = {}
-        pairs = (
-            _recalculation_pairs(connection, settings, stop_event=stop_event)
-            if recalculating
-            else _pending(connection, settings, stop_event=stop_event)
-        )
-        replacement_pending = recalculating
-        for ticker, ts in pairs:
-            if stop_event is not None and stop_event.is_set():
-                break
-            state = states.get(ticker)
-            if state is None or not state.accepts(settings, ticker, ts):
-                state = (
-                    _empty_evaluation_state(settings, ticker, ts)
-                    if replacement_pending
-                    else _seed_evaluation_state(connection, settings, ticker, ts)
-                )
-                states[ticker] = state
-            result = run_core(
-                connection, settings, ticker, ts, state=state
-            )
-            part, trade_alerts = _write_result(
-                connection,
-                settings,
-                result,
-                replace_algos=replace_algos if replacement_pending else None,
-            )
-            replacement_pending = False
-            state.advance(result)
-            for key in stats:
-                stats[key] += part[key]
-            if alert_resume_after is not None and trade_alerts:
-                live_records = _live_trade_alerts(
-                    connection,
-                    settings,
-                    trade_alerts,
-                    alert_resume_after,
-                )
-                send_trade_alerts(
-                    live_records,
-                    on_failure=lambda reason: _report_alert_failure(
-                        config_path, reason
-                    ),
-                )
-                if settings.broker.enabled:
-                    send_broker_orders(
-                        live_records,
-                        config_path=config_path,
-                        account_env=settings.broker.account_env,
-                        quantity=settings.broker.quantity,
-                        execution_tickers=settings.broker.execution_tickers,
-                        on_result=lambda level, message: _report_broker_result(
-                            config_path, level, message
-                        ),
-                    )
-            if stats["pairs"] % CYCLE_PROGRESS_INTERVAL == 0:
-                progress = "cycle progress pairs=%d outputs=%d entries=%d exits=%d" % (
-                    stats["pairs"], stats["outputs"], stats["entries"], stats["exits"]
-                )
-                _log(connection, "info", progress)
-                connection.commit()
-                logging.info(progress)
-        if replacement_pending and not pairs:
-            _replace_empty_calculation(connection, replace_algos)
-        label = (
-            "cycle stopped"
-            if stop_event is not None and stop_event.is_set()
-            else "cycle batch complete"
-        )
-        message = "%s pairs=%d outputs=%d entries=%d exits=%d" % (
-            label,
-            stats["pairs"], stats["outputs"], stats["entries"], stats["exits"]
-        )
-        if stats["pairs"]:
-            _log(connection, "info", message)
-            connection.commit()
-            logging.info(message)
-        else:
-            logging.debug(message)
         return stats, settings
     finally:
         connection.close()
+
 
 
 def _best_effort_log(
@@ -3853,57 +954,6 @@ def _best_effort_log(
     except Exception:
         logging.exception("could not write algo log")
 
-
-def status(settings: Settings) -> str:
-    connection = _connect(settings.database, read_only=True)
-    try:
-        lines = ["ticker  bars      outputs   latest"]
-        for ticker in settings.tickers:
-            row = connection.execute(
-                "SELECT COUNT(*) AS count,MAX(ts) AS latest FROM bars WHERE ticker=?",
-                (ticker,),
-            ).fetchone()
-            outputs = connection.execute(
-                "SELECT COUNT(*) FROM outputs WHERE ticker=?",
-                (ticker,),
-            ).fetchone()[0]
-            latest = datetime.fromtimestamp(row["latest"], UTC).isoformat() if row["latest"] else "-"
-            lines.append("%-7s %-9d %-9d %s" % (ticker, row["count"], outputs, latest))
-        trades = connection.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
-    finally:
-        connection.close()
-    lines.extend(
-        (
-            "enabled signals %d" % len(settings.enabled_signals()),
-            "enabled algos %d" % len(settings.enabled_algos()),
-            "trades %d" % trades,
-            "database %s" % settings.database,
-        )
-    )
-    return "\n".join(lines)
-
-
-def recent_logs(settings: Settings, limit: int = 50) -> str:
-    """Return recent algo logs through the service-owned read function."""
-    connection = _connect(settings.database, read_only=True)
-    try:
-        rows = connection.execute(
-            """
-            SELECT ts,level,message FROM logs
-            WHERE service='algo'
-            ORDER BY rowid DESC LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-    finally:
-        connection.close()
-    lines = ["utc                  level  message"]
-    for row in rows:
-        timestamp = datetime.fromtimestamp(int(row["ts"]), UTC).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
-        lines.append("%-20s %-6s %s" % (timestamp, row["level"], row["message"]))
-    return "\n".join(lines)
 
 
 def request_operation(settings: Settings, operation: str) -> dict[str, Any]:
@@ -3935,6 +985,7 @@ def request_operation(settings: Settings, operation: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ConfigError("algo service returned an invalid response")
     return payload
+
 
 
 class Service:
@@ -4070,7 +1121,9 @@ class Service:
                         recalculation_running = False
                     delay = 30
                     logging.exception("cycle failed")
-                    _best_effort_log(self.config_path, "error", "cycle failed: %s" % exc)
+                    _best_effort_log(
+                        self.config_path, "error", "cycle failed: %s" % exc
+                    )
                 self.wake_event.wait(delay)
                 self.wake_event.clear()
             _best_effort_log(self.config_path, "info", "service stopped")
@@ -4078,6 +1131,7 @@ class Service:
             health_server.shutdown()
             health_server.server_close()
             health_thread.join(timeout=2)
+
 
 
 class _HealthHandler(BaseHTTPRequestHandler):
@@ -4124,6 +1178,7 @@ class _HealthHandler(BaseHTTPRequestHandler):
         return
 
 
+
 def _timestamp(value: str) -> int:
     try:
         return int(value)
@@ -4135,6 +1190,7 @@ def _timestamp(value: str) -> int:
         if parsed.tzinfo is None:
             raise ConfigError("ISO timestamp must include a timezone")
         return int(parsed.astimezone(UTC).timestamp())
+
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -4153,6 +1209,7 @@ def _parser() -> argparse.ArgumentParser:
     evaluate.add_argument("timestamp")
     evaluate.add_argument("--algo", action="append", dest="algos")
     return parser
+
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
