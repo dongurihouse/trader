@@ -843,6 +843,8 @@ def _write_result(
     settings: Settings,
     result: Mapping[str, Any],
     replace_algos: Optional[Sequence[str]] = None,
+    *,
+    commit: bool = True,
 ) -> tuple[dict[str, int], list[dict[str, Any]]]:
     computed_at = int(time.time())
     rows = []
@@ -942,7 +944,8 @@ def _write_result(
                 }
             )
             stats["exits" if action == "exit_all" else "entries"] += 1
-        connection.commit()
+        if commit:
+            connection.commit()
     except Exception:
         connection.rollback()
         raise

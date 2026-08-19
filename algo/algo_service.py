@@ -87,6 +87,7 @@ from strategies import ALGO_FUNCTIONS, _algo_output
 DEFAULT_CONFIG = ROOT.parent / "config" / "config.json"
 CYCLE_PROGRESS_INTERVAL = 1_000
 PARALLEL_PAIR_THRESHOLD = 200
+PARALLEL_WRITE_BATCH_SIZE = 50
 _RELATIVE_MOMENTUM_REPAIR_ATTEMPTS: set[tuple[str, str, int]] = set()
 _PARALLEL_WRITE_LOCK: Any = None
 _PARALLEL_STOP_EVENT: Any = None
@@ -632,22 +633,48 @@ def _parallel_ticker_batch(
     stats = {"pairs": 0, "outputs": 0, "entries": 0, "exits": 0}
     alerts: list[dict[str, Any]] = []
     state: Optional[_EvaluationState] = None
+    pending_results: list[Mapping[str, Any]] = []
     connection = _connect(settings.database)
+
+    def flush_results() -> None:
+        if not pending_results:
+            return
+        batch_stats = {"pairs": 0, "outputs": 0, "entries": 0, "exits": 0}
+        batch_alerts: list[dict[str, Any]] = []
+        if _PARALLEL_WRITE_LOCK is None:
+            raise RuntimeError("parallel database write lock is unavailable")
+        with _PARALLEL_WRITE_LOCK:
+            try:
+                for pending in pending_results:
+                    part, trade_alerts = _write_result(
+                        connection,
+                        settings,
+                        pending,
+                        commit=False,
+                    )
+                    _add_stats(batch_stats, part)
+                    batch_alerts.extend(trade_alerts)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        _add_stats(stats, batch_stats)
+        alerts.extend(batch_alerts)
+        pending_results.clear()
+
     try:
         for ts in timestamps:
             if _PARALLEL_STOP_EVENT is not None and _PARALLEL_STOP_EVENT.is_set():
                 break
             if state is None or not state.accepts(settings, ticker, ts):
+                flush_results()
                 state = _seed_evaluation_state(connection, settings, ticker, ts)
             result = run_core(connection, settings, ticker, ts, state=state)
-            if _PARALLEL_WRITE_LOCK is None:
-                raise RuntimeError("parallel database write lock is unavailable")
-            with _PARALLEL_WRITE_LOCK:
-                part, trade_alerts = _write_result(connection, settings, result)
             state.advance(result)
-            for key in stats:
-                stats[key] += part[key]
-            alerts.extend(trade_alerts)
+            pending_results.append(result)
+            if len(pending_results) == PARALLEL_WRITE_BATCH_SIZE:
+                flush_results()
+        flush_results()
         return ticker, stats, alerts
     finally:
         connection.close()
