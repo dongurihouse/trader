@@ -284,3 +284,19 @@ python3 algo/algo_service.py core SNDK 2026-08-17T13:30:00Z
 
 Restrict that call to one configured algo with `--algo NAME`. The read-only
 command returns every enabled signal and only the requested algo outputs.
+
+## Scan harness
+
+`tools/close_scan.py` scans drive and leg configurations with the production
+fill model: close-based entries, close-based exits, and exact-bar gates. It
+reads bars and live results only through the dashboard API; it never opens the
+database file. The `calibrate` subcommand replays the two live reference
+configurations and prints the live results next to them. Example:
+`python3 tools/close_scan.py calibrate`. The `run` subcommand scans one
+configuration and prints one result row. Example:
+`python3 tools/close_scan.py run --entry immediate --confirm-minutes 30
+--minute-min 30 --minute-max 35 --drive-atr-frac 0.3 --target-frac 0.25
+--stop-frac 0.75`. Calibrate against the live replays before you trust a new
+configuration. On 2026-08-19 a touch-fill scan shipped an algorithm that
+failed live; this close-based harness predicted both live replays within
+three points.
