@@ -1006,6 +1006,11 @@ def _prepare_cycle(
         )
         return _CyclePlan("full", replace_algos, True)
 
+    # A full recalculation replaces every output in its first bounded batch.
+    # Rebuild missing upstream rows before attempting targeted algo-tail repairs.
+    if _pending(connection, settings, limit=1, stop_event=stop_event):
+        return _CyclePlan("pending")
+
     incomplete_algos = _incomplete_algo_kinds(
         connection, settings, stop_event=stop_event
     )

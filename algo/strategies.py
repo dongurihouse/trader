@@ -18,6 +18,36 @@ from algo_types import (
 from common.validation import require_float, require_int
 
 
+def _percentile(values: list[float], quantile: float) -> float:
+    ordered = sorted(values)
+    if not ordered:
+        raise EvaluationError("percentile requires at least one value")
+    position = (len(ordered) - 1) * quantile
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    portion = position - lower
+    return ordered[lower] + portion * (ordered[upper] - ordered[lower])
+
+
+def _sentiment_pullback_volatility_unit(
+    context: AlgoContext, entry_ts: int
+) -> float:
+    lookback_minutes = int(context.parameters["vol_lookback_minutes"])
+    floor_pct = float(context.parameters["vol_floor_pct"])
+    cap_pct = float(context.parameters["vol_cap_pct"])
+    bars = context.read_bars(entry_ts - lookback_minutes * 60, entry_ts)
+    returns = [
+        abs((float(current["close"]) / float(previous["close"]) - 1.0) * 100.0)
+        for previous, current in zip(bars, bars[1:])
+        if int(current["ts"]) - int(previous["ts"]) == 60
+        and float(previous["close"]) > 0.0
+    ]
+    if len(returns) < int(context.parameters["min_vol_bars"]):
+        return floor_pct
+    unit = _percentile(returns, float(context.parameters["vol_percentile"]))
+    return max(floor_pct, min(cap_pct, unit))
+
+
 def _algo_crossover(context: AlgoContext) -> tuple[bool, bool, int]:
     inputs = context.inputs
     previous = context.previous
@@ -114,9 +144,6 @@ def _algo_sentiment_pullback(context: AlgoContext) -> tuple[bool, bool, int]:
     early_minutes = int(context.parameters["early_minutes"])
     early_hold = int(context.parameters["early_hold_minutes"])
     late_hold = int(context.parameters["late_hold_minutes"])
-    take_profit = float(context.parameters["take_profit_pct"])
-    stop_loss = float(context.parameters["stop_loss_pct"])
-    giveback_pct = float(context.parameters["giveback_pct"])
     flat_minutes = float(context.parameters["flat_minutes"])
     pattern_exit = bool(context.parameters["pattern_exit"])
     if session is None or price is None:
@@ -126,6 +153,12 @@ def _algo_sentiment_pullback(context: AlgoContext) -> tuple[bool, bool, int]:
         entry = context.open_entries[0]
         direction = int(entry["direction"])
         entry_price = float(entry["price"])
+        volatility_unit = _sentiment_pullback_volatility_unit(
+            context, int(entry["ts"])
+        )
+        take_profit = float(context.parameters["tp_vol_mult"]) * volatility_unit
+        giveback_pct = float(context.parameters["gb_vol_mult"]) * volatility_unit
+        stop_loss = float(context.parameters["sl_vol_mult"]) * volatility_unit
         elapsed = (int(session["ts"]) - int(entry["ts"])) / 60.0
         entry_minute = (int(entry["ts"]) - int(session["open_ts"])) / 60.0
         hold_minutes = early_hold if entry_minute < early_minutes else late_hold
@@ -701,27 +734,50 @@ def _normalize_sentiment_pullback(
         "early_minutes",
         "early_hold_minutes",
         "late_hold_minutes",
-        "take_profit_pct",
-        "stop_loss_pct",
-        "giveback_pct",
+        "tp_vol_mult",
+        "gb_vol_mult",
+        "sl_vol_mult",
+        "vol_percentile",
+        "vol_lookback_minutes",
+        "vol_floor_pct",
+        "vol_cap_pct",
+        "min_vol_bars",
         "pattern_exit",
         "flat_minutes",
         "capital_fraction",
     }
     _parameter_keys(parameters, names)
     capital_fraction = _parameter_number(parameters, "capital_fraction")
-    giveback_pct = _parameter_number(parameters, "giveback_pct")
+    tp_vol_mult = _parameter_number(parameters, "tp_vol_mult")
+    gb_vol_mult = _parameter_number(parameters, "gb_vol_mult")
+    sl_vol_mult = _parameter_number(parameters, "sl_vol_mult")
+    vol_percentile = _parameter_number(parameters, "vol_percentile")
+    vol_floor_pct = _parameter_number(parameters, "vol_floor_pct")
+    vol_cap_pct = _parameter_number(parameters, "vol_cap_pct")
     if capital_fraction <= 0.0 or capital_fraction > 0.5:
         raise ConfigError("capital_fraction must be > 0 and <= 0.5")
-    if giveback_pct <= 0.0:
-        raise ConfigError("giveback_pct must be > 0")
+    if min(tp_vol_mult, gb_vol_mult, sl_vol_mult) <= 0.0:
+        raise ConfigError("volatility multipliers must be > 0")
+    if gb_vol_mult >= sl_vol_mult:
+        raise ConfigError("gb_vol_mult must be less than sl_vol_mult")
+    if vol_percentile <= 0.0 or vol_percentile > 1.0:
+        raise ConfigError("vol_percentile must be > 0 and <= 1")
+    if vol_floor_pct <= 0.0 or vol_floor_pct > vol_cap_pct:
+        raise ConfigError("volatility bounds must satisfy 0 < floor <= cap")
     return {
         "early_minutes": _parameter_int(parameters, "early_minutes"),
         "early_hold_minutes": _parameter_int(parameters, "early_hold_minutes"),
         "late_hold_minutes": _parameter_int(parameters, "late_hold_minutes"),
-        "take_profit_pct": _parameter_number(parameters, "take_profit_pct"),
-        "stop_loss_pct": _parameter_number(parameters, "stop_loss_pct"),
-        "giveback_pct": giveback_pct,
+        "tp_vol_mult": tp_vol_mult,
+        "gb_vol_mult": gb_vol_mult,
+        "sl_vol_mult": sl_vol_mult,
+        "vol_percentile": vol_percentile,
+        "vol_lookback_minutes": _parameter_int(
+            parameters, "vol_lookback_minutes", minimum=1
+        ),
+        "vol_floor_pct": vol_floor_pct,
+        "vol_cap_pct": vol_cap_pct,
+        "min_vol_bars": _parameter_int(parameters, "min_vol_bars", minimum=1),
         "pattern_exit": _parameter_bool(parameters, "pattern_exit"),
         "flat_minutes": _parameter_number(parameters, "flat_minutes"),
         "capital_fraction": capital_fraction,
