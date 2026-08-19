@@ -208,3 +208,41 @@ The worst trade shows the open risk of the geometry. A CRWV long on
 below the entry. The stop never hit, and the flat rule closed the unit at
 -8.65 points after 365 minutes. A large drive sets a large stop; a risk cap
 for extreme drives is a possible refinement.
+
+## Sentiment pullback volatility-scaled exits
+
+Measured 2026-08-19 on the complete fixed-history ledger for all eleven
+configured tickers. A bracket simulation reproduced all 41 recorded exits
+before the sweep. The original six-ticker cohort had 23 entries. Its median
+entry volatility unit was 0.363052%, which gave neutral starting multipliers
+of 2.7544 profit, 2.0658 give-back, and 4.1316 stop.
+
+The bounded sweep varied each multiplier by up to 30% and also varied the
+volatility floor and cap. The selected setting uses `tp_vol_mult=1.9281`,
+`gb_vol_mult=1.4461`, `sl_vol_mult=2.8921`, `vol_floor_pct=0.10`, and
+`vol_cap_pct=0.45`. The 240-minute lookback, 0.90 percentile, and 30-return
+minimum remain at their starting values. The runner-up raised only the stop
+multiplier to 3.5119 and produced the same exits and metrics.
+
+| replay | discovery trades / win rate / gross return | forward trades / win rate / gross return | all trades / win rate / gross return | max drawdown |
+| --- | ---: | ---: | ---: | ---: |
+| fixed-percent baseline | 19 / 52.6% / +0.9882% | 22 / 59.1% / +8.6695% | 41 / 56.1% / +9.6577% | -3.6991% |
+| selected volatility exits | 19 / 52.6% / +1.6057% | 22 / 63.6% / +10.8802% | 41 / 58.5% / +12.4859% | -3.6464% |
+| runner-up stop 3.5119 | 19 / 52.6% / +1.6057% | 22 / 63.6% / +10.8802% | 41 / 58.5% / +12.4859% | -3.6464% |
+
+The original cohort retained 16 wins in 23 trades and improved from +9.1068%
+to +9.4322% gross, within the 10% guardrail. The five added tickers improved
+from 7/18 wins, 38.9%, and +0.5509% gross to 8/18 wins, 44.4%, and +3.0537%
+gross. The exact service recalculation matched the selected simulation: 41
+closed trades, 24 wins, 17 losses, and no open positions. Every ticker had
+624,280 output rows through 2026-08-19 16:14 UTC.
+
+Config validation accepted the selected setting and rejected a missing, zero,
+or negative multiplier. Replacing every bar after three evaluation minutes
+with an extreme price did not change the algo output. The check included the
+early ASTS entry on 2026-07-15 and late CBRS and MU entries on 2026-08-13 and
+2026-08-19. The service cycle planner now finishes missing upstream outputs
+before it attempts a targeted algo-tail repair, so an explicit bounded full
+recalculation can finish after its first replacement batch.
+
+These results exclude fees, slippage, and sizing; the sample remains small.
