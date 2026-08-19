@@ -4,10 +4,10 @@ Status: review, 2026-08-19. Author: code audit.
 
 ## Summary
 
-The codebase is about 17,000 tracked lines. It is well structured and the
-service isolation is clean. The footprint can drop by roughly **1,300 to 1,700
-lines (8 to 10 percent)** with no behavior loss, and the core engine can regain
-a design promise it has drifted from.
+The codebase is about 19,600 tracked lines excluding the dependency lock. It is
+well structured and the service isolation is clean. The first pass removed 711
+net tracked lines. Accept each remaining cleanup only when its measured diff
+keeps the overall footprint smaller without changing a supported contract.
 
 Three facts frame every recommendation below:
 
@@ -21,16 +21,16 @@ Three facts frame every recommendation below:
    the `broker_positions` write path in `storage.py` are correct and careful. Do
    not simplify them for footprint. They are out of scope for this work.
 
-The single largest win is dead CSS: about a quarter of the 2,774-line
-stylesheet is unreferenced. The single most valuable win is architectural:
-two signals have grown bespoke code inside the generic engine, and that breaks
-the design's central promise.
+The largest confirmed win was dead CSS: 690 stylesheet lines were removed in
+`fde80de`. The most valuable remaining win is architectural: two signals have
+grown bespoke code inside the generic engine, and that breaks the design's
+central promise.
 
 ## Priority table
 
 | # | Finding | Type | Area | Est. lines | Risk |
 |---|---------|------|------|-----------:|------|
-| 1 | Dead CSS from a removed UI | delete | dash | 620–670 | none |
+| 1 | Dead CSS from a removed UI | completed | dash | -690 | verified |
 | 2 | Write-only `shape_v1` output (`funnel`, `evidence`, price projections) | delete | algo | 90–110 | low* |
 | 3 | Duplicated health-server `Service` scaffold | reuse | bars+algo | 60–80 | med |
 | 4 | Signal-specific warmup/repair inside the generic engine | restructure | algo | 100+ | med |
@@ -41,7 +41,7 @@ the design's central promise.
 | 9 | `_shape_forecast` and `_relative_momentum` server methods near-identical | reuse | dash | 40–55 | low |
 | 10 | One-time schema migration code | delete | algo | ~60 | med** |
 | 11 | Duplicated helpers between `broker.py` and `notify.py` | reuse | algo | ~12 | low |
-| 12 | `EASTERN` timezone defined five times | reuse | all | ~8 | none |
+| 12 | Reuse the shared `EASTERN` timezone | completed | all | included | verified |
 
 \* Low risk only after you confirm no out-of-repo reader of the persisted output
 JSON (see finding 2). \*\* Medium risk only until you confirm the live database
@@ -192,34 +192,18 @@ helper removes 40 to 55 lines.
   [notify.py:45](algo/notify.py:45). `_clean` ([broker.py:40](algo/broker.py:40))
   and `_field` ([notify.py:160](algo/notify.py:160)) differ only in a default.
   Extract shared text helpers into `common/`.
-- `EASTERN = ZoneInfo("America/New_York")` is defined five times:
-  [config.py:15](common/config.py:15), [shape_signal.py:17](algo/shape_signal.py:17),
-  [bars_service.py:55](bars/bars_service.py:55),
-  [bar_store.py:20](bars/bar_store.py:20), [server.py:33](dash/server.py:33).
-  Import the one in `common/config.py`.
+- `EASTERN` now comes from [config.py:15](common/config.py:15) across the bars,
+  algo, and dashboard modules.
 
 ---
 
 ## Dead-code and ceremony findings
 
-### 1 and 6. The dashboard carries a removed UI
+### 1 and 6. Removed dashboard UI
 
-The stylesheet keeps about 620 to 670 lines for a UI that no longer exists: an
-overview grid, a detail drawer, a node list, a service list, a timeline, and a
-market header. Every class was checked against all HTML and JavaScript and has
-zero references. Examples confirmed dead: `icon-button`, `detail-drawer`,
-`timeline-item`, `metric-card`, `node-row`, `summary-grid`, `algo-filter`.
-
-The dead blocks sit at [styles.css:651](dash/static/styles.css:651) through 785,
-[styles.css:1176](dash/static/styles.css:1176) through 1187,
-[styles.css:1305](dash/static/styles.css:1305) through 1324, the region
-[styles.css:1333](dash/static/styles.css:1333) through 1867 (except the live
-`table`/`th`/`td` at 1587-1624 and `.positive`/`.negative` at 1626-1627), and
-several media-query blocks near 2370, 2513, 2577, and 2611.
-
-Keep the generic `table`, `th`, `td`, `.positive`, `.negative`, and `.algo-table`
-rules. They are live: `.positive`, `.negative`, and `.algo-table` each have
-references in the current HTML and JavaScript.
+The confirmed dead CSS was removed in `fde80de`. The chart, algorithm, log, and
+trade pages passed desktop and mobile visual checks. Live table, status, toast,
+chart, ticker, and trade-dashboard rules remain.
 
 The `/api/detail` endpoint is also dead. No client references it.
 
@@ -228,7 +212,8 @@ The `/api/detail` endpoint is also dead. No client references it.
   `node_detail`)
 - [server.py:1134](dash/server.py:1134) the `/api/detail` route
 
-Both are pure deletions. Verified by grep across every HTML and JavaScript file.
+The endpoint still has no in-repository client, but removal requires an explicit
+decision that it is not a supported API or future detail-view contract.
 
 ### 10. One-time schema migration code
 
@@ -297,8 +282,8 @@ cache lifetime, only the plumbing.
 
 ## Suggested order of work
 
-1. Delete the dead CSS and the dead `/api/detail` endpoint. Pure deletion, no
-   test needed beyond loading each page. (Findings 1 and 6.)
+1. Decide whether `/api/detail` is a supported API before deleting it. The dead
+   CSS portion is complete. (Findings 1 and 6.)
 2. Add `common/` helpers for the read-only connect, the shared text helpers, and
    `EASTERN`; point all call sites at them. (Findings 7, 11, 12.)
 3. Consolidate the frontend formatters into `common.js`. (Finding 8.)
